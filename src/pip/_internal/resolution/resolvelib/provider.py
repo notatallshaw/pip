@@ -1,6 +1,6 @@
 import collections
 import math
-from typing import TYPE_CHECKING, Dict, Iterable, Iterator, Mapping, Sequence, Union
+from typing import TYPE_CHECKING, Dict, Iterable, Iterator, Mapping, Sequence, Union, Set
 
 from pip._vendor.resolvelib.providers import AbstractProvider
 
@@ -72,6 +72,7 @@ class PipProvider(_ProviderBase):
         resolutions: Mapping[str, Candidate],
         candidates: Mapping[str, Iterator[Candidate]],
         information: Mapping[str, Iterator["PreferenceInformation"]],
+        conflicting_projects: Set[str],
     ) -> "Preference":
         """Produce a sort key for given requirement based on preference.
 
@@ -132,8 +133,16 @@ class PipProvider(_ProviderBase):
         # while we work on "proper" branch pruning techniques.
         delay_this = identifier == "setuptools"
 
+        # Focus on conflicting projects
+        if conflicting_projects:
+            project_name = list(information[identifier])[0].requirement.project_name
+            conflicting_project = project_name in conflicting_projects
+        else:
+            conflicting_project = False
+
         return (
             not requires_python,
+            conflicting_project,
             delay_this,
             not direct,
             not pinned,

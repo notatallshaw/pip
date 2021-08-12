@@ -113,6 +113,7 @@ class Resolution(object):
         self._p = provider
         self._r = reporter
         self._states = []
+        self._conflicting_projects = set()
 
     @property
     def state(self):
@@ -185,6 +186,7 @@ class Resolution(object):
                 self.state.criteria,
                 operator.attrgetter("information"),
             ),
+            conflicting_projects=self._conflicting_projects
         )
 
     def _is_current_pin_satisfying(self, name, criterion):
@@ -328,6 +330,32 @@ class Resolution(object):
         # No way to backtrack anymore.
         return False
 
+    def _identify_conflicting_projects(self, failure_causes):
+        conflicting_projects = set()
+        for failure_case in failure_causes:
+            for information in failure_case.information:
+                conflicting_projects.add(information.requirement.project_name)
+        
+        state = self.state[-1]
+        prev_conflicting_project_count = None
+        conflicting_project_count = len(conflicting_projects)
+        while prev_conflicting_project_count != conflicting_project_count:
+            prev_conflicting_project_count = conflicting_project_count
+            for state_value in state.values():
+                for information in state_value.information:
+                    if information.parent and information.requirement.project_name != "<Python from Requires-Python>":
+                        # Add children
+                        if information.parent.project_name in conflicting_projects:
+                            conflicting_projects.add(information.requirement.project_name)
+
+                        # Add parents
+                        if information.requirement.project_name in conflicting_projects:
+                            conflicting_projects.add(information.parent.project_name)
+            conflicting_project_count = len(conflicting_projects)
+        
+        return conflicting_projects
+        
+
     def resolve(self, requirements, max_rounds):
         if self._states:
             raise RuntimeError("already resolved")
@@ -347,6 +375,8 @@ class Resolution(object):
         # pinning the virtual "root" package in the graph.
         self._push_new_state()
 
+        failure_causes = []
+        first_conflicting_projects = True
         for round_index in range(max_rounds):
             self._r.starting_round(index=round_index)
 
@@ -366,9 +396,35 @@ class Resolution(object):
             failure_causes = self._attempt_to_pin_criterion(name)
 
             if failure_causes:
+                # Identify the conflicting requirements to help the next round
+                self._conflicting_projects = self._identify_conflicting_projects(failure_causes)
+
                 # Backtrack if pinning fails. The backtrack process puts us in
                 # an unpinned state, so we can work on it in the next round.
                 success = self._backtrack()
+
+                # The first time we identify conflicting projects some of them are
+                # going to be pinned, we need to rewind back to a state where
+                # they are no longer pinned otherwise we will end up down some 
+                # path with pinned requirements that conflict
+                #
+                # It may also be the case that we need to do this if the
+                # conflicting projects change
+                if first_conflicting_projects and self._conflicting_projects:
+                    first_conflicting_projects = False
+                    information = IteratorMapping(
+                        self.state.criteria,
+                        operator.attrgetter("information"),
+                    )
+                    while True:
+                        pinned_projects = {list(information[key])[0].requirement.project_name
+                                        for key, criterion in self.state.criteria.items()
+                                        if self._is_current_pin_satisfying(key, criterion)}
+                        
+                        if self._conflicting_projects.intersection(pinned_projects):
+                            self._states.pop()
+                        else:
+                            break
 
                 # Dead ends everywhere. Give up.
                 if not success:
