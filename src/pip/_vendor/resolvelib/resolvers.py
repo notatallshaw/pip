@@ -399,10 +399,6 @@ class Resolution(object):
                 # Identify the conflicting requirements to help the next round
                 self._conflicting_projects = self._identify_conflicting_projects(failure_causes)
 
-                # Backtrack if pinning fails. The backtrack process puts us in
-                # an unpinned state, so we can work on it in the next round.
-                success = self._backtrack()
-
                 # The first time we identify conflicting projects some of them are
                 # going to be pinned, we need to rewind back to a state where
                 # they are no longer pinned otherwise we will end up down some 
@@ -425,6 +421,12 @@ class Resolution(object):
                             self._states.pop()
                         else:
                             break
+                    
+                    continue
+
+                # Backtrack if pinning fails. The backtrack process puts us in
+                # an unpinned state, so we can work on it in the next round.
+                success = self._backtrack()
 
                 # Dead ends everywhere. Give up.
                 if not success:
