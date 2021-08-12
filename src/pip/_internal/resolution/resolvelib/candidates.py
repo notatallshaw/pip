@@ -153,7 +153,15 @@ class _InstallRequirementBackedCandidate(Candidate):
         self._ireq = ireq
         self._name = name
         self._version = version
-        self.dist = self._prepare()
+        self._is_prepared = False
+        self._dist = None
+
+    @property
+    def dist(self) -> Distribution:
+        if not self._is_prepared:
+            self._dist = self._prepare()
+            self._is_prepared = True
+        return self._dist
 
     def __str__(self) -> str:
         return f"{self.name} {self.version}"
