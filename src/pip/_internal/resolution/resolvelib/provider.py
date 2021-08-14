@@ -72,7 +72,7 @@ class PipProvider(_ProviderBase):
         resolutions: Mapping[str, Candidate],
         candidates: Mapping[str, Iterator[Candidate]],
         information: Mapping[str, Iterator["PreferenceInformation"]],
-        conflicting_projects: Set[str],
+        conflicting_projects: Dict[str, int],
     ) -> "Preference":
         """Produce a sort key for given requirement based on preference.
 
@@ -136,9 +136,9 @@ class PipProvider(_ProviderBase):
         # Focus on conflicting projects
         if conflicting_projects:
             project_name = list(information[identifier])[0].requirement.project_name
-            conflicting_project = project_name in conflicting_projects
+            conflicting_project = -conflicting_projects.get(project_name, 0)
         else:
-            conflicting_project = False
+            conflicting_project = 0
 
         return (
             not requires_python,

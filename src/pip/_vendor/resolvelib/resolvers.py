@@ -113,7 +113,7 @@ class Resolution(object):
         self._p = provider
         self._r = reporter
         self._states = []
-        self._conflicting_projects = set()
+        self._conflicting_projects = {}
 
     @property
     def state(self):
@@ -331,27 +331,30 @@ class Resolution(object):
         return False
 
     def _identify_conflicting_projects(self, failure_causes):
-        conflicting_projects = set()
+        conflicting_projects = {}
         for failure_case in failure_causes:
             for information in failure_case.information:
-                conflicting_projects.add(information.requirement.project_name)
+                conflicting_projects[information.requirement.project_name] = 1
         
         state = self.state[-1]
-        prev_conflicting_project_count = None
-        conflicting_project_count = len(conflicting_projects)
-        while prev_conflicting_project_count != conflicting_project_count:
-            prev_conflicting_project_count = conflicting_project_count
+        next_conflicting_projects = None
+        distance_from_conflict = 1
+        while next_conflicting_projects != conflicting_projects:
+            next_conflicting_projects = conflicting_projects.copy()
+            distance_from_conflict += 1
             for state_value in state.values():
                 for information in state_value.information:
                     if information.parent and information.requirement.project_name != "<Python from Requires-Python>":
                         # Add children
-                        if information.parent.project_name in conflicting_projects:
-                            conflicting_projects.add(information.requirement.project_name)
+                        if information.parent.project_name in next_conflicting_projects:
+                            if information.requirement.project_name not in next_conflicting_projects:
+                                next_conflicting_projects[information.requirement.project_name] = distance_from_conflict
 
                         # Add parents
-                        if information.requirement.project_name in conflicting_projects:
-                            conflicting_projects.add(information.parent.project_name)
-            conflicting_project_count = len(conflicting_projects)
+                        if information.requirement.project_name in next_conflicting_projects:
+                            if information.parent.project_name not in next_conflicting_projects:
+                                next_conflicting_projects[information.parent.project_name] = distance_from_conflict
+            conflicting_projects = next_conflicting_projects
         
         return conflicting_projects
         
@@ -406,22 +409,21 @@ class Resolution(object):
                 #
                 # It may also be the case that we need to do this if the
                 # conflicting projects change
-                if first_conflicting_projects and self._conflicting_projects:
-                    first_conflicting_projects = False
-                    information = IteratorMapping(
+                information = IteratorMapping(
                         self.state.criteria,
                         operator.attrgetter("information"),
                     )
+                if self._conflicting_projects and first_conflicting_projects:
+                    first_conflicting_projects = False
                     while True:
                         pinned_projects = {list(information[key])[0].requirement.project_name
-                                        for key, criterion in self.state.criteria.items()
-                                        if self._is_current_pin_satisfying(key, criterion)}
-                        
-                        if self._conflicting_projects.intersection(pinned_projects):
+                                           for key, criterion in self.state.criteria.items()
+                                           if self._is_current_pin_satisfying(key, criterion)}
+
+                        if set(self._conflicting_projects.keys()).intersection(pinned_projects):
                             self._states.pop()
                         else:
                             break
-                    
                     continue
 
                 # Backtrack if pinning fails. The backtrack process puts us in
