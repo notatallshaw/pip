@@ -332,29 +332,32 @@ class Resolution(object):
 
     def _identify_conflicting_projects(self, failure_causes):
         conflicting_projects = {}
+        distance_from_conflict = 0
         for failure_case in failure_causes:
             for information in failure_case.information:
-                conflicting_projects[information.requirement.project_name] = 1
+                conflicting_projects[information.requirement.project_name] = distance_from_conflict
         
         state = self.state[-1]
-        next_conflicting_projects = None
-        distance_from_conflict = 1
-        while next_conflicting_projects != conflicting_projects:
-            next_conflicting_projects = conflicting_projects.copy()
+        next_conflicting_projects = conflicting_projects.copy()
+        while True:
             distance_from_conflict += 1
             for state_value in state.values():
                 for information in state_value.information:
                     if information.parent and information.requirement.project_name != "<Python from Requires-Python>":
                         # Add children
-                        if information.parent.project_name in next_conflicting_projects:
-                            if information.requirement.project_name not in next_conflicting_projects:
+                        if information.parent.project_name in conflicting_projects:
+                            if information.requirement.project_name not in conflicting_projects:
                                 next_conflicting_projects[information.requirement.project_name] = distance_from_conflict
 
                         # Add parents
-                        if information.requirement.project_name in next_conflicting_projects:
-                            if information.parent.project_name not in next_conflicting_projects:
+                        if information.requirement.project_name in conflicting_projects:
+                            if information.parent.project_name not in conflicting_projects:
                                 next_conflicting_projects[information.parent.project_name] = distance_from_conflict
-            conflicting_projects = next_conflicting_projects
+
+            if conflicting_projects == next_conflicting_projects:
+                break
+            else:
+                conflicting_projects = next_conflicting_projects.copy()
         
         return conflicting_projects
         

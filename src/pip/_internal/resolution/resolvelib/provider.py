@@ -136,9 +136,9 @@ class PipProvider(_ProviderBase):
         # Focus on conflicting projects
         if conflicting_projects:
             project_name = list(information[identifier])[0].requirement.project_name
-            conflicting_project = -conflicting_projects.get(project_name, 0)
+            conflicting_project = conflicting_projects.get(project_name, -1)
         else:
-            conflicting_project = 0
+            conflicting_project = -1
 
         return (
             not requires_python,
