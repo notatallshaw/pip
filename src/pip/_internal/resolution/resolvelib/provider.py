@@ -132,23 +132,31 @@ class PipProvider(_ProviderBase):
         # delaying Setuptools helps reduce branches the resolver has to check.
         # This serves as a temporary fix for issues like "apache-airlfow[all]"
         # while we work on "proper" branch pruning techniques.
-        delay_this = identifier == "setuptools"
+        delay_this = identifier == "setuptools"      
 
-        responsible_for_failure = False
+
+
+        is_failure_cause_ancestor = collections.defaultdict(bool)
         for failure_cause in failure_causes:
             if identifier == failure_cause.requirement.name:
-                responsible_for_failure = True
-                break
-            if failure_cause.parent and identifier == failure_cause.parent.name:
-                responsible_for_failure = True
-                break
+                is_failure_cause_ancestor[identifier] = True
+            elif failure_cause.parent and identifier == failure_cause.parent.name:
+                is_failure_cause_ancestor[failure_cause.parent.name] = True
+
+        prev_is_failure_cause_ancestor = None
+        while is_failure_cause_ancestor != prev_is_failure_cause_ancestor:
+            prev_is_failure_cause_ancestor = is_failure_cause_ancestor.copy()
+            for _known_failure_ancestor in prev_is_failure_cause_ancestor:
+                for _, parent in information[_known_failure_ancestor]:
+                    if parent is not None:
+                        is_failure_cause_ancestor[parent.name] = True
 
         return (
             not requires_python,
             delay_this,
             not direct,
             not pinned,
-            not responsible_for_failure,
+            not is_failure_cause_ancestor[identifier],
             inferred_depth,
             requested_order,
             not unfree,
