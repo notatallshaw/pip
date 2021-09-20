@@ -113,6 +113,7 @@ class Resolution(object):
         self._p = provider
         self._r = reporter
         self._states = []
+        self.backtrack_count = 0
 
     @property
     def state(self):
@@ -265,6 +266,7 @@ class Resolution(object):
             the new Z and go back to step 2.
         4b. If the incompatibilities apply cleanly, end backtracking.
         """
+        self.backtrack_count += 1
         while len(self._states) >= 3:
             # Remove the state that triggered backtracking.
             del self._states[-1]
@@ -340,6 +342,7 @@ class Resolution(object):
             try:
                 self._add_to_criteria(self.state.criteria, r, parent=None)
             except RequirementsConflicted as e:
+                print(f'Total backtracks: {self.backtrack_count}')
                 raise ResolutionImpossible(e.criterion.information)
 
         # The root state is saved as a sentinel so the first ever pin can have
@@ -359,6 +362,7 @@ class Resolution(object):
             # All criteria are accounted for. Nothing more to pin, we are done!
             if not unsatisfied_names:
                 self._r.ending(state=self.state)
+                print(f'Total backtracks: {self.backtrack_count}')
                 return self.state
 
             # Choose the most preferred unpinned criterion to try.
@@ -373,6 +377,7 @@ class Resolution(object):
                 # Dead ends everywhere. Give up.
                 if not success:
                     causes = [i for c in failure_causes for i in c.information]
+                    print(f'Total backtracks: {self.backtrack_count}')
                     raise ResolutionImpossible(causes)
             else:
                 # Pinning was successful. Push a new state to do another pin.
@@ -380,6 +385,7 @@ class Resolution(object):
 
             self._r.ending_round(index=round_index, state=self.state)
 
+        print(f'Total backtracks: {self.backtrack_count}')
         raise ResolutionTooDeep(max_rounds)
 
 
