@@ -366,12 +366,14 @@ class Resolution(object):
             # Choose the most preferred unpinned criterion to try.
             name = min(unsatisfied_names, key=self._get_preference)
             failure_causes = self._attempt_to_pin_criterion(name)
+            self._failure_causes = [
+                i for c in failure_causes for i in c.information
+                ]
 
             if failure_causes:
                 # Backtrack if pinning fails. The backtrack process puts us in
                 # an unpinned state, so we can work on it in the next round.
                 success = self._backtrack()
-                self._failure_causes = [i for c in failure_causes for i in c.information]
 
                 # Dead ends everywhere. Give up.
                 if not success:

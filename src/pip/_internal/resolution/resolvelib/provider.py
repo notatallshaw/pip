@@ -62,8 +62,6 @@ class PipProvider(_ProviderBase):
         self._upgrade_strategy = upgrade_strategy
         self._user_requested = user_requested
         self._known_depths: Dict[str, float] = collections.defaultdict(lambda: math.inf)
-        self._prev_failure_casues = []
-        self._is_failure_cause_ancestor = collections.defaultdict(bool)
 
     def identify(self, requirement_or_candidate: Union[Requirement, Candidate]) -> str:
         return requirement_or_candidate.name
@@ -137,32 +135,24 @@ class PipProvider(_ProviderBase):
         delay_this = identifier == "setuptools"      
 
 
-        if self._prev_failure_casues != failure_causes:
-            self._prev_failure_casues = failure_causes
-
-            is_failure_cause_ancestor = collections.defaultdict(bool)
-            for failure_cause in failure_causes:
-                if identifier == failure_cause.requirement.name:
-                    is_failure_cause_ancestor[identifier] = True
-                elif failure_cause.parent and identifier == failure_cause.parent.name:
-                    is_failure_cause_ancestor[failure_cause.parent.name] = True
-
-            prev_is_failure_cause_ancestor = None
-            while is_failure_cause_ancestor != prev_is_failure_cause_ancestor:
-                prev_is_failure_cause_ancestor = is_failure_cause_ancestor.copy()
-                for _known_failure_ancestor in prev_is_failure_cause_ancestor:
-                    for _, parent in information[_known_failure_ancestor]:
-                        if parent is not None:
-                            is_failure_cause_ancestor[parent.name] = True
-            
-            self._is_failure_cause_ancestor = is_failure_cause_ancestor
+        # Prefer the causes of failures. In general this speeds up backtracking,
+        # on the assumption that the problem resolving the dependency tree is
+        # related to the failures that are currently happening
+        responsible_for_failure = False
+        for failure_cause in failure_causes:
+            if identifier == failure_cause.requirement.name:
+                responsible_for_failure = True
+                break
+            if failure_cause.parent and identifier == failure_cause.parent.name:
+                responsible_for_failure = True
+                break
 
         return (
             not requires_python,
             delay_this,
             not direct,
             not pinned,
-            not self._is_failure_cause_ancestor[identifier],
+            not responsible_for_failure,
             inferred_depth,
             requested_order,
             not unfree,
