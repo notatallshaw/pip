@@ -99,7 +99,7 @@ class ResolutionTooDeep(ResolutionError):
 
 
 # Resolution state in a round.
-State = collections.namedtuple("State", "mapping criteria failure_causes")
+State = collections.namedtuple("State", "mapping criteria backtrack_causes")
 
 
 class Resolution(object):
@@ -132,7 +132,7 @@ class Resolution(object):
         state = State(
             mapping=base.mapping.copy(),
             criteria=base.criteria.copy(),
-            failure_causes=base.criteria.copy(),
+            backtrack_causes=base.backtrack_causes.copy(),
         )
         self._states.append(state)
 
@@ -187,7 +187,7 @@ class Resolution(object):
                 self.state.criteria,
                 operator.attrgetter("information"),
             ),
-            failure_causes=self.state.failure_causes
+            backtrack_causes=self.state.backtrack_causes
         )
 
     def _is_current_pin_satisfying(self, name, criterion):
@@ -211,6 +211,7 @@ class Resolution(object):
 
         causes = []
         for candidate in criterion.candidates:
+
             try:
                 criteria = self._get_updated_criteria(candidate)
             except RequirementsConflicted as e:
@@ -236,13 +237,11 @@ class Resolution(object):
             self.state.mapping.pop(name, None)
             self.state.mapping[name] = candidate
 
-            self.state.failure_causes[:] = []
+            return []
 
         # All candidates tried, nothing works. This criterion is a dead
         # end, signal for backtracking.
-        self.state.failure_causes[:] = [
-                i for c in causes for i in c.information
-            ]
+        return causes
 
     def _backtrack(self):
         """Perform backtracking.
@@ -344,7 +343,7 @@ class Resolution(object):
         self._states = [
             State(mapping=collections.OrderedDict(),
                   criteria={},
-                  failure_causes=[])
+                  backtrack_causes=[])
             ]
         for r in requirements:
             try:
@@ -357,6 +356,7 @@ class Resolution(object):
         # something to backtrack to if it fails. The root state is basically
         # pinning the virtual "root" package in the graph.
         self._push_new_state()
+
 
         for round_index in range(max_rounds):
             self._r.starting_round(index=round_index)
@@ -375,9 +375,12 @@ class Resolution(object):
 
             # Choose the most preferred unpinned criterion to try.
             name = min(unsatisfied_names, key=self._get_preference)
-            self._attempt_to_pin_criterion(name)
+            causes = self._attempt_to_pin_criterion(name)
+            backtrack_causes = [
+                        i for c in causes for i in c.information
+                    ]
 
-            if self.state.failure_causes:
+            if causes:
                 # Backtrack if pinning fails. The backtrack process puts us in
                 # an unpinned state, so we can work on it in the next round.
                 success = self._backtrack()
@@ -385,11 +388,12 @@ class Resolution(object):
                 # Dead ends everywhere. Give up.
                 if not success:
                     print(f'Total backtracks: {self.backtrack_count}')
-                    raise ResolutionImpossible(self.state.failure_causes)
+                    raise ResolutionImpossible(backtrack_causes)
             else:
                 # Pinning was successful. Push a new state to do another pin.
                 self._push_new_state()
 
+            self.state.backtrack_causes[:] = backtrack_causes
             self._r.ending_round(index=round_index, state=self.state)
 
         print(f'Total backtracks: {self.backtrack_count}')

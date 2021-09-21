@@ -72,7 +72,7 @@ class PipProvider(_ProviderBase):
         resolutions: Mapping[str, Candidate],
         candidates: Mapping[str, Iterator[Candidate]],
         information: Mapping[str, Iterator["PreferenceInformation"]],
-        failure_causes: Sequence["RequirementInformation"]
+        backtrack_causes: Sequence["RequirementInformation"]
     ) -> "Preference":
         """Produce a sort key for given requirement based on preference.
 
@@ -133,12 +133,14 @@ class PipProvider(_ProviderBase):
         # while we work on "proper" branch pruning techniques.
         delay_this = identifier == "setuptools"
 
+        is_backtrack_cause = self.is_backtrack_cause(identifier, backtrack_causes)
+
         return (
             not requires_python,
             delay_this,
-            self.is_failure_cause(identifier, failure_causes),
             not direct,
             not pinned,
+            not is_backtrack_cause,
             inferred_depth,
             requested_order,
             not unfree,
@@ -199,10 +201,10 @@ class PipProvider(_ProviderBase):
         return [r for r in candidate.iter_dependencies(with_requires) if r is not None]
     
     @staticmethod
-    def is_failure_cause(identifier: str, failure_causes: Sequence["RequirementInformation"]):
-        for failure_cause in failure_causes:
-            if identifier == failure_cause.requirement.name:
+    def is_backtrack_cause(identifier: str, backtrack_causes: Sequence["RequirementInformation"]):
+        for backtrack_cause in backtrack_causes:
+            if identifier == backtrack_cause.requirement.name:
                 return True
-            if failure_cause.parent and identifier == failure_cause.parent.name:
+            if backtrack_cause.parent and identifier == backtrack_cause.parent.name:
                 return True
         return False
