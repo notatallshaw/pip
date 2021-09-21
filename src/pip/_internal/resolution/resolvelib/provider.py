@@ -72,6 +72,7 @@ class PipProvider(_ProviderBase):
         resolutions: Mapping[str, Candidate],
         candidates: Mapping[str, Iterator[Candidate]],
         information: Mapping[str, Iterator["PreferenceInformation"]],
+        failure_causes: Sequence["RequirementInformation"]
     ) -> "Preference":
         """Produce a sort key for given requirement based on preference.
 
@@ -112,9 +113,9 @@ class PipProvider(_ProviderBase):
                 for _, parent in information[identifier]
             )
             inferred_depth = min(d for d in parent_depths) + 1.0
-            self._known_depths[identifier] = inferred_depth
         else:
             inferred_depth = 1.0
+        self._known_depths[identifier] = inferred_depth
 
         requested_order = self._user_requested.get(identifier, math.inf)
 
@@ -135,6 +136,7 @@ class PipProvider(_ProviderBase):
         return (
             not requires_python,
             delay_this,
+            self.is_failure_cause(identifier, failure_causes),
             not direct,
             not pinned,
             inferred_depth,
@@ -195,3 +197,12 @@ class PipProvider(_ProviderBase):
     def get_dependencies(self, candidate: Candidate) -> Sequence[Requirement]:
         with_requires = not self._ignore_dependencies
         return [r for r in candidate.iter_dependencies(with_requires) if r is not None]
+    
+    @staticmethod
+    def is_failure_cause(identifier: str, failure_causes: Sequence["RequirementInformation"]):
+        for failure_cause in failure_causes:
+            if identifier == failure_cause.requirement.name:
+                return True
+            if failure_cause.parent and identifier == failure_cause.parent.name:
+                return True
+        return False
