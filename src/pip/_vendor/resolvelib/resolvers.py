@@ -380,10 +380,10 @@ class Resolution(object):
             if causes:
                 # Backtrack if pinning fails. The backtrack process puts us in
                 # an unpinned state, so we can work on it in the next round.
+                success = self._backtrack()
                 self.state.backtrack_causes[:] = [
                         i for c in causes for i in c.information
                     ]
-                success = self._backtrack()
 
                 # Dead ends everywhere. Give up.
                 if not success:
