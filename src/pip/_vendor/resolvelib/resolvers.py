@@ -376,24 +376,23 @@ class Resolution(object):
             # Choose the most preferred unpinned criterion to try.
             name = min(unsatisfied_names, key=self._get_preference)
             causes = self._attempt_to_pin_criterion(name)
-            backtrack_causes = [
-                        i for c in causes for i in c.information
-                    ]
 
             if causes:
                 # Backtrack if pinning fails. The backtrack process puts us in
                 # an unpinned state, so we can work on it in the next round.
+                self.state.backtrack_causes[:] = [
+                        i for c in causes for i in c.information
+                    ]
                 success = self._backtrack()
 
                 # Dead ends everywhere. Give up.
                 if not success:
                     print(f'Total backtracks: {self.backtrack_count}')
-                    raise ResolutionImpossible(backtrack_causes)
+                    raise ResolutionImpossible(self.state.backtrack_causes)
             else:
                 # Pinning was successful. Push a new state to do another pin.
                 self._push_new_state()
 
-            self.state.backtrack_causes[:] = backtrack_causes
             self._r.ending_round(index=round_index, state=self.state)
 
         print(f'Total backtracks: {self.backtrack_count}')
