@@ -138,9 +138,9 @@ class PipProvider(_ProviderBase):
         return (
             not requires_python,
             delay_this,
+            not is_backtrack_cause,
             not direct,
             not pinned,
-            not is_backtrack_cause,
             inferred_depth,
             requested_order,
             not unfree,
