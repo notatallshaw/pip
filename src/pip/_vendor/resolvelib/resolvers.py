@@ -386,7 +386,8 @@ class Resolution(object):
                 if not self.backtracking:
                     self.backtracking = True
                     last_requirement = None
-                    backtrack_requirements = {c.requirement.name for c in backtrack_causes} | {c.parent.name for c in backtrack_causes if c.parent}    
+                    backtrack_requirements = {c.requirement.name for c in backtrack_causes} | {c.parent.name for c in backtrack_causes if c.parent}
+                    breakpoint()
                     for requirement_name in backtrack_requirements:
                         if requirement_name in self.state.mapping.keys():
                             while True:
