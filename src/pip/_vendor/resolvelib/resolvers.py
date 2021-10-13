@@ -388,7 +388,7 @@ class Resolution(object):
                     self.backtracking_requirements = backtrack_requirements
                     last_requirement = None
                     for requirement_name in backtrack_requirements:
-                        while requirement_name in self.state.mapping.keys():
+                        while self._states and requirement_name in self.state.mapping.keys():
                             try:
                                 last_requirement = list(self.state.mapping.keys())[-1]
                             except IndexError:
