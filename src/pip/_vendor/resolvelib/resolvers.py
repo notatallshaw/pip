@@ -388,17 +388,15 @@ class Resolution(object):
                     self.backtracking_requirements = backtrack_requirements
                     last_requirement = None
                     for requirement_name in backtrack_requirements:
-                        print(requirement_name, self.state.mapping.keys())
-                        if requirement_name in self.state.mapping.keys():
-                            while True:
-                                try:
-                                    last_requirement = list(self.state.mapping.keys())[-1]
-                                except IndexError:
-                                    breakpoint()
-                                if last_requirement == requirement_name:
-                                    break
-                                print(f'Deleting last_requirement={last_requirement}')
-                                del self._states[-1]
+                        while requirement_name in self.state.mapping.keys():
+                            try:
+                                last_requirement = list(self.state.mapping.keys())[-1]
+                            except IndexError:
+                                breakpoint()
+                            if last_requirement == requirement_name:
+                                break
+                            print(f'Deleting last_requirement={last_requirement}')
+                            del self._states[-1]
                                 
                 
                 self.state.backtrack_causes[:] = backtrack_causes
