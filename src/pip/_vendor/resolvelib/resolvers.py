@@ -394,7 +394,10 @@ class Resolution(object):
                                 if last_requirement == requirement_name:
                                     break
                                 print(f'Deleting last_requirement={last_requirement}')
-                                del self._states[-1]
+                                try:
+                                    del self._states[-1]
+                                except IndexError:
+                                    breakpoint()
                                 
                 
                 self.state.backtrack_causes[:] = backtrack_causes
