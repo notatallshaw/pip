@@ -389,7 +389,8 @@ class Resolution(object):
                     backtrack_requirements = {c.requirement.name for c in backtrack_causes} | {c.parent.name for c in backtrack_causes if c.parent}    
                     for requirement_name in backtrack_requirements:
                         if requirement_name in self.state.mapping.keys():
-                            while requirement_name != (last_requirement := list(self.state.mapping.keys())[-1]):
+                            last_requirement = list(self.state.mapping.keys())[-1]
+                            while requirement_name != last_requirement:
                                 print(f'Deleting {last_requirement=}')
                                 del self._states[-1]
                 
