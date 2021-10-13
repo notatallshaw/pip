@@ -113,6 +113,7 @@ class Resolution(object):
         self._p = provider
         self._r = reporter
         self._states = []
+        self.backtracking = False
 
     @property
     def state(self):
@@ -377,9 +378,24 @@ class Resolution(object):
                 # Backtrack if pinning fails. The backtrack process puts us in
                 # an unpinned state, so we can work on it in the next round.
                 success = self._backtrack()
-                self.state.backtrack_causes[:] = [
+                backtrack_causes = [
                     i for c in failure_causes for i in c.information
                 ]
+                
+                # Rewind state to where we can choose incompatible packages
+                if not self.backtracking:
+                    self.backtracking = True
+                    last_requirement = None
+                    backtrack_requirements = {c.requirement.name for c in backtrack_causes} | {c.parent.name for c in backtrack_causes if c.parent}    
+                    for requirement_name in backtrack_requirements:
+                        if requirement_name in self.state.mapping.keys():
+                            while requirement_name != (last_requirement := list(self.state.mapping.keys())[-1]):
+                                print(f'Deleting {last_requirement=}')
+                                del self._states[-1]
+                
+                self.state.backtrack_causes[:] = backtrack_causes
+                
+
 
                 # Dead ends everywhere. Give up.
                 if not success:
