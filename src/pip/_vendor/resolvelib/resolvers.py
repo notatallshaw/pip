@@ -388,6 +388,7 @@ class Resolution(object):
                     self.backtracking_requirements = backtrack_requirements
                     last_requirement = None
                     for requirement_name in backtrack_requirements:
+                        print(requirement_name, self.state.mapping.keys())
                         if requirement_name in self.state.mapping.keys():
                             while True:
                                 try:
