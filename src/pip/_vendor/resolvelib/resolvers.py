@@ -393,6 +393,7 @@ class Resolution(object):
                             while requirement_name != last_requirement:
                                 print(f'Deleting last_requirement={last_requirement}')
                                 del self._states[-1]
+                                last_requirement = list(self.state.mapping.keys())[-1]
                 
                 self.state.backtrack_causes[:] = backtrack_causes
 
