@@ -113,7 +113,7 @@ class Resolution(object):
         self._p = provider
         self._r = reporter
         self._states = []
-        self.backtracking = False
+        self.backtracking_requirements = set()
 
     @property
     def state(self):
@@ -381,13 +381,12 @@ class Resolution(object):
                 backtrack_causes = [
                     i for c in failure_causes for i in c.information
                 ]
+                backtrack_requirements = {c.requirement.name for c in backtrack_causes} | {c.parent.name for c in backtrack_causes if c.parent}
                 
                 # Rewind state to where we can choose incompatible packages
-                if not self.backtracking:
-                    self.backtracking = True
+                if backtrack_requirements != self.backtracking_requirements:
+                    self.backtracking_requirements = backtrack_requirements
                     last_requirement = None
-                    backtrack_requirements = {c.requirement.name for c in backtrack_causes} | {c.parent.name for c in backtrack_causes if c.parent}
-                    breakpoint()
                     for requirement_name in backtrack_requirements:
                         if requirement_name in self.state.mapping.keys():
                             while True:
