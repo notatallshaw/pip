@@ -349,7 +349,10 @@ class Resolution(object):
             reversed_mapping = reversed(self.state.mapping)
             latest_satisfied_names = set()
             for _ in range(len(already_satisfied_current_backtrack_requirements)):
-                latest_satisfied_names.add(next(reversed_mapping))
+                try:
+                    latest_satisfied_names.add(next(reversed_mapping))
+                except StopIteration:
+                    breakpoint()
             
             if latest_satisfied_names == already_satisfied_current_backtrack_requirements:
                 return
