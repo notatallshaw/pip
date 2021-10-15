@@ -359,7 +359,12 @@ class Resolution(object):
             # print(f'Discard pinned requirement {discard_pinned_requirement!r}')
             # print(len(self.state.mapping), self.state.mapping.keys())
             # print(len(already_satisfied_current_backtrack_requirements), already_satisfied_current_backtrack_requirements)
+            current_length = len(self.state.mapping)
+            backup_state = self.state.mapping.copy()
             del self._states[-1]
+            if len(self.state.mapping) + 1 != current_length:
+                breakpoint()
+                'break'
 
 
     def resolve(self, requirements, max_rounds):
