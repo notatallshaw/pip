@@ -370,7 +370,7 @@ class Resolution(object):
                 # If the lastest pinned requirements are the same as the
                 # satisfied requirements causing the backtrack then return
                 if latest_satisfied_names == already_satisfied_backtrack_causes:
-                    print(len(latest_satisfied_names), '='*100)
+                    print(len(latest_satisfied_names), latest_satisfied_names, '='*100)
                     return
             else:
                 # If we can't pin the backtrack causes then we want to remove
