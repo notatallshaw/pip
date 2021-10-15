@@ -347,16 +347,14 @@ class Resolution(object):
             reversed_mapping = reversed(self.state.mapping)
             latest_satisfied_names = set()
             for _ in range(len(already_satisfied_current_backtrack_requirements)):
-                try:
-                    latest_satisfied_names.add(next(reversed_mapping))
-                except StopIteration:
-                    breakpoint()
+                latest_satisfied_names.add(next(reversed_mapping))
             
             if latest_satisfied_names == already_satisfied_current_backtrack_requirements:
+                print('='*100)
                 return
 
             discard_pinned_requirement = next(reversed(self.state.mapping))
-            print(f'Discard pinned requirement {discard_pinned_requirement!r}')
+            # print(f'Discard pinned requirement {discard_pinned_requirement!r}')
             del self._states[-1]
 
 
