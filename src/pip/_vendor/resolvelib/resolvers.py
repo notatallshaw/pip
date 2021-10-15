@@ -357,7 +357,7 @@ class Resolution(object):
 
             old_keys = self.state.mapping.copy().keys()
             del self._states[-1]
-            already_satisfied_current_backtrack_requirements.difference_update(old_keys - self.state.keys())
+            already_satisfied_current_backtrack_requirements.difference_update(old_keys - self.state.mapping.keys())
 
 
     def resolve(self, requirements, max_rounds):
