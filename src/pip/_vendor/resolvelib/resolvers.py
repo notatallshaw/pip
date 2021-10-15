@@ -447,6 +447,7 @@ class Resolution(object):
                 can_pin_backtrack_causes = self._can_pin_backtrack_causes(backtrack_causes)
 
                 # Pin the new backtrack causes to the current state
+                print(backtrack_causes, self.state.backtrack_causes)
                 if not backtrack_causes.issubset(self.state.backtrack_causes):
                     self.state.backtrack_causes.clear()
                     self.state.backtrack_causes.update(backtrack_causes)
