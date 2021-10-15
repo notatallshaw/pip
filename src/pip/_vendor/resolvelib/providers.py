@@ -16,6 +16,7 @@ class AbstractProvider(object):
         candidates,
         information,
         backtrack_causes,
+        can_pin_backtrack_causes,
     ):
         """Produce a sort key for given requirement based on preference.
 

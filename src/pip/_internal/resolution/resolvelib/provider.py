@@ -1,6 +1,6 @@
 import collections
 import math
-from typing import TYPE_CHECKING, Dict, Iterable, Iterator, Mapping, Sequence, Union
+from typing import TYPE_CHECKING, Dict, Iterable, Iterator, Mapping, Sequence, Union, Set
 
 from pip._vendor.resolvelib.providers import AbstractProvider
 
@@ -72,7 +72,8 @@ class PipProvider(_ProviderBase):
         resolutions: Mapping[str, Candidate],
         candidates: Mapping[str, Iterator[Candidate]],
         information: Mapping[str, Iterable["PreferenceInformation"]],
-        backtrack_causes: Sequence["PreferenceInformation"],
+        backtrack_causes: Set[str],
+        can_pin_backtrack_causes: bool,
     ) -> "Preference":
         """Produce a sort key for given requirement based on preference.
 
@@ -123,27 +124,20 @@ class PipProvider(_ProviderBase):
         # free, so we always do it first to avoid needless work if it fails.
         requires_python = identifier == REQUIRES_PYTHON_IDENTIFIER
 
-        # HACK: Setuptools have a very long and solid backward compatibility
-        # track record, and extremely few projects would request a narrow,
-        # non-recent version range of it since that would break a lot things.
-        # (Most projects specify it only to request for an installer feature,
-        # which does not work, but that's another topic.) Intentionally
-        # delaying Setuptools helps reduce branches the resolver has to check.
-        # This serves as a temporary fix for issues like "apache-airlfow[all]"
-        # while we work on "proper" branch pruning techniques.
-        delay_this = identifier == "setuptools"
-
         # Prefer the causes of backtracking on the assumption that the problem
         # resolving the dependency tree is related to the failures that caused
         # the backtracking
-        backtrack_cause = self.is_backtrack_cause(identifier, backtrack_causes)
+        backtrack_cause = identifier in backtrack_causes
+        if can_pin_backtrack_causes:
+            prefer_backtrack_cause = backtrack_cause
+        else:
+            prefer_backtrack_cause = not backtrack_cause
 
         return (
             not requires_python,
-            delay_this,
+            not prefer_backtrack_cause,
             not direct,
             not pinned,
-            not backtrack_cause,
             inferred_depth,
             requested_order,
             not unfree,
@@ -202,14 +196,3 @@ class PipProvider(_ProviderBase):
     def get_dependencies(self, candidate: Candidate) -> Sequence[Requirement]:
         with_requires = not self._ignore_dependencies
         return [r for r in candidate.iter_dependencies(with_requires) if r is not None]
-
-    @staticmethod
-    def is_backtrack_cause(
-        identifier: str, backtrack_causes: Sequence["PreferenceInformation"]
-    ) -> bool:
-        for backtrack_cause in backtrack_causes:
-            if identifier == backtrack_cause.requirement.name:
-                return True
-            if backtrack_cause.parent and identifier == backtrack_cause.parent.name:
-                return True
-        return False

@@ -131,7 +131,7 @@ class Resolution(object):
         state = State(
             mapping=base.mapping.copy(),
             criteria=base.criteria.copy(),
-            backtrack_causes=base.backtrack_causes[:],
+            backtrack_causes=base.backtrack_causes.copy(),
         )
         self._states.append(state)
 
@@ -174,7 +174,7 @@ class Resolution(object):
             raise RequirementsConflicted(criterion)
         criteria[identifier] = criterion
 
-    def _get_preference(self, name):
+    def _get_preference(self, name, can_pin_backtrack_causes):
         return self._p.get_preference(
             identifier=name,
             resolutions=self.state.mapping,
@@ -187,6 +187,7 @@ class Resolution(object):
                 operator.attrgetter("information"),
             ),
             backtrack_causes=self.state.backtrack_causes,
+            can_pin_backtrack_causes=can_pin_backtrack_causes
         )
 
     def _is_current_pin_satisfying(self, name, criterion):
@@ -330,34 +331,58 @@ class Resolution(object):
         # No way to backtrack anymore.
         return False
 
+    def _can_pin_backtrack_causes(self, backtrack_causes):
+        unpinned_backtrack_causes = backtrack_causes - self.state.mapping.keys()
+        unsatisfied_names = {
+            key
+            for key, criterion in self.state.criteria.items()
+            if not self._is_current_pin_satisfying(key, criterion)
+        }
+        unpinned_backtrack_causes -= unsatisfied_names
+        return not bool(unpinned_backtrack_causes)
+
+    def _causes_to_names(self, causes):
+        return {c.requirement.name for c in causes} | {c.parent.name for c in causes if c.parent}
+
     def _backjump(self, backtrack_causes):
-        current_backtrack_requirements = {c.requirement.name for c in backtrack_causes} | {c.parent.name for c in backtrack_causes if c.parent}
-        previous_backtrack_requirements = {c.requirement.name for c in self.state.backtrack_causes} | {c.parent.name for c in self.state.backtrack_causes if c.parent}
-
-        if current_backtrack_requirements == previous_backtrack_requirements:
+        """Perform non-chronological backjumping
+        """
+        if backtrack_causes == self.state.backtrack_causes:
             return
 
-        already_satisfied_current_backtrack_requirements = current_backtrack_requirements.intersection(self.state.mapping.keys())
-        if not already_satisfied_current_backtrack_requirements:
+        already_satisfied_backtrack_causes = backtrack_causes.intersection(self.state.mapping.keys())
+        if not already_satisfied_backtrack_causes:
             return
 
+        can_pin_backtrack_causes = self._can_pin_backtrack_causes(backtrack_causes)
         while True:
             # Never Remove Root state
             if len(self._states) == 1:
                 return
 
-            reversed_mapping = reversed(self.state.mapping)
+            # Build a set of the last n pinned requirements
             latest_satisfied_names = set()
-            for _ in range(len(already_satisfied_current_backtrack_requirements)):
+            reversed_mapping = reversed(self.state.mapping)
+            for _ in range(len(already_satisfied_backtrack_causes)):
                 latest_satisfied_names.add(next(reversed_mapping))
             
-            if latest_satisfied_names == already_satisfied_current_backtrack_requirements:
-                print(len(latest_satisfied_names), '='*100)
-                return
+            if can_pin_backtrack_causes:
+                # If the lastest pinned requirements are the same as the
+                # satisfied requirements causing the backtrack then return
+                if latest_satisfied_names == already_satisfied_backtrack_causes:
+                    print(len(latest_satisfied_names), '='*100)
+                    return
+            else:
+                # If we can't pin the backtrack causes then we want to remove
+                # all backtrack causes from the current pinned requirements
+                if not already_satisfied_backtrack_causes:
+                    print('NO BACKTRACKS PINNED', '='*100)
+                    return
 
+            # Otherwise remove the last state and remove from satisfied requirements causing the backtrack
             old_keys = self.state.mapping.copy().keys()
             del self._states[-1]
-            already_satisfied_current_backtrack_requirements.difference_update(old_keys - self.state.mapping.keys())
+            already_satisfied_backtrack_causes.difference_update(old_keys - self.state.mapping.keys())
 
 
     def resolve(self, requirements, max_rounds):
@@ -371,7 +396,7 @@ class Resolution(object):
             State(
                 mapping=collections.OrderedDict(),
                 criteria={},
-                backtrack_causes=[],
+                backtrack_causes=set(),
             )
         ]
         for r in requirements:
@@ -385,6 +410,7 @@ class Resolution(object):
         # pinning the virtual "root" package in the graph.
         self._push_new_state()
 
+        can_pin_backtrack_causes = True
         for round_index in range(max_rounds):
             self._r.starting_round(index=round_index)
 
@@ -400,24 +426,30 @@ class Resolution(object):
                 return self.state
 
             # Choose the most preferred unpinned criterion to try.
-            name = min(unsatisfied_names, key=self._get_preference)
+            name = min(unsatisfied_names, key=lambda x: self._get_preference(x, can_pin_backtrack_causes))
             failure_causes = self._attempt_to_pin_criterion(name)
 
             if failure_causes:
                 # Backtrack if pinning fails. The backtrack process puts us in
                 # an unpinned state, so we can work on it in the next round.
                 success = self._backtrack()
-                backtrack_causes = [
+                failure_causes = [
                     i for c in failure_causes for i in c.information
                 ]
 
                 # Dead ends everywhere. Give up.
                 if not success:
-                    raise ResolutionImpossible(backtrack_causes)
+                    raise ResolutionImpossible(failure_causes)
                 
                 # Backjump to appropriate level in tree
+                backtrack_causes = self._causes_to_names(failure_causes)
                 self._backjump(backtrack_causes)
-                self.state.backtrack_causes[:] = backtrack_causes
+                can_pin_backtrack_causes = self._can_pin_backtrack_causes(backtrack_causes)
+
+                # Pin the new backtrack causes to the current state
+                if self.state.backtrack_causes != backtrack_causes:
+                    self.state.backtrack_causes.clear()
+                    self.state.backtrack_causes.update(backtrack_causes)
             else:
                 # Pinning was successful. Push a new state to do another pin.
                 self._push_new_state()
