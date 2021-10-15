@@ -1,6 +1,15 @@
 import collections
 import math
-from typing import TYPE_CHECKING, Dict, Iterable, Iterator, Mapping, Sequence, Union, Set
+from typing import (
+    TYPE_CHECKING,
+    Dict,
+    Iterable,
+    Iterator,
+    Mapping,
+    Sequence,
+    Set,
+    Union,
+)
 
 from pip._vendor.resolvelib.providers import AbstractProvider
 
