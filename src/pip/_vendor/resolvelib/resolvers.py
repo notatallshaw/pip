@@ -352,7 +352,7 @@ class Resolution(object):
                 latest_satisfied_names.add(next(reversed_mapping))
             
             if latest_satisfied_names == already_satisfied_current_backtrack_requirements:
-                print('='*100)
+                print(len(latest_satisfied_names), '='*100)
                 return
 
             # discard_pinned_requirement = next(reversed(self.state.mapping))
