@@ -347,7 +347,7 @@ class Resolution(object):
     def _backjump(self, backtrack_causes):
         """Perform non-chronological backjumping
         """
-        if backtrack_causes == self.state.backtrack_causes:
+        if backtrack_causes.issubset(self.state.backtrack_causes):
             return
 
         already_satisfied_backtrack_causes = backtrack_causes.intersection(self.state.mapping.keys())
@@ -447,7 +447,7 @@ class Resolution(object):
                 can_pin_backtrack_causes = self._can_pin_backtrack_causes(backtrack_causes)
 
                 # Pin the new backtrack causes to the current state
-                if self.state.backtrack_causes != backtrack_causes:
+                if not backtrack_causes.issubset(self.state.backtrack_causes):
                     self.state.backtrack_causes.clear()
                     self.state.backtrack_causes.update(backtrack_causes)
             else:
