@@ -338,8 +338,7 @@ class Resolution(object):
             return
 
         while True:
-            satisfied_names = self.state.mapping.keys()
-            already_satisfied_current_backtrack_requirements = current_backtrack_requirements.intersection(satisfied_names)
+            already_satisfied_current_backtrack_requirements = current_backtrack_requirements.intersection(self.state.mapping.keys())
 
             if not already_satisfied_current_backtrack_requirements:
                 return
@@ -353,8 +352,10 @@ class Resolution(object):
                 print('='*100)
                 return
 
-            discard_pinned_requirement = next(reversed(self.state.mapping))
+            # discard_pinned_requirement = next(reversed(self.state.mapping))
             # print(f'Discard pinned requirement {discard_pinned_requirement!r}')
+            print(len(self.state.mapping), self.state.mapping.keys())
+            print(len(already_satisfied_current_backtrack_requirements), already_satisfied_current_backtrack_requirements)
             del self._states[-1]
 
 
