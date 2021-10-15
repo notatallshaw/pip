@@ -113,7 +113,6 @@ class Resolution(object):
         self._p = provider
         self._r = reporter
         self._states = []
-        self.backtracking_requirements = set()
 
     @property
     def state(self):
@@ -331,6 +330,36 @@ class Resolution(object):
         # No way to backtrack anymore.
         return False
 
+    def _backjump(self, backtrack_causes, unsatisfied_names: list[str]):
+        current_backtrack_requirements = {c.requirement.name for c in backtrack_causes} | {c.parent.name for c in backtrack_causes if c.parent}
+        previous_backtrack_requirements = {c.requirement.name for c in self.state.backtrack_causes} | {c.parent.name for c in self.state.backtrack_causes if c.parent}
+
+        if current_backtrack_requirements == previous_backtrack_requirements:
+            return
+
+        # mapping: collections.OrderedDict = self.state.mapping
+
+        already_satisfied_current_backtrack_requirements = current_backtrack_requirements.copy()
+        already_satisfied_current_backtrack_requirements.difference_update(unsatisfied_names)
+
+        if not already_satisfied_current_backtrack_requirements:
+            return
+
+        while True:
+            reversed_mapping = reversed(self.state.mapping)
+            latest_satisfied_names = set()
+            for _ in range(len(already_satisfied_current_backtrack_requirements)):
+                latest_satisfied_names.add(next(reversed_mapping))
+            
+            if latest_satisfied_names == already_satisfied_current_backtrack_requirements:
+                return
+
+            discard_pinned_requirement = next(reversed(self.state.mapping))
+            print(f'Discard pinned requirement {discard_pinned_requirement!r}')
+            already_satisfied_current_backtrack_requirements.discard(discard_pinned_requirement)
+            del self._states[-1]
+
+
     def resolve(self, requirements, max_rounds):
         if self._states:
             raise RuntimeError("already resolved")
@@ -381,29 +410,14 @@ class Resolution(object):
                 backtrack_causes = [
                     i for c in failure_causes for i in c.information
                 ]
-                backtrack_requirements = {c.requirement.name for c in backtrack_causes} | {c.parent.name for c in backtrack_causes if c.parent}
-                
-                # Rewind state to where we can choose incompatible packages
-                if backtrack_requirements != self.backtracking_requirements:
-                    self.backtracking_requirements = backtrack_requirements
-                    last_requirement = None
-                    for requirement_name in backtrack_requirements:
-                        while len(self._states) > 1 and requirement_name in self.state.mapping.keys():
-                            try:
-                                last_requirement = list(self.state.mapping.keys())[-1]
-                            except IndexError:
-                                breakpoint()
-                            if last_requirement == requirement_name:
-                                break
-                            print(f'Deleting last_requirement={last_requirement}')
-                            del self._states[-1]
-                                
-                
-                self.state.backtrack_causes[:] = backtrack_causes
 
                 # Dead ends everywhere. Give up.
                 if not success:
-                    raise ResolutionImpossible(self.state.backtrack_causes)
+                    raise ResolutionImpossible(backtrack_causes)
+                
+                # Backjump to appropriate level in tree
+                self._backjump(backtrack_causes, unsatisfied_names)
+                self.state.backtrack_causes[:] = backtrack_causes
             else:
                 # Pinning was successful. Push a new state to do another pin.
                 self._push_new_state()
