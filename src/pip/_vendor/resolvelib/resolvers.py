@@ -355,11 +355,6 @@ class Resolution(object):
                 print(len(latest_satisfied_names), '='*100)
                 return
 
-            # discard_pinned_requirement = next(reversed(self.state.mapping))
-            # print(f'Discard pinned requirement {discard_pinned_requirement!r}')
-            # print(len(self.state.mapping), self.state.mapping.keys())
-            # print(len(already_satisfied_current_backtrack_requirements), already_satisfied_current_backtrack_requirements)
-            current_length = len(self.state.mapping)
             old_keys = self.state.mapping.copy().keys()
             del self._states[-1]
             already_satisfied_current_backtrack_requirements.difference_update(old_keys - self.state.keys())
