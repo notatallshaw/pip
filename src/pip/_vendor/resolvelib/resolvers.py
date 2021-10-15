@@ -337,13 +337,13 @@ class Resolution(object):
         if current_backtrack_requirements == previous_backtrack_requirements:
             return
 
+        already_satisfied_current_backtrack_requirements = current_backtrack_requirements.intersection(self.state.mapping.keys())
+        if not already_satisfied_current_backtrack_requirements:
+            return
+
         while True:
             # Never Remove Root state
             if len(self._states) == 1:
-                return
-
-            already_satisfied_current_backtrack_requirements = current_backtrack_requirements.intersection(self.state.mapping.keys())
-            if not already_satisfied_current_backtrack_requirements:
                 return
 
             reversed_mapping = reversed(self.state.mapping)
@@ -360,12 +360,9 @@ class Resolution(object):
             # print(len(self.state.mapping), self.state.mapping.keys())
             # print(len(already_satisfied_current_backtrack_requirements), already_satisfied_current_backtrack_requirements)
             current_length = len(self.state.mapping)
-            backup_state = self.state.mapping.copy()
+            old_keys = self.state.mapping.copy().keys()
             del self._states[-1]
-            if len(self.state.mapping) not in (current_length, current_length - 1):
-                print(len(self.state.mapping), current_length)
-                breakpoint()
-                'break'
+            already_satisfied_current_backtrack_requirements.difference_update(old_keys - self.state.keys())
 
 
     def resolve(self, requirements, max_rounds):
