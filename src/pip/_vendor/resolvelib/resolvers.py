@@ -362,7 +362,8 @@ class Resolution(object):
             current_length = len(self.state.mapping)
             backup_state = self.state.mapping.copy()
             del self._states[-1]
-            if len(self.state.mapping) + 1 != current_length:
+            if len(self.state.mapping) not in (current_length, current_length - 1):
+                print(len(self.state.mapping), current_length)
                 breakpoint()
                 'break'
 
