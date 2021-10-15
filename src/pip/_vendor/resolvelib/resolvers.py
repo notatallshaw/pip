@@ -354,7 +354,6 @@ class Resolution(object):
         if not already_satisfied_backtrack_causes:
             return
 
-        can_pin_backtrack_causes = self._can_pin_backtrack_causes(backtrack_causes)
         while True:
             # Never Remove Root state
             if len(self._states) == 1:
@@ -366,7 +365,7 @@ class Resolution(object):
             for _ in range(len(already_satisfied_backtrack_causes)):
                 latest_satisfied_names.add(next(reversed_mapping))
             
-            if can_pin_backtrack_causes:
+            if self._can_pin_backtrack_causes(backtrack_causes):
                 # If the lastest pinned requirements are the same as the
                 # satisfied requirements causing the backtrack then return
                 if latest_satisfied_names == already_satisfied_backtrack_causes:
@@ -447,7 +446,6 @@ class Resolution(object):
                 can_pin_backtrack_causes = self._can_pin_backtrack_causes(backtrack_causes)
 
                 # Pin the new backtrack causes to the current state
-                print(backtrack_causes, self.state.backtrack_causes)
                 if not backtrack_causes.issubset(self.state.backtrack_causes):
                     self.state.backtrack_causes.clear()
                     self.state.backtrack_causes.update(backtrack_causes)
