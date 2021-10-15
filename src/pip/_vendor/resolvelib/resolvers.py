@@ -330,7 +330,7 @@ class Resolution(object):
         # No way to backtrack anymore.
         return False
 
-    def _backjump(self, backtrack_causes, unsatisfied_names):
+    def _backjump(self, backtrack_causes):
         current_backtrack_requirements = {c.requirement.name for c in backtrack_causes} | {c.parent.name for c in backtrack_causes if c.parent}
         previous_backtrack_requirements = {c.requirement.name for c in self.state.backtrack_causes} | {c.parent.name for c in self.state.backtrack_causes if c.parent}
 
@@ -338,9 +338,8 @@ class Resolution(object):
             return
 
         # mapping: collections.OrderedDict = self.state.mapping
-
-        already_satisfied_current_backtrack_requirements = current_backtrack_requirements.copy()
-        already_satisfied_current_backtrack_requirements.difference_update(unsatisfied_names)
+        satisfied_names = self.state.mapping.keys()
+        already_satisfied_current_backtrack_requirements = current_backtrack_requirements.intersection(satisfied_names)
 
         if not already_satisfied_current_backtrack_requirements:
             return
@@ -419,7 +418,7 @@ class Resolution(object):
                     raise ResolutionImpossible(backtrack_causes)
                 
                 # Backjump to appropriate level in tree
-                self._backjump(backtrack_causes, unsatisfied_names)
+                self._backjump(backtrack_causes)
                 self.state.backtrack_causes[:] = backtrack_causes
             else:
                 # Pinning was successful. Push a new state to do another pin.
