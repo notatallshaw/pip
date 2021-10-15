@@ -113,6 +113,7 @@ class Resolution(object):
         self._p = provider
         self._r = reporter
         self._states = []
+        self._backjump_causes = set()
 
     @property
     def state(self):
@@ -346,18 +347,26 @@ class Resolution(object):
 
     def _backjump(self, backtrack_causes):
         """Perform non-chronological backjumping
+
+        Return True if backjumped, False otherwise
         """
         if backtrack_causes.issubset(self.state.backtrack_causes):
-            return
+            return False
 
-        already_satisfied_backtrack_causes = backtrack_causes.intersection(self.state.mapping.keys())
+        # Don't back jump if 
+        already_satisfied_backtrack_causes = set(backtrack_causes.intersection(self.state.mapping.keys()))
         if not already_satisfied_backtrack_causes:
-            return
+            return False
 
+        # Prevent infinitey looping from back jumping
+        if frozenset(backtrack_causes) in self._backjump_causes:
+            return False
+
+        backjumped = False
         while True:
             # Never Remove Root state
             if len(self._states) == 1:
-                return
+                return backjumped
 
             # Build a set of the last n pinned requirements
             latest_satisfied_names = set()
@@ -369,19 +378,18 @@ class Resolution(object):
                 # If the lastest pinned requirements are the same as the
                 # satisfied requirements causing the backtrack then return
                 if latest_satisfied_names == already_satisfied_backtrack_causes:
-                    print(len(latest_satisfied_names), latest_satisfied_names, '='*100)
-                    return
+                    return backjumped
             else:
                 # If we can't pin the backtrack causes then we want to remove
                 # all backtrack causes from the current pinned requirements
                 if not already_satisfied_backtrack_causes:
-                    print('NO BACKTRACKS PINNED', '='*100)
-                    return
+                    return backjumped
 
             # Otherwise remove the last state and remove from satisfied requirements causing the backtrack
             old_keys = self.state.mapping.copy().keys()
             del self._states[-1]
             already_satisfied_backtrack_causes.difference_update(old_keys - self.state.mapping.keys())
+            backjumped = True
 
 
     def resolve(self, requirements, max_rounds):
@@ -442,8 +450,10 @@ class Resolution(object):
                 
                 # Backjump to appropriate level in tree
                 backtrack_causes = self._causes_to_names(failure_causes)
-                self._backjump(backtrack_causes)
+                backjumped = self._backjump(backtrack_causes)
                 can_pin_backtrack_causes = self._can_pin_backtrack_causes(backtrack_causes)
+                if backjumped:
+                    self._backjump_causes.add(frozenset(backtrack_causes))
 
                 # Pin the new backtrack causes to the current state
                 if not backtrack_causes.issubset(self.state.backtrack_causes):
