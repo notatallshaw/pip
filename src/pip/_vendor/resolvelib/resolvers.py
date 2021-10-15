@@ -330,7 +330,7 @@ class Resolution(object):
         # No way to backtrack anymore.
         return False
 
-    def _backjump(self, backtrack_causes, unsatisfied_names: list[str]):
+    def _backjump(self, backtrack_causes, unsatisfied_names):
         current_backtrack_requirements = {c.requirement.name for c in backtrack_causes} | {c.parent.name for c in backtrack_causes if c.parent}
         previous_backtrack_requirements = {c.requirement.name for c in self.state.backtrack_causes} | {c.parent.name for c in self.state.backtrack_causes if c.parent}
 
