@@ -337,14 +337,13 @@ class Resolution(object):
         if current_backtrack_requirements == previous_backtrack_requirements:
             return
 
-        # mapping: collections.OrderedDict = self.state.mapping
-        satisfied_names = self.state.mapping.keys()
-        already_satisfied_current_backtrack_requirements = current_backtrack_requirements.intersection(satisfied_names)
-
-        if not already_satisfied_current_backtrack_requirements:
-            return
-
         while True:
+            satisfied_names = self.state.mapping.keys()
+            already_satisfied_current_backtrack_requirements = current_backtrack_requirements.intersection(satisfied_names)
+
+            if not already_satisfied_current_backtrack_requirements:
+                return
+
             reversed_mapping = reversed(self.state.mapping)
             latest_satisfied_names = set()
             for _ in range(len(already_satisfied_current_backtrack_requirements)):
@@ -358,7 +357,6 @@ class Resolution(object):
 
             discard_pinned_requirement = next(reversed(self.state.mapping))
             print(f'Discard pinned requirement {discard_pinned_requirement!r}')
-            already_satisfied_current_backtrack_requirements.discard(discard_pinned_requirement)
             del self._states[-1]
 
 
