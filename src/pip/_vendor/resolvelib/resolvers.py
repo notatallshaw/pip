@@ -338,15 +338,8 @@ class Resolution(object):
             return
 
         while True:
-            if not self._states:
-                # Re-Initialize the root state.
-                self._states = [
-                    State(
-                        mapping=collections.OrderedDict(),
-                        criteria={},
-                        backtrack_causes=[],
-                    )
-                ]
+            # Never Remove Root state
+            if len(self._states) == 1:
                 return
 
             already_satisfied_current_backtrack_requirements = current_backtrack_requirements.intersection(self.state.mapping.keys())
