@@ -364,8 +364,8 @@ class Resolution(object):
 
             # discard_pinned_requirement = next(reversed(self.state.mapping))
             # print(f'Discard pinned requirement {discard_pinned_requirement!r}')
-            print(len(self.state.mapping), self.state.mapping.keys())
-            print(len(already_satisfied_current_backtrack_requirements), already_satisfied_current_backtrack_requirements)
+            # print(len(self.state.mapping), self.state.mapping.keys())
+            # print(len(already_satisfied_current_backtrack_requirements), already_satisfied_current_backtrack_requirements)
             del self._states[-1]
 
 
