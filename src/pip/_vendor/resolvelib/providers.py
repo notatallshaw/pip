@@ -16,6 +16,7 @@ class AbstractProvider(object):
         candidates,
         information,
         backtrack_causes,
+        can_pin_backtrack_causes,
     ):
         """Produce a sort key for given requirement based on preference.
 
@@ -32,8 +33,9 @@ class AbstractProvider(object):
             Each value is an iterator of candidates.
         :param information: Mapping of requirement information of each package.
             Each value is an iterator of *requirement information*.
-        :param backtrack_causes: Sequence of requirement information that were
-            the requirements that caused the resolver to most recently backtrack.
+        :param backtrack_causes: Set of requirement names causing latest backtrack
+        :param can_pin_backtrack_causes: True if all the backtrack causes have
+            been recently pinned or available to pin
 
         A *requirement information* instance is a named tuple with two members:
 
