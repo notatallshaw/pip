@@ -1,6 +1,15 @@
 import collections
 import math
-from typing import TYPE_CHECKING, Dict, Iterable, Iterator, Mapping, Sequence, Union
+from typing import (
+    TYPE_CHECKING,
+    Dict,
+    Iterable,
+    Iterator,
+    Mapping,
+    Sequence,
+    Set,
+    Union,
+)
 
 from pip._vendor.resolvelib.providers import AbstractProvider
 
@@ -72,7 +81,8 @@ class PipProvider(_ProviderBase):
         resolutions: Mapping[str, Candidate],
         candidates: Mapping[str, Iterator[Candidate]],
         information: Mapping[str, Iterable["PreferenceInformation"]],
-        backtrack_causes: Sequence["PreferenceInformation"],
+        backtrack_causes: Set[str],
+        can_pin_backtrack_causes: bool,
     ) -> "Preference":
         """Produce a sort key for given requirement based on preference.
 
@@ -136,14 +146,18 @@ class PipProvider(_ProviderBase):
         # Prefer the causes of backtracking on the assumption that the problem
         # resolving the dependency tree is related to the failures that caused
         # the backtracking
-        backtrack_cause = self.is_backtrack_cause(identifier, backtrack_causes)
+        backtrack_cause = identifier in backtrack_causes
+        if can_pin_backtrack_causes:
+            prefer_backtrack_cause = backtrack_cause
+        else:
+            prefer_backtrack_cause = not backtrack_cause
 
         return (
             not requires_python,
+            not prefer_backtrack_cause,
             delay_this,
             not direct,
             not pinned,
-            not backtrack_cause,
             inferred_depth,
             requested_order,
             not unfree,
@@ -154,7 +168,7 @@ class PipProvider(_ProviderBase):
         if identifier in self._constraints:
             return self._constraints[identifier]
 
-        # HACK: Theoretically we should check whether this identifier is a valid
+        # HACK: Theoratically we should check whether this identifier is a valid
         # "NAME[EXTRAS]" format, and parse out the name part with packaging or
         # some regular expression. But since pip's resolver only spits out
         # three kinds of identifiers: normalized PEP 503 names, normalized names
@@ -202,14 +216,3 @@ class PipProvider(_ProviderBase):
     def get_dependencies(self, candidate: Candidate) -> Sequence[Requirement]:
         with_requires = not self._ignore_dependencies
         return [r for r in candidate.iter_dependencies(with_requires) if r is not None]
-
-    @staticmethod
-    def is_backtrack_cause(
-        identifier: str, backtrack_causes: Sequence["PreferenceInformation"]
-    ) -> bool:
-        for backtrack_cause in backtrack_causes:
-            if identifier == backtrack_cause.requirement.name:
-                return True
-            if backtrack_cause.parent and identifier == backtrack_cause.parent.name:
-                return True
-        return False
