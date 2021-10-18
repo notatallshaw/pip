@@ -93,7 +93,11 @@ class PipProvider(_ProviderBase):
         * If equal, order alphabetically for consistency (helps debuggability).
         """
         lookups = (r.get_candidate_lookup() for r, _ in information[identifier])
-        candidate, ireqs = zip(*lookups)
+        try:
+            candidate, ireqs = zip(*lookups)
+        except ValueError:
+            breakpoint()
+            'break'
         operators = [
             specifier.operator
             for specifier_set in (ireq.specifier for ireq in ireqs if ireq)
