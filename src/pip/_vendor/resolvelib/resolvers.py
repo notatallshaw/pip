@@ -175,7 +175,9 @@ class Resolution(object):
         criteria[identifier] = criterion
 
     def _get_preference(self, name):
-        print(name)
+        if name == 'charset-normalizer':
+            breakpoint()
+            'break'
         return self._p.get_preference(
             identifier=name,
             resolutions=self.state.mapping,
