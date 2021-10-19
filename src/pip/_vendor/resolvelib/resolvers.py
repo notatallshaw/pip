@@ -202,6 +202,7 @@ class Resolution(object):
     def _get_updated_criteria(self, candidate):
         # copy current state's criteria, filtering out any information with this
         # candidate's other versions as parent
+        print(self._p.identify(candidate))
         criteria = {
             name: Criterion(
                 criterion.candidates,
