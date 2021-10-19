@@ -386,8 +386,6 @@ class Resolution(object):
                 return self.state
 
             # Choose the most preferred unpinned criterion to try.
-            for name in unsatisfied_names:
-                self.state.criteria = self._get_updated_criteria(name)
             name = min(unsatisfied_names, key=self._get_preference)
             failure_causes = self._attempt_to_pin_criterion(name)
 
