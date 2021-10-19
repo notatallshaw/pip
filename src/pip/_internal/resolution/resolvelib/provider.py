@@ -92,7 +92,6 @@ class PipProvider(_ProviderBase):
           operator, such as ``>=`` or ``<``.
         * If equal, order alphabetically for consistency (helps debuggability).
         """
-        print(list(information[identifier]))
         lookups = (r.get_candidate_lookup() for r, _ in information[identifier])
         candidate, ireqs = zip(*lookups)
         operators = [
