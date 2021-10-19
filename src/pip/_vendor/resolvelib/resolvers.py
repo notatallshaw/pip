@@ -202,7 +202,6 @@ class Resolution(object):
     def _get_updated_criteria(self, candidate):
         # copy current state's criteria, filtering out any information with this
         # candidate's other versions as parent
-        print(self._p.identify(candidate))
         criteria = {
             name: Criterion(
                 criterion.candidates,
@@ -387,6 +386,8 @@ class Resolution(object):
                 return self.state
 
             # Choose the most preferred unpinned criterion to try.
+            for name in unsatisfied_names:
+                self.state.criteria = self._get_updated_criteria(name)
             name = min(unsatisfied_names, key=self._get_preference)
             failure_causes = self._attempt_to_pin_criterion(name)
 
