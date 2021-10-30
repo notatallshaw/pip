@@ -136,6 +136,8 @@ class PipProvider(_ProviderBase):
         # Prefer the causes of backtracking on the assumption that the problem
         # resolving the dependency tree is related to the failures that caused
         # the backtracking
+        if backtrack_causes:
+            print(len(backtrack_causes))
         backtrack_cause = self.is_backtrack_cause(identifier, backtrack_causes)
 
         return (
