@@ -197,19 +197,6 @@ jobs:
         env:
           TEMP: "R:\\Temp"
 
-      # Run a subset of Unit tests that are known to be affected by host timezone
-      - name: Run unit tests in Singapore Standard Time
-        if: matrix.group == 1
-        run: >-
-          nox -s test-${{ matrix.python }} --
-          -m unit
-          --verbose --numprocesses auto --showlocals
-          -k "test_logging.py or test_base_command.py"
-        env:
-          TEMP: "R:\\Temp"
-        with:
-          timezoneWindows: "Singapore Standard Time"
-
       - name: Run integration tests (group 1)
         if: matrix.group == 1
         run: >-
@@ -225,5 +212,44 @@ jobs:
           nox -s test-${{ matrix.python }} --
           -m integration -k "test_install"
           --verbose --numprocesses auto --showlocals
+        env:
+          TEMP: "R:\\Temp"
+
+  tests-windows-non-utc:
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions/setup-python@v2
+      - uses: szenius/set-timezone@v1.0
+        with:
+          python-version: ${{ matrix.python }}
+          timezoneWindows: "Singapore Standard Time"
+
+      # We use a RAMDisk on Windows, since filesystem IO is a big slowdown
+      # for our tests.
+      - name: Create a RAMDisk
+        run: ./tools/ci/New-RAMDisk.ps1 -Drive R -Size 1GB
+
+      - name: Setup RAMDisk permissions
+        run: |
+          mkdir R:\Temp
+          $acl = Get-Acl "R:\Temp"
+          $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+              "Everyone", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow"
+          )
+          $acl.AddAccessRule($rule)
+          Set-Acl "R:\Temp" $acl
+
+      - run: pip install nox 'virtualenv<20'
+        env:
+          TEMP: "R:\\Temp"
+
+      # Run a subset of Unit tests that are known to be affected by host timezone
+      - name: Run unit tests in Singapore Standard Time
+        if: matrix.group == 1
+        run: >-
+          nox -s test-${{ matrix.python }} --
+          -m unit
+          --verbose --numprocesses auto --showlocals
+          -k "test_logging.py or test_base_command.py"
         env:
           TEMP: "R:\\Temp"
