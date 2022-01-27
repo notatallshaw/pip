@@ -141,7 +141,7 @@ jobs:
           --durations=5
 
   tests-windows:
-    name: tests / ${{ matrix.python }} / ${{ matrix.os }} / $ {{ matrix.timezone }} / ${{ matrix.group }}
+    name: tests / ${{ matrix.python }} / ${{ matrix.os }} / ${{ matrix.timezone }} / ${{ matrix.group }}
     runs-on: ${{ matrix.os }}-latest
 
     needs: [pre-commit, packaging, determine-changes]
