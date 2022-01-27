@@ -141,7 +141,7 @@ jobs:
           --durations=5
 
   tests-windows:
-    name: tests / ${{ matrix.python }} / ${{ matrix.os }} / ${{ matrix.group }}
+    name: tests / ${{ matrix.python }} / ${{ matrix.os }} / $ {{ matrix.timezone }} / ${{ matrix.group }}
     runs-on: ${{ matrix.os }}-latest
 
     needs: [pre-commit, packaging, determine-changes]
@@ -160,13 +160,18 @@ jobs:
           # - 3.9
           - "3.10"
         group: [1, 2]
+        timezone:
+          - "UTC"
+          - "Singapore Standard Time"
 
     steps:
       - uses: actions/checkout@v2
       - uses: actions/setup-python@v2
-      - uses: szenius/set-timezone@v1.0
         with:
           python-version: ${{ matrix.python }}
+      - uses: szenius/set-timezone@v1.0
+        with:
+          timezoneWindows: ${{ matrix.timezone }}
 
       # We use a RAMDisk on Windows, since filesystem IO is a big slowdown
       # for our tests.
@@ -189,7 +194,7 @@ jobs:
 
       # Main check
       - name: Run unit tests
-        if: matrix.group == 1
+        if: matrix.group == 1 && (matrix.timezone == "UTC" || matrix.python == "3.10")
         run: >-
           nox -s test-${{ matrix.python }} --
           -m unit
@@ -198,7 +203,7 @@ jobs:
           TEMP: "R:\\Temp"
 
       - name: Run integration tests (group 1)
-        if: matrix.group == 1
+        if: matrix.group == 1 && matrix.timezone == "UTC"
         run: >-
           nox -s test-${{ matrix.python }} --
           -m integration -k "not test_install"
@@ -207,68 +212,10 @@ jobs:
           TEMP: "R:\\Temp"
 
       - name: Run integration tests (group 2)
-        if: matrix.group == 2
+        if: matrix.group == 2 && matrix.timezone == "UTC"
         run: >-
           nox -s test-${{ matrix.python }} --
           -m integration -k "test_install"
           --verbose --numprocesses auto --showlocals
-        env:
-          TEMP: "R:\\Temp"
-
-  tests-windows-non-utc:
-    name: tests-non-utc / ${{ matrix.python }} / ${{ matrix.os }} / ${{ matrix.group }}
-    runs-on: ${{ matrix.os }}-latest
-
-    needs: [pre-commit, packaging, determine-changes]
-    if: >-
-      needs.determine-changes.outputs.tests == 'true' ||
-      github.event_name != 'pull_request'
-
-    strategy:
-      fail-fast: true
-      matrix:
-        os: [Windows]
-        python:
-        # Commented out, we already ran tests normally, this is just for additional timezones
-          # - 3.7
-          # - 3.8
-          # - 3.9
-          - "3.10"
-    steps:
-      - uses: actions/checkout@v2
-      - uses: actions/setup-python@v2
-        with:
-            python-version: ${{ matrix.python }}
-      - uses: szenius/set-timezone@v1.0
-        with:
-          timezoneWindows: "Singapore Standard Time"
-
-      # We use a RAMDisk on Windows, since filesystem IO is a big slowdown
-      # for our tests.
-      - name: Create a RAMDisk
-        run: ./tools/ci/New-RAMDisk.ps1 -Drive R -Size 1GB
-
-      - name: Setup RAMDisk permissions
-        run: |
-          mkdir R:\Temp
-          $acl = Get-Acl "R:\Temp"
-          $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
-              "Everyone", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow"
-          )
-          $acl.AddAccessRule($rule)
-          Set-Acl "R:\Temp" $acl
-
-      - run: pip install nox 'virtualenv<20'
-        env:
-          TEMP: "R:\\Temp"
-
-      # Run a subset of Unit tests that are known to be affected by host timezone
-      - name: Run unit tests in Singapore Standard Time
-        if: matrix.group == 1
-        run: >-
-          nox -s test-${{ matrix.python }} --
-          -m unit
-          --verbose --numprocesses auto --showlocals
-          -k "test_logging.py or test_base_command.py"
         env:
           TEMP: "R:\\Temp"
