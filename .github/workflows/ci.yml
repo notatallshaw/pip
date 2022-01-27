@@ -146,8 +146,8 @@ jobs:
 
     needs: [pre-commit, packaging, determine-changes]
     if: >-
-      needs.determine-changes.outputs.tests == 'true' ||
-      github.event_name != 'pull_request'
+      ( needs.determine-changes.outputs.tests == 'true' || github.event_name != 'pull_request' ) &&
+      ( matrix.timezone == 'UTC' || matrix.python == '3.10' )
 
     strategy:
       fail-fast: true
@@ -194,7 +194,7 @@ jobs:
 
       # Main check
       - name: Run unit tests
-        if: matrix.group == 1 && (matrix.timezone == 'UTC' || matrix.python == '3.10')
+        if: matrix.group == 1
         run: >-
           nox -s test-${{ matrix.python }} --
           -m unit
