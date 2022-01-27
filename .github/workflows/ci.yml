@@ -216,12 +216,31 @@ jobs:
           TEMP: "R:\\Temp"
 
   tests-windows-non-utc:
+    name: tests-non-utc / ${{ matrix.python }} / ${{ matrix.os }} / ${{ matrix.group }}
+    runs-on: ${{ matrix.os }}-latest
+
+    needs: [pre-commit, packaging, determine-changes]
+    if: >-
+      needs.determine-changes.outputs.tests == 'true' ||
+      github.event_name != 'pull_request'
+
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [Windows]
+        python:
+        # Commented out, we already ran tests normally, this is just for additional timezones
+          # - 3.7
+          # - 3.8
+          # - 3.9
+          - "3.10"
     steps:
       - uses: actions/checkout@v2
       - uses: actions/setup-python@v2
+        with:
+            python-version: ${{ matrix.python }}
       - uses: szenius/set-timezone@v1.0
         with:
-          python-version: ${{ matrix.python }}
           timezoneWindows: "Singapore Standard Time"
 
       # We use a RAMDisk on Windows, since filesystem IO is a big slowdown
