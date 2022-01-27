@@ -196,6 +196,19 @@ jobs:
         env:
           TEMP: "R:\\Temp"
 
+      # Run a subset of Unit tests that are known to be affected by host timezone
+      - name: Run unit tests in Singapore Standard Time
+        if: matrix.group == 1
+        run: >-
+          nox -s test-${{ matrix.python }} --
+          -m unit
+          --verbose --numprocesses auto --showlocals
+          -k "test_logging.py or test_base_command.py"
+        env:
+          TEMP: "R:\\Temp"
+        with:
+          timezoneWindows: "Singapore Standard Time"
+
       - name: Run integration tests (group 1)
         if: matrix.group == 1
         run: >-
