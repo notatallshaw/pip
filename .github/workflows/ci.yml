@@ -179,7 +179,7 @@ jobs:
           - timezone: "New Zealand Standard Time"
             python: 3.7
           - timezone: "Pacific Standard Time"
-            group: 3.7
+            python: 3.7
 
     steps:
       - uses: actions/checkout@v2
@@ -188,7 +188,7 @@ jobs:
           python-version: ${{ matrix.python }}
       - uses: pradyunsg/set-timezone@v1.0
         with:
-          timezoneWindows: ${{ matrix.timezone }}  
+          timezoneWindows: ${{ matrix.timezone }}
 
       # We use a RAMDisk on Windows, since filesystem IO is a big slowdown
       # for our tests.
