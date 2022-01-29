@@ -220,7 +220,7 @@ jobs:
           TEMP: "R:\\Temp"
 
       - name: Run integration tests (group 1)
-        if: matrix.group == 1 && matrix.timezone = 'UTC'
+        if: matrix.group == 1 && matrix.timezone == 'UTC'
         run: >-
           nox -s test-${{ matrix.python }} --
           -m integration -k "not test_install"
@@ -229,7 +229,7 @@ jobs:
           TEMP: "R:\\Temp"
 
       - name: Run integration tests (group 2)
-        if: matrix.group == 2 && matrix.timezone = 'UTC'
+        if: matrix.group == 2 && matrix.timezone == 'UTC'
         run: >-
           nox -s test-${{ matrix.python }} --
           -m integration -k "test_install"
