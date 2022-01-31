@@ -120,16 +120,20 @@ jobs:
         exclude:
           # Since Windows tests are expensively slow exclude some:
           - os: "Windows"
-            python: "3.8"
-          - os: "Windows"
-            python: "3.9"
-          - os: "Windows"
             group: "All"
         include:
           - os: "Windows"
             group: "Unit & Integration 1"
+            python: "3.7"
           - os: "Windows"
             group: "Integration 2"
+            python: "3.7"
+          - os: "Windows"
+            group: "Unit & Integration 1"
+            python: "3.10"
+          - os: "Windows"
+            group: "Integration 2"
+            python: "3.10"
 
     steps:
       - uses: actions/checkout@v2
