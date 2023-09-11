@@ -1,4 +1,4 @@
-from collections import defaultdict
+from collections import defaultdict, deque
 from logging import getLogger
 from typing import Any, DefaultDict
 
@@ -12,6 +12,7 @@ logger = getLogger(__name__)
 class PipReporter(BaseReporter):
     def __init__(self) -> None:
         self.reject_count_by_package: DefaultDict[str, int] = defaultdict(int)
+        self._last_backtracking_on = deque(maxlen=5)
 
         self._messages_at_reject_count = {
             1: (
@@ -53,6 +54,25 @@ class PipReporter(BaseReporter):
                 msg += "The user requested "
             msg += req.format_for_error()
         logger.debug(msg)
+
+    def backtracking_on(self, names, unsatisfied_names) -> None:
+        if (names, unsatisfied_names) in self._last_backtracking_on:
+            return None
+        
+        self._last_backtracking_on.append((names, unsatisfied_names))
+
+        if unsatisfied_names:
+            logger.info(
+                "INFO: pip is backtracking on cause(s) '%s' because of "
+                "incompatible requirements on: %s",
+                ", ".join(names),
+                ", ".join(unsatisfied_names),
+            )
+        else:
+            logger.info(
+                "INFO: pip is backtracking because of incompatible requirements on: %s",
+                ", ".join(names),
+            )
 
 
 class PipDebuggingReporter(BaseReporter):
