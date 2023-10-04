@@ -432,7 +432,7 @@ class Resolution(object):
                 # an unpinned state, so we can work on it in the next round.
                 self._r.resolving_conflicts(causes=causes)
                 success = self._backjump(causes)
-                self.state.backtrack_causes[:] = causes
+                self.state.backtrack_causes[:] = self._p._narrow_causes(causes)
 
                 # Dead ends everywhere. Give up.
                 if not success:
