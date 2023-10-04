@@ -253,3 +253,31 @@ class PipProvider(_ProviderBase):
             if backtrack_cause.parent and identifier == backtrack_cause.parent.name:
                 return True
         return False
+
+    def _narrow_causes(self, causes):
+        """Return a narrowed causes list
+        """
+        # Causes are often duplicates, first dedup them
+        deduped_causes = list({id(c): c for c in causes}.values())
+
+        # For each cause check if it actually contradicts with another cause
+        # and put them both in "narrowed causes", or otherwise disregard it
+        narrowed_causes = []
+        while deduped_causes:
+            cause = deduped_causes.pop()
+            for i, alternative_cause in enumerate(deduped_causes):
+                if cause.requirement.name != alternative_cause.requirement.name:
+                    continue
+
+                specifier = (
+                    alternative_cause.requirement.get_candidate_lookup()[1].specifier
+                )
+                alternative_specifier = (
+                    alternative_cause.requirement.get_candidate_lookup()[1].specifier
+                )
+                specifier_intersection = specifier and alternative_specifier
+                if not str(specifier_intersection):
+                    narrowed_causes.append(cause)
+                    narrowed_causes.append(deduped_causes.pop(i))
+
+        return narrowed_causes
