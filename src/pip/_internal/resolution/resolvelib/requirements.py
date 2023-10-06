@@ -91,7 +91,7 @@ class SpecifierRequirement(Requirement):
         # prerelease candidates if the user does not expect them.
         assert self._ireq.req, "Specifier-backed ireq is always PEP 508"
         spec = self._ireq.req.specifier
-        return spec.contains(candidate.version, prereleases=True)
+        return specifier_contains(spec, candidate.version, prereleases=True)
 
 
 class SpecifierWithoutExtrasRequirement(SpecifierRequirement):

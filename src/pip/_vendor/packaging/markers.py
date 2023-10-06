@@ -7,6 +7,7 @@ import os
 import platform
 import sys
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from pip._internal.packaging.specifiers import specifier_contains
 
 from pip._vendor.pyparsing import (  # noqa: N817
     Forward,
@@ -192,7 +193,7 @@ def _eval_op(lhs: str, op: Op, rhs: str) -> bool:
     except InvalidSpecifier:
         pass
     else:
-        return spec.contains(lhs)
+        return specifier_contains(spec, lhs, None)
 
     oper: Optional[Operator] = _operators.get(op.serialize())
     if oper is None:

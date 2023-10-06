@@ -11,7 +11,7 @@ if TYPE_CHECKING:
 def specifier_contains(
     specifier: "SpecifierSet",
     candidate_version: "CandidateVersion",
-    prereleases: bool,
+    prereleases: bool | None,
 ):
     if specifier.contains(candidate_version, prereleases=prereleases):
         return True
