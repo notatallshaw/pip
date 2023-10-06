@@ -19,6 +19,7 @@ from pip import __file__ as pip_location
 from pip._internal.cli.spinners import open_spinner
 from pip._internal.locations import get_platlib, get_purelib, get_scheme
 from pip._internal.metadata import get_default_environment, get_environment
+from pip._internal.packaging.specifiers import specifier_contains
 from pip._internal.utils.subprocess import call_subprocess
 from pip._internal.utils.temp_dir import TempDirectory, tempdir_kinds
 
@@ -196,7 +197,7 @@ class BuildEnvironment:
                     installed_req_str = f"{req.name}=={dist.version}"
                 else:
                     installed_req_str = f"{req.name}==={dist.version}"
-                if not req.specifier.contains(dist.version, prereleases=True):
+                if not specifier_contains(req.specifier, dist.version, prereleases=True):
                     conflicting.add((installed_req_str, req_str))
                 # FIXME: Consider direct URL?
         return conflicting, missing

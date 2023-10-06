@@ -64,6 +64,7 @@ from .requirements import (
     SpecifierRequirement,
     SpecifierWithoutExtrasRequirement,
     UnsatisfiableRequirement,
+    speicifer_contains,
 )
 
 if TYPE_CHECKING:
@@ -268,7 +269,7 @@ class Factory:
                 return None
             # Don't use the installed distribution if its version does not fit
             # the current dependency graph.
-            if not specifier.contains(installed_dist.version, prereleases=True):
+            if not speicifer_contains(specifier, installed_dist.version, prereleases=True):
                 return None
             candidate = self._make_candidate_from_dist(
                 dist=installed_dist,

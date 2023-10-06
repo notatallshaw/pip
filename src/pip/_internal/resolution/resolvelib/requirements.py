@@ -1,12 +1,11 @@
-from functools import lru_cache
-
 from pip._vendor.packaging.specifiers import SpecifierSet
 from pip._vendor.packaging.utils import NormalizedName, canonicalize_name
 
+from pip._internal.packaging.specifiers import specifier_contains
 from pip._internal.req.constructors import install_req_drop_extras
 from pip._internal.req.req_install import InstallRequirement
 
-from .base import Candidate, CandidateLookup, CandidateVersion, Requirement, format_name
+from .base import Candidate, CandidateLookup, Requirement, format_name
 
 
 class ExplicitRequirement(Requirement):
@@ -107,17 +106,6 @@ class SpecifierWithoutExtrasRequirement(SpecifierRequirement):
         self._extras = frozenset(canonicalize_name(e) for e in self._ireq.extras)
 
 
-@lru_cache(maxsize=None)
-def cache_speicifer_contains(
-    specifier: SpecifierSet,
-    candidate_version: CandidateVersion,
-    prereleases: bool,
-):
-    if specifier.contains(candidate_version, prereleases=prereleases):
-        return True
-    return False
-
-
 class RequiresPythonRequirement(Requirement):
     """A requirement representing Requires-Python metadata."""
 
@@ -146,7 +134,7 @@ class RequiresPythonRequirement(Requirement):
         return str(self)
 
     def get_candidate_lookup(self) -> CandidateLookup:
-        if cache_speicifer_contains(
+        if specifier_contains(
             self.specifier, self._candidate.version, prereleases=True
         ):
             return self._candidate, None
@@ -157,7 +145,7 @@ class RequiresPythonRequirement(Requirement):
         # We can safely always allow prereleases here since PackageFinder
         # already implements the prerelease logic, and would have filtered out
         # prerelease candidates if the user does not expect them.
-        return cache_speicifer_contains(
+        return specifier_contains(
             self.specifier, candidate.version, prereleases=True
         )
 

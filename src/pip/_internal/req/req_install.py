@@ -37,6 +37,7 @@ from pip._internal.operations.install.editable_legacy import (
     install_editable as install_editable_legacy,
 )
 from pip._internal.operations.install.wheel import install_wheel
+from pip._internal.packaging.specifiers import specifier_contains
 from pip._internal.packaging.version import parse_version
 from pip._internal.pyproject import load_pyproject_toml, make_pyproject_path
 from pip._internal.req.req_uninstall import UninstallPathSet
@@ -428,7 +429,8 @@ class InstallRequirement:
         if not existing_dist:
             return
 
-        version_compatible = self.req.specifier.contains(
+        version_compatible = specifier_contains(
+            self.req.specifier,
             existing_dist.version,
             prereleases=True,
         )

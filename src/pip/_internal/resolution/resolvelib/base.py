@@ -5,6 +5,7 @@ from pip._vendor.packaging.utils import NormalizedName
 from pip._vendor.packaging.version import LegacyVersion, Version
 
 from pip._internal.models.link import Link, links_equivalent
+from pip._internal.packaging.specifiers import specifier_contains
 from pip._internal.req.req_install import InstallRequirement
 from pip._internal.utils.hashes import Hashes
 
@@ -56,7 +57,7 @@ class Constraint:
         # We can safely always allow prereleases here since PackageFinder
         # already implements the prerelease logic, and would have filtered out
         # prerelease candidates if the user does not expect them.
-        return self.specifier.contains(candidate.version, prereleases=True)
+        return specifier_contains(self.specifier, candidate.version, prereleases=True)
 
 
 class Requirement:

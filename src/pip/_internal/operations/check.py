@@ -12,6 +12,7 @@ from pip._vendor.packaging.version import LegacyVersion
 from pip._internal.distributions import make_distribution_for_install_requirement
 from pip._internal.metadata import get_default_environment
 from pip._internal.metadata.base import DistributionVersion
+from pip._internal.packaging.specifiers import specifier_contains
 from pip._internal.req.req_install import InstallRequirement
 from pip._internal.utils.deprecation import deprecated
 
@@ -87,7 +88,7 @@ def check_package_set(
 
             # Check if there's a conflict
             version = package_set[name].version
-            if not req.specifier.contains(version, prereleases=True):
+            if not specifier_contains(req.specifier, version, prereleases=True):
                 conflicting_deps.add((name, version, req))
 
         if missing_deps:
