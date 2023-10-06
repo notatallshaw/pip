@@ -7,7 +7,6 @@ import re
 import shutil
 from typing import Iterable, List, Optional, Tuple
 
-from pip._vendor.packaging.utils import canonicalize_name, canonicalize_version
 from pip._vendor.packaging.version import InvalidVersion, Version
 
 from pip._internal.cache import WheelCache
@@ -18,6 +17,7 @@ from pip._internal.models.wheel import Wheel
 from pip._internal.operations.build.wheel import build_wheel_pep517
 from pip._internal.operations.build.wheel_editable import build_wheel_editable
 from pip._internal.operations.build.wheel_legacy import build_wheel_legacy
+from pip._internal.packaging.utils import canonicalize_name, canonicalize_version
 from pip._internal.packaging.version import parse_new_version
 from pip._internal.req.req_install import InstallRequirement
 from pip._internal.utils.logging import indent_log
