@@ -36,6 +36,7 @@ from pip._internal.metadata import BaseDistribution, get_default_environment
 from pip._internal.models.link import Link
 from pip._internal.models.wheel import Wheel
 from pip._internal.operations.prepare import RequirementPreparer
+from pip._internal.packaging.specifiers import specifier_contains
 from pip._internal.req.constructors import install_req_from_link_and_ireq
 from pip._internal.req.req_install import (
     InstallRequirement,
@@ -64,7 +65,6 @@ from .requirements import (
     SpecifierRequirement,
     SpecifierWithoutExtrasRequirement,
     UnsatisfiableRequirement,
-    speicifer_contains,
 )
 
 if TYPE_CHECKING:
@@ -269,7 +269,7 @@ class Factory:
                 return None
             # Don't use the installed distribution if its version does not fit
             # the current dependency graph.
-            if not speicifer_contains(specifier, installed_dist.version, prereleases=True):
+            if not specifier_contains(specifier, installed_dist.version, prereleases=True):
                 return None
             candidate = self._make_candidate_from_dist(
                 dist=installed_dist,
