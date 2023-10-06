@@ -108,11 +108,14 @@ class SpecifierWithoutExtrasRequirement(SpecifierRequirement):
 
 
 @lru_cache(maxsize=None)
-def cache_speicifer_contains(specifier: SpecifierSet, candidate_version: CandidateVersion, prereleases: bool):
+def cache_speicifer_contains(
+    specifier: SpecifierSet,
+    candidate_version: CandidateVersion,
+    prereleases: bool,
+):
     if specifier.contains(candidate_version, prereleases=prereleases):
         return True
     return False
-
 
 
 class RequiresPythonRequirement(Requirement):
@@ -154,7 +157,9 @@ class RequiresPythonRequirement(Requirement):
         # We can safely always allow prereleases here since PackageFinder
         # already implements the prerelease logic, and would have filtered out
         # prerelease candidates if the user does not expect them.
-        return self.specifier.contains(candidate.version, prereleases=True)
+        return cache_speicifer_contains(
+            self.specifier, candidate.version, prereleases=True
+        )
 
 
 class UnsatisfiableRequirement(Requirement):
