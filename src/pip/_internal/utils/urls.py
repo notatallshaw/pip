@@ -2,6 +2,7 @@ import os
 import string
 import urllib.parse
 import urllib.request
+from functools import lru_cache
 from typing import Optional
 
 from .compat import WINDOWS
@@ -12,7 +13,7 @@ def get_url_scheme(url: str) -> Optional[str]:
         return None
     return url.split(":", 1)[0].lower()
 
-
+@lru_cache(maxsize=None)
 def path_to_url(path: str) -> str:
     """
     Convert a path to a file: URL.  The path will be made absolute and have
@@ -23,6 +24,7 @@ def path_to_url(path: str) -> str:
     return url
 
 
+@lru_cache(maxsize=None)
 def url_to_path(url: str) -> str:
     """
     Convert a file: URL to a path.
