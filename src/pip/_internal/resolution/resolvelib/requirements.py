@@ -1,10 +1,12 @@
+from functools import lru_cache
+
 from pip._vendor.packaging.specifiers import SpecifierSet
 from pip._vendor.packaging.utils import NormalizedName, canonicalize_name
 
 from pip._internal.req.constructors import install_req_drop_extras
 from pip._internal.req.req_install import InstallRequirement
 
-from .base import Candidate, CandidateLookup, Requirement, format_name
+from .base import Candidate, CandidateLookup, CandidateVersion, Requirement, format_name
 
 
 class ExplicitRequirement(Requirement):
@@ -105,6 +107,14 @@ class SpecifierWithoutExtrasRequirement(SpecifierRequirement):
         self._extras = frozenset(canonicalize_name(e) for e in self._ireq.extras)
 
 
+@lru_cache(maxsize=None)
+def cache_speicifer_contains(specifier: SpecifierSet, candidate_version: CandidateVersion, prereleases: bool):
+    if specifier.contains(candidate_version, prereleases=prereleases):
+        return True
+    return False
+
+
+
 class RequiresPythonRequirement(Requirement):
     """A requirement representing Requires-Python metadata."""
 
@@ -133,7 +143,9 @@ class RequiresPythonRequirement(Requirement):
         return str(self)
 
     def get_candidate_lookup(self) -> CandidateLookup:
-        if self.specifier.contains(self._candidate.version, prereleases=True):
+        if cache_speicifer_contains(
+            self.specifier, self._candidate.version, prereleases=True
+        ):
             return self._candidate, None
         return None, None
 
