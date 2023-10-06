@@ -30,7 +30,7 @@ from typing import (
 from zipfile import ZipFile
 
 import pytest
-from pip._vendor.packaging.utils import canonicalize_name
+from pip._internal.packaging.utils import canonicalize_name
 from scripttest import FoundDir, FoundFile, ProcResult, TestFileEnvironment
 
 from pip._internal.cli.main import main as pip_entry_point

@@ -2,7 +2,7 @@ import logging
 import sys
 from typing import TYPE_CHECKING, Any, FrozenSet, Iterable, Optional, Tuple, Union, cast
 
-from pip._vendor.packaging.utils import NormalizedName, canonicalize_name
+from pip._vendor.packaging.utils import NormalizedName
 
 from pip._internal.exceptions import (
     HashError,
@@ -12,6 +12,7 @@ from pip._internal.exceptions import (
 from pip._internal.metadata import BaseDistribution
 from pip._internal.models.link import Link, links_equivalent
 from pip._internal.models.wheel import Wheel
+from pip._internal.packaging.utils import canonicalize_name
 from pip._internal.packaging.version import parse_new_version
 from pip._internal.req.constructors import (
     install_req_from_editable,

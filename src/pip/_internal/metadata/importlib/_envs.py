@@ -8,10 +8,11 @@ import zipfile
 import zipimport
 from typing import Iterator, List, Optional, Sequence, Set, Tuple
 
-from pip._vendor.packaging.utils import NormalizedName, canonicalize_name
+from pip._vendor.packaging.utils import NormalizedName
 
 from pip._internal.metadata.base import BaseDistribution, BaseEnvironment
 from pip._internal.models.wheel import Wheel
+from pip._internal.packaging.utils import canonicalize_name
 from pip._internal.utils.deprecation import deprecated
 from pip._internal.utils.filetypes import WHEEL_EXTENSION
 

@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, FrozenSet, Iterable, List, Optional, Set, Tupl
 
 from pip._vendor.packaging import specifiers
 from pip._vendor.packaging.tags import Tag
-from pip._vendor.packaging.utils import canonicalize_name
+from pip._internal.packaging.utils import canonicalize_name
 from pip._vendor.packaging.version import _BaseVersion
 
 from pip._internal.exceptions import (

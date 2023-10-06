@@ -7,9 +7,10 @@ from typing import Collection, Iterable, Iterator, List, Mapping, NamedTuple, Op
 
 from pip._vendor import pkg_resources
 from pip._vendor.packaging.requirements import Requirement
-from pip._vendor.packaging.utils import NormalizedName, canonicalize_name
+from pip._vendor.packaging.utils import NormalizedName
 
 from pip._internal.exceptions import InvalidWheel, NoneMetadataError, UnsupportedWheel
+from pip._internal.packaging.utils import canonicalize_name
 from pip._internal.packaging.version import parse_version
 from pip._internal.utils.egg_link import egg_link_path_from_location
 from pip._internal.utils.misc import display_path, normalize_path

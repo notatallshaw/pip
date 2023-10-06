@@ -4,7 +4,7 @@ import logging
 import os
 from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple, cast
 
-from pip._vendor.packaging.utils import canonicalize_name
+from pip._internal.packaging.utils import canonicalize_name
 from pip._vendor.resolvelib import BaseReporter, ResolutionImpossible
 from pip._vendor.resolvelib import Resolver as RLResolver
 from pip._vendor.resolvelib.structs import DirectedGraph

@@ -2,7 +2,7 @@ import logging
 from optparse import Values
 from typing import List
 
-from pip._vendor.packaging.utils import canonicalize_name
+from pip._internal.packaging.utils import canonicalize_name
 
 from pip._internal.cli import cmdoptions
 from pip._internal.cli.base_command import Command

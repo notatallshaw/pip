@@ -20,7 +20,7 @@ from typing import (
 
 from pip._vendor.packaging.requirements import InvalidRequirement
 from pip._vendor.packaging.specifiers import SpecifierSet
-from pip._vendor.packaging.utils import NormalizedName, canonicalize_name
+from pip._vendor.packaging.utils import NormalizedName
 from pip._vendor.resolvelib import ResolutionImpossible
 
 from pip._internal.cache import CacheEntry, WheelCache
@@ -37,6 +37,7 @@ from pip._internal.models.link import Link
 from pip._internal.models.wheel import Wheel
 from pip._internal.operations.prepare import RequirementPreparer
 from pip._internal.packaging.specifiers import specifier_contains
+from pip._internal.packaging.utils import canonicalize_name
 from pip._internal.req.constructors import install_req_from_link_and_ireq
 from pip._internal.req.req_install import (
     InstallRequirement,

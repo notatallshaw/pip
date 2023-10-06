@@ -24,7 +24,7 @@ from typing import (
 
 from pip._vendor.packaging.requirements import Requirement
 from pip._vendor.packaging.specifiers import InvalidSpecifier, SpecifierSet
-from pip._vendor.packaging.utils import NormalizedName, canonicalize_name
+from pip._vendor.packaging.utils import NormalizedName
 from pip._vendor.packaging.version import LegacyVersion, Version
 
 from pip._internal.exceptions import NoneMetadataError
@@ -34,6 +34,7 @@ from pip._internal.models.direct_url import (
     DirectUrl,
     DirectUrlValidationError,
 )
+from pip._internal.packaging.utils import canonicalize_name
 from pip._internal.utils.compat import stdlib_pkgs  # TODO: Move definition here.
 from pip._internal.utils.egg_link import egg_link_path_from_sys_path
 from pip._internal.utils.misc import is_local, normalize_path

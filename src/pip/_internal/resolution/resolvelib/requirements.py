@@ -1,7 +1,8 @@
 from pip._vendor.packaging.specifiers import SpecifierSet
-from pip._vendor.packaging.utils import NormalizedName, canonicalize_name
+from pip._vendor.packaging.utils import NormalizedName
 
 from pip._internal.packaging.specifiers import specifier_contains
+from pip._internal.packaging.utils import canonicalize_name
 from pip._internal.req.constructors import install_req_drop_extras
 from pip._internal.req.req_install import InstallRequirement
 

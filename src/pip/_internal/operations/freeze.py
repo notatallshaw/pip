@@ -3,7 +3,7 @@ import logging
 import os
 from typing import Container, Dict, Generator, Iterable, List, NamedTuple, Optional, Set
 
-from pip._vendor.packaging.utils import canonicalize_name
+from pip._internal.packaging.utils import canonicalize_name
 from pip._vendor.packaging.version import Version
 
 from pip._internal.exceptions import BadCommand, InstallationError

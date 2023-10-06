@@ -3,7 +3,7 @@ from collections import OrderedDict
 from typing import Dict, List
 
 from pip._vendor.packaging.specifiers import LegacySpecifier
-from pip._vendor.packaging.utils import canonicalize_name
+from pip._internal.packaging.utils import canonicalize_name
 from pip._vendor.packaging.version import LegacyVersion
 
 from pip._internal.req.req_install import InstallRequirement

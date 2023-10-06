@@ -12,7 +12,7 @@ from typing import Any, Collection, Dict, Iterable, List, Optional, Sequence, Un
 from pip._vendor.packaging.markers import Marker
 from pip._vendor.packaging.requirements import Requirement
 from pip._vendor.packaging.specifiers import SpecifierSet
-from pip._vendor.packaging.utils import canonicalize_name
+from pip._internal.packaging.utils import canonicalize_name
 from pip._vendor.packaging.version import Version
 from pip._vendor.pyproject_hooks import BuildBackendHookCaller
 

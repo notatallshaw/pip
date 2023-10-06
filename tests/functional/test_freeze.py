@@ -6,7 +6,7 @@ from doctest import ELLIPSIS, OutputChecker
 from pathlib import Path
 
 import pytest
-from pip._vendor.packaging.utils import canonicalize_name
+from pip._internal.packaging.utils import canonicalize_name
 
 from pip._internal.models.direct_url import DirectUrl, DirInfo
 from tests.lib import (
