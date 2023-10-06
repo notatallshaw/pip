@@ -9,7 +9,6 @@ import sys
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 
-from pip._vendor.packaging.version import parse as parse_version
 from pip._vendor.rich.console import Group
 from pip._vendor.rich.markup import escape
 from pip._vendor.rich.text import Text
@@ -20,6 +19,7 @@ from pip._internal.metadata import get_default_environment
 from pip._internal.metadata.base import DistributionVersion
 from pip._internal.models.selection_prefs import SelectionPreferences
 from pip._internal.network.session import PipSession
+from pip._internal.packaging.version import parse_version
 from pip._internal.utils.compat import WINDOWS
 from pip._internal.utils.entrypoints import (
     get_best_invocation_for_this_pip,

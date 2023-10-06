@@ -2,9 +2,9 @@ import re
 from typing import List
 
 import pytest
-from pip._vendor.packaging.version import Version
 
 from pip._internal.commands.debug import create_vendor_txt_map
+from pip._internal.packaging.version import parse_new_version
 from pip._internal.utils import compatibility_tags
 from tests.lib import PipTestEnvironment
 
@@ -49,7 +49,7 @@ def test_debug__library_versions(script: PipTestEnvironment) -> None:
     for name, value in vendored_versions.items():
         match = re.search(rf"{name}==(\S+)", result.stdout)
         assert match is not None, f"Could not find {name} in output"
-        assert Version(match.group(1)) == Version(value)
+        assert parse_new_version(match.group(1)) == parse_new_version(value)
 
 
 @pytest.mark.parametrize(

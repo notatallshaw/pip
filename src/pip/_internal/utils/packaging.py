@@ -3,8 +3,10 @@ import logging
 import re
 from typing import NewType, Optional, Tuple, cast
 
-from pip._vendor.packaging import specifiers, version
+from pip._vendor.packaging import specifiers
 from pip._vendor.packaging.requirements import Requirement
+
+from pip._internal.packaging.version import parse_version
 
 NormalizedExtra = NewType("NormalizedExtra", str)
 
@@ -30,7 +32,7 @@ def check_requires_python(
         return True
     requires_python_specifier = specifiers.SpecifierSet(requires_python)
 
-    python_version = version.parse(".".join(map(str, version_info)))
+    python_version = parse_version(".".join(map(str, version_info)))
     return python_version in requires_python_specifier
 
 

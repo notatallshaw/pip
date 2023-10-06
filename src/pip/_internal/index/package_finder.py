@@ -11,7 +11,6 @@ from pip._vendor.packaging import specifiers
 from pip._vendor.packaging.tags import Tag
 from pip._vendor.packaging.utils import canonicalize_name
 from pip._vendor.packaging.version import _BaseVersion
-from pip._vendor.packaging.version import parse as parse_version
 
 from pip._internal.exceptions import (
     BestVersionAlreadyInstalled,
@@ -27,6 +26,7 @@ from pip._internal.models.search_scope import SearchScope
 from pip._internal.models.selection_prefs import SelectionPreferences
 from pip._internal.models.target_python import TargetPython
 from pip._internal.models.wheel import Wheel
+from pip._internal.packaging.version import parse_version
 from pip._internal.req import InstallRequirement
 from pip._internal.utils._log import getLogger
 from pip._internal.utils.filetypes import WHEEL_EXTENSION

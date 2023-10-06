@@ -14,7 +14,6 @@ from pip._vendor.packaging.requirements import Requirement
 from pip._vendor.packaging.specifiers import SpecifierSet
 from pip._vendor.packaging.utils import canonicalize_name
 from pip._vendor.packaging.version import Version
-from pip._vendor.packaging.version import parse as parse_version
 from pip._vendor.pyproject_hooks import BuildBackendHookCaller
 
 from pip._internal.build_env import BuildEnvironment, NoOpBuildEnvironment
@@ -38,6 +37,7 @@ from pip._internal.operations.install.editable_legacy import (
     install_editable as install_editable_legacy,
 )
 from pip._internal.operations.install.wheel import install_wheel
+from pip._internal.packaging.version import parse_version
 from pip._internal.pyproject import load_pyproject_toml, make_pyproject_path
 from pip._internal.req.req_uninstall import UninstallPathSet
 from pip._internal.utils.deprecation import deprecated

@@ -18,6 +18,7 @@ from pip._internal.models.wheel import Wheel
 from pip._internal.operations.build.wheel import build_wheel_pep517
 from pip._internal.operations.build.wheel_editable import build_wheel_editable
 from pip._internal.operations.build.wheel_legacy import build_wheel_legacy
+from pip._internal.packaging.version import parse_new_version
 from pip._internal.req.req_install import InstallRequirement
 from pip._internal.utils.logging import indent_log
 from pip._internal.utils.misc import ensure_dir, hash_file
@@ -154,11 +155,11 @@ def _verify_one(req: InstallRequirement, wheel_path: str) -> None:
     if metadata_version_value is None:
         raise UnsupportedWheel("Missing Metadata-Version")
     try:
-        metadata_version = Version(metadata_version_value)
+        metadata_version = parse_new_version(metadata_version_value)
     except InvalidVersion:
         msg = f"Invalid Metadata-Version: {metadata_version_value}"
         raise UnsupportedWheel(msg)
-    if metadata_version >= Version("1.2") and not isinstance(dist.version, Version):
+    if metadata_version >= parse_new_version("1.2") and not isinstance(dist.version, Version):
         raise UnsupportedWheel(
             "Metadata 1.2 mandates PEP 440 version, "
             "but {!r} is not".format(dist_verstr)
