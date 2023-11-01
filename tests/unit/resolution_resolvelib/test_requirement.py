@@ -61,9 +61,9 @@ def test_new_resolver_requirement_has_name(
 ) -> None:
     """All requirements should have a name"""
     for spec, name, _ in test_cases:
-        reqs = list(factory.make_requirements_from_spec(spec, comes_from=None))
-        assert len(reqs) == 1
-        assert reqs[0].name == name
+        req = factory.make_requirement_from_spec(spec, comes_from=None)
+        assert req is not None
+        assert req.name == name
 
 
 def test_new_resolver_correct_number_of_matches(
@@ -71,9 +71,8 @@ def test_new_resolver_correct_number_of_matches(
 ) -> None:
     """Requirements should return the correct number of candidates"""
     for spec, _, match_count in test_cases:
-        reqs = list(factory.make_requirements_from_spec(spec, comes_from=None))
-        assert len(reqs) == 1
-        req = reqs[0]
+        req = factory.make_requirement_from_spec(spec, comes_from=None)
+        assert req is not None
         matches = factory.find_candidates(
             req.name,
             {req.name: [req]},
@@ -89,9 +88,8 @@ def test_new_resolver_candidates_match_requirement(
 ) -> None:
     """Candidates returned from find_candidates should satisfy the requirement"""
     for spec, _, _ in test_cases:
-        reqs = list(factory.make_requirements_from_spec(spec, comes_from=None))
-        assert len(reqs) == 1
-        req = reqs[0]
+        req = factory.make_requirement_from_spec(spec, comes_from=None)
+        assert req is not None
         candidates = factory.find_candidates(
             req.name,
             {req.name: [req]},
@@ -106,8 +104,8 @@ def test_new_resolver_candidates_match_requirement(
 
 def test_new_resolver_full_resolve(factory: Factory, provider: PipProvider) -> None:
     """A very basic full resolve"""
-    reqs = list(factory.make_requirements_from_spec("simplewheel", comes_from=None))
-    assert len(reqs) == 1
+    req = factory.make_requirement_from_spec("simplewheel", comes_from=None)
+    assert req is not None
     r: Resolver[Requirement, Candidate, str] = Resolver(provider, BaseReporter())
-    result = r.resolve(reqs)
+    result = r.resolve([req])
     assert set(result.mapping.keys()) == {"simplewheel"}
