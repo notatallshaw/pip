@@ -267,8 +267,8 @@ class Resolution(object):
         # end, signal for backtracking.
         return causes
 
-    def _backjump(self, causes):
-        """Perform backjumping.
+    def _backtrack(self) -> bool:
+        """Perform backtracking.
 
         When we enter here, the stack is like this::
 
@@ -284,46 +284,22 @@ class Resolution(object):
 
         Each iteration of the loop will:
 
-        1.  Identify Z. The incompatibility is not always caused by the latest
-            state. For example, given three requirements A, B and C, with
-            dependencies A1, B1 and C1, where A1 and B1 are incompatible: the
-            last state might be related to C, so we want to discard the
-            previous state.
-        2.  Discard Z.
-        3.  Discard Y but remember its incompatibility information gathered
+        1.  Discard Z.
+        2.  Discard Y but remember its incompatibility information gathered
             previously, and the failure we're dealing with right now.
-        4.  Push a new state Y' based on X, and apply the incompatibility
+        3.  Push a new state Y' based on X, and apply the incompatibility
             information from Y to Y'.
-        5a. If this causes Y' to conflict, we need to backtrack again. Make Y'
+        4a. If this causes Y' to conflict, we need to backtrack again. Make Y'
             the new Z and go back to step 2.
-        5b. If the incompatibilities apply cleanly, end backtracking.
+        4b. If the incompatibilities apply cleanly, end backtracking.
         """
-        incompatible_reqs = itertools.chain(
-            (c.parent for c in causes if c.parent is not None),
-            (c.requirement for c in causes),
-        )
-        incompatible_deps = {self._p.identify(r) for r in incompatible_reqs}
         while len(self._states) >= 3:
             # Remove the state that triggered backtracking.
             del self._states[-1]
 
-            # Ensure to backtrack to a state that caused the incompatibility
-            incompatible_state = False
-            while not incompatible_state:
-                # Retrieve the last candidate pin and known incompatibilities.
-                try:
-                    broken_state = self._states.pop()
-                    name, candidate = broken_state.mapping.popitem()
-                except (IndexError, KeyError):
-                    raise ResolutionImpossible(causes)
-                current_dependencies = {
-                    self._p.identify(d)
-                    for d in self._p.get_dependencies(candidate)
-                }
-                incompatible_state = not current_dependencies.isdisjoint(
-                    incompatible_deps
-                )
-
+            # Retrieve the last candidate pin and known incompatibilities.
+            broken_state = self._states.pop()
+            name, candidate = broken_state.mapping.popitem()
             incompatibilities_from_broken = [
                 (k, list(v.incompatibilities))
                 for k, v in broken_state.criteria.items()
@@ -334,7 +310,7 @@ class Resolution(object):
 
             # Create a new state from the last known-to-work one, and apply
             # the previously gathered incompatibility information.
-            def _patch_criteria():
+            def _patch_criteria() -> bool:
                 for k, incompatibilities in incompatibilities_from_broken:
                     if not incompatibilities:
                         continue
@@ -354,7 +330,7 @@ class Resolution(object):
                             {k: incompatibilities},
                         ),
                     )
-                    candidates = build_iter_view(matches)
+                    candidates: IterableView[CT] = build_iter_view(matches)
                     if not candidates:
                         return False
                     incompatibilities.extend(criterion.incompatibilities)
@@ -431,7 +407,7 @@ class Resolution(object):
                 # Backjump if pinning fails. The backjump process puts us in
                 # an unpinned state, so we can work on it in the next round.
                 self._r.resolving_conflicts(causes=causes)
-                success = self._backjump(causes)
+                success = self._backtrack()
                 self.state.backtrack_causes[:] = causes
 
                 # Dead ends everywhere. Give up.
