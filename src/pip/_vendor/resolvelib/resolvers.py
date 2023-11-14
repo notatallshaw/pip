@@ -307,7 +307,10 @@ class Resolution(object):
             # Remove the state that triggered backtracking.
             del self._states[-1]
 
+            _states_backup = [State(s.mapping.copy(), s.criteria.copy(), s.backtrack_causes[:]) for s in self._states]
+
             # Ensure to backtrack to a state that caused the incompatibility
+            backjumping_failed = True
             incompatible_state = False
             while not incompatible_state:
                 # Retrieve the last candidate pin and known incompatibilities.
@@ -315,7 +318,7 @@ class Resolution(object):
                     broken_state = self._states.pop()
                     name, candidate = broken_state.mapping.popitem()
                 except (IndexError, KeyError):
-                    raise ResolutionImpossible(causes)
+                    break  # Backjumping failed
                 current_dependencies = {
                     self._p.identify(d)
                     for d in self._p.get_dependencies(candidate)
@@ -323,6 +326,15 @@ class Resolution(object):
                 incompatible_state = not current_dependencies.isdisjoint(
                     incompatible_deps
                 )
+            else:
+                backjumping_failed = False # Loop never broken
+            
+            if backjumping_failed:
+                self._states = _states_backup
+                broken_state = self._states.pop()
+                name, candidate = broken_state.mapping.popitem()
+            del _states_backup
+
 
             incompatibilities_from_broken = [
                 (k, list(v.incompatibilities))
