@@ -237,34 +237,6 @@ class PipProvider(_ProviderBase):
         with_requires = not self._ignore_dependencies
         return [r for r in candidate.iter_dependencies(with_requires) if r is not None]
 
-    def _get_conflicting_causes(
-        self, causes: Sequence["PreferenceInformation"]
-    ) -> Sequence["PreferenceInformation"]:
-        """Given causes return which causes conflict with each other"""
-        # For each cause check if it actually contradicts with another cause
-        # and put them both in "conflicting causes", or otherwise disregard it
-        conflicting_causes: list["PreferenceInformation"] = []
-
-        causes_list = list(causes)
-        while causes_list:
-            cause = causes_list.pop()
-            for i, alternative_cause in enumerate(causes_list):
-                if cause.requirement.name != alternative_cause.requirement.name:
-                    continue
-
-                specifier = alternative_cause.requirement.get_candidate_lookup()[
-                    1
-                ].specifier
-                alternative_specifier = (
-                    alternative_cause.requirement.get_candidate_lookup()[1].specifier
-                )
-                specifier_intersection = specifier and alternative_specifier
-                if not str(specifier_intersection):
-                    conflicting_causes.append(cause)
-                    conflicting_causes.append(causes_list.pop(i))
-
-        return conflicting_causes
-
     def filter_unsatisfied_names(
         self,
         unsatisfied_names: Iterable[str],
@@ -300,3 +272,31 @@ class PipProvider(_ProviderBase):
             return unsatisfied_causes_names
 
         return unsatisfied_names
+
+    def _get_conflicting_causes(
+        self, causes: Sequence["PreferenceInformation"]
+    ) -> Sequence["PreferenceInformation"]:
+        """Given causes return which causes conflict with each other"""
+        # For each cause check if it actually contradicts with another cause
+        # and put them both in "conflicting causes", or otherwise disregard it
+        conflicting_causes: list["PreferenceInformation"] = []
+
+        causes_list = list(causes)
+        while causes_list:
+            cause = causes_list.pop()
+            for i, alternative_cause in enumerate(causes_list):
+                if cause.requirement.name != alternative_cause.requirement.name:
+                    continue
+
+                specifier = alternative_cause.requirement.get_candidate_lookup()[
+                    1
+                ].specifier
+                alternative_specifier = (
+                    alternative_cause.requirement.get_candidate_lookup()[1].specifier
+                )
+                specifier_intersection = specifier and alternative_specifier
+                if not str(specifier_intersection):
+                    conflicting_causes.append(cause)
+                    conflicting_causes.append(causes_list.pop(i))
+
+        return conflicting_causes
