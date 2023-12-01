@@ -1,6 +1,7 @@
 import collections
 import itertools
 import operator
+from typing import Set
 
 from .providers import AbstractResolver
 from .structs import DirectedGraph, IteratorMapping, build_iter_view
@@ -418,12 +419,19 @@ class Resolution(object):
                 return self.state
 
             # keep track of satisfied names to calculate diff after pinning
-            satisfied_names = set(self.state.criteria.keys()) - set(
-                unsatisfied_names
+            unsatisfied_names_set = set(unsatisfied_names)
+            satisfied_names = (
+                set(self.state.criteria.keys()) - unsatisfied_names_set
             )
 
+            filtered_unstatisfied_names = list(self._p.filter_unsatisfied_names(unsatisfied_names_set, self.state.backtrack_causes))
+
             # Choose the most preferred unpinned criterion to try.
-            name = min(unsatisfied_names, key=self._get_preference)
+            if len(filtered_unstatisfied_names) > 1:
+                name = min(filtered_unstatisfied_names, key=self._get_preference)
+            else:
+                name = filtered_unstatisfied_names[0]
+
             failure_causes = self._attempt_to_pin_criterion(name)
 
             if failure_causes:
