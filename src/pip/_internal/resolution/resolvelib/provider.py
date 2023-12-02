@@ -179,16 +179,10 @@ class PipProvider(_ProviderBase):
         # free, so we always do it first to avoid needless work if it fails.
         requires_python = identifier == REQUIRES_PYTHON_IDENTIFIER
 
-        # Prefer the causes of backtracking on the assumption that the problem
-        # resolving the dependency tree is related to the failures that caused
-        # the backtracking
-        backtrack_cause = self.is_backtrack_cause(identifier, backtrack_causes)
-
         return (
             not requires_python,
             not direct,
             not pinned,
-            not backtrack_cause,
             inferred_depth,
             requested_order,
             not unfree,
@@ -243,13 +237,73 @@ class PipProvider(_ProviderBase):
         with_requires = not self._ignore_dependencies
         return [r for r in candidate.iter_dependencies(with_requires) if r is not None]
 
-    @staticmethod
-    def is_backtrack_cause(
-        identifier: str, backtrack_causes: Sequence["PreferenceInformation"]
-    ) -> bool:
-        for backtrack_cause in backtrack_causes:
-            if identifier == backtrack_cause.requirement.name:
-                return True
-            if backtrack_cause.parent and identifier == backtrack_cause.parent.name:
-                return True
-        return False
+    def filter_unsatisfied_names(
+        self,
+        unsatisfied_names: Iterable[str],
+        causes: Sequence["PreferenceInformation"],
+    ) -> Iterable[str]:
+        """
+        In general preferring backtrack causes from possible unsatisfied
+        names over is going to resolve quicker, further preferring
+        backtrack causes that conflict with each other
+        """
+        if not causes:
+            return unsatisfied_names
+
+        # Check if backtrack causes are conflicting
+        if len(causes) > 2:
+            causes_to_filter_on = self._get_conflicting_causes(causes)
+            if len(causes_to_filter_on) < 2:
+                causes_to_filter_on = causes
+        else:
+            causes_to_filter_on = causes
+
+        # Extract the causes and parents names
+        causes_names = set()
+        for causes in causes_to_filter_on:
+            causes_names.add(causes.requirement.name)
+            if causes.parent:
+                causes_names.add(causes.parent.name)
+
+        unsatisfied_causes_names = set(unsatisfied_names) & causes_names
+
+        if unsatisfied_causes_names:
+            return unsatisfied_causes_names
+
+        return unsatisfied_names
+
+    def _get_conflicting_causes(
+        self, causes: Sequence["PreferenceInformation"]
+    ) -> Sequence["PreferenceInformation"]:
+        """Given causes return which causes conflict with each other"""
+        # For each cause check if it actually contradicts with another cause
+        # and put them both in "conflicting causes", or otherwise disregard it
+        conflicting_causes: list["PreferenceInformation"] = []
+        causes_by_name: dict[str, list["PreferenceInformation"]] = collections.defaultdict(list)
+
+        # First do a pass of causes to see which ones have the same name
+        # as next step is O(n^2) and the smaller the list we can work on
+        # the faster it will be
+        for cause in causes:
+            causes_by_name[cause.requirement.name].append(cause)
+
+        # Go through each
+        for causes_list in causes_by_name.values():
+            if len(causes_list) < 2:
+                continue
+
+            while causes_list:
+                cause = causes_list.pop()
+                for i, alternative_cause in enumerate(causes_list):
+                    specifier = alternative_cause.requirement.get_candidate_lookup()[
+                        1
+                    ].specifier
+                    alternative_specifier = (
+                        alternative_cause.requirement.get_candidate_lookup()[1].specifier
+                    )
+                    specifier_intersection = specifier and alternative_specifier
+                    if not str(specifier_intersection):
+                        conflicting_causes.append(cause)
+                        conflicting_causes.append(causes_list.pop(i))
+
+        return conflicting_causes
