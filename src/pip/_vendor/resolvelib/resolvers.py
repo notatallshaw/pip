@@ -378,6 +378,12 @@ class Resolution(object):
 
         # No way to backtrack anymore.
         return False
+    
+    def _extract_causes(self, criteron):
+        """Extract causes from list of criterion and deduplicate"""
+        return list(
+            {id(i): i for c in criteron for i in c.information}.values()
+        )
 
     def resolve(self, requirements, max_rounds):
         if self._states:
@@ -432,10 +438,10 @@ class Resolution(object):
             else:
                 name = filtered_unstatisfied_names[0]
 
-            failure_causes = self._attempt_to_pin_criterion(name)
+            failure_criterion = self._attempt_to_pin_criterion(name)
 
-            if failure_causes:
-                causes = [i for c in failure_causes for i in c.information]
+            if failure_criterion:
+                causes = self._extract_causes(failure_criterion)
                 # Backjump if pinning fails. The backjump process puts us in
                 # an unpinned state, so we can work on it in the next round.
                 self._r.resolving_conflicts(causes=causes)

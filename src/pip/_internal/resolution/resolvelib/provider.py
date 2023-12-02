@@ -251,13 +251,12 @@ class PipProvider(_ProviderBase):
             return unsatisfied_names
 
         # Check if backtrack causes are conflicting
-        causes_to_filter_on = causes
-        if len(causes_to_filter_on) > 2:
-            conflicting_causes = self._get_conflicting_causes(causes_to_filter_on)
-
-            # There must be at least 2 causes involved in a conflict
-            if len(conflicting_causes) > 1:
-                causes_to_filter_on = conflicting_causes
+        if len(causes) > 2:
+            causes_to_filter_on = self._get_conflicting_causes(causes)
+            if len(causes_to_filter_on) < 2:
+                causes_to_filter_on = causes
+        else:
+            causes_to_filter_on = causes
 
         # Extract the causes and parents names
         causes_names = set()
@@ -280,23 +279,31 @@ class PipProvider(_ProviderBase):
         # For each cause check if it actually contradicts with another cause
         # and put them both in "conflicting causes", or otherwise disregard it
         conflicting_causes: list["PreferenceInformation"] = []
+        causes_by_name: dict[str, list["PreferenceInformation"]] = collections.defaultdict(list)
 
-        causes_list = list(causes)
-        while causes_list:
-            cause = causes_list.pop()
-            for i, alternative_cause in enumerate(causes_list):
-                if cause.requirement.name != alternative_cause.requirement.name:
-                    continue
+        # First do a pass of causes to see which ones have the same name
+        # as next step is O(n^2) and the smaller the list we can work on
+        # the faster it will be
+        for cause in causes:
+            causes_by_name[cause.requirement.name].append(cause)
 
-                specifier = alternative_cause.requirement.get_candidate_lookup()[
-                    1
-                ].specifier
-                alternative_specifier = (
-                    alternative_cause.requirement.get_candidate_lookup()[1].specifier
-                )
-                specifier_intersection = specifier and alternative_specifier
-                if not str(specifier_intersection):
-                    conflicting_causes.append(cause)
-                    conflicting_causes.append(causes_list.pop(i))
+        # Go through each
+        for causes_list in causes_by_name.values():
+            if len(causes_list) < 2:
+                continue
+
+            while causes_list:
+                cause = causes_list.pop()
+                for i, alternative_cause in enumerate(causes_list):
+                    specifier = alternative_cause.requirement.get_candidate_lookup()[
+                        1
+                    ].specifier
+                    alternative_specifier = (
+                        alternative_cause.requirement.get_candidate_lookup()[1].specifier
+                    )
+                    specifier_intersection = specifier and alternative_specifier
+                    if not str(specifier_intersection):
+                        conflicting_causes.append(cause)
+                        conflicting_causes.append(causes_list.pop(i))
 
         return conflicting_causes
