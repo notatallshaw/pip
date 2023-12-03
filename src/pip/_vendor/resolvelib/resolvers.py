@@ -214,16 +214,6 @@ class Resolution(object):
             backtrack_causes=self.state.backtrack_causes,
         )
 
-    def _is_current_pin_satisfying(self, name, criterion):
-        try:
-            current_pin = self.state.mapping[name]
-        except KeyError:
-            return False
-        return all(
-            self._p.is_satisfied_by(requirement=r, candidate=current_pin)
-            for r in criterion.iter_requirement()
-        )
-
     def _get_updated_criteria(self, candidate):
         criteria = self.state.criteria.copy()
         for requirement in self._p.get_dependencies(candidate=candidate):
@@ -406,24 +396,29 @@ class Resolution(object):
         for round_index in range(max_rounds):
             self._r.starting_round(index=round_index)
 
-            unsatisfied_names = [
-                key
-                for key, criterion in self.state.criteria.items()
-                if not self._is_current_pin_satisfying(key, criterion)
-            ]
+            # In most cases this is equal to unsatisfied names, but in some
+            # cases it is a subset of a fully calculated unsatisfied names
+            # To fully calculate unsatified names you also need to check each
+            # criteria not satified by this if for all requirements:
+            #   self._p.is_satisfied_by(requirement, candidate=criteria_name)
+            #
+            # However as we are only using this information to pick a backtrack
+            # preference and because when all requirements are satisfied 
+            # self.state.criteria.keys() == self.state.mapping.keys()
+            # we can take this approximate form and save expensively looping
+            # through each requirement
+            approximate_unsatisfied_names = self.state.criteria.keys() - self.state.mapping.keys()
 
             # All criteria are accounted for. Nothing more to pin, we are done!
-            if not unsatisfied_names:
+            if not approximate_unsatisfied_names:
                 self._r.ending(state=self.state)
                 return self.state
 
             # keep track of satisfied names to calculate diff after pinning
-            satisfied_names = set(self.state.criteria.keys()) - set(
-                unsatisfied_names
-            )
+            approximate_satisfied_names = self.state.mapping.keys()
 
             # Choose the most preferred unpinned criterion to try.
-            name = min(unsatisfied_names, key=self._get_preference)
+            name = min(approximate_unsatisfied_names, key=self._get_preference)
             failure_causes = self._attempt_to_pin_criterion(name)
 
             if failure_causes:
@@ -440,12 +435,7 @@ class Resolution(object):
             else:
                 # discard as information sources any invalidated names
                 # (unsatisfied names that were previously satisfied)
-                newly_unsatisfied_names = {
-                    key
-                    for key, criterion in self.state.criteria.items()
-                    if key in satisfied_names
-                    and not self._is_current_pin_satisfying(key, criterion)
-                }
+                newly_unsatisfied_names = approximate_satisfied_names - (self.state.criteria.keys() - self.state.mapping.keys())
                 self._remove_information_from_criteria(
                     self.state.criteria, newly_unsatisfied_names
                 )
