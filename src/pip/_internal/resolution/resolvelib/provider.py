@@ -275,19 +275,54 @@ class PipProvider(_ProviderBase):
     def _get_conflicting_causes(
         self, causes: Sequence["PreferenceInformation"]
     ) -> Sequence["PreferenceInformation"]:
-        """Given causes return which causes conflict with each other"""
-        # For each cause check if it actually contradicts with another cause
-        # and put them both in "conflicting causes", or otherwise disregard it
-        conflicting_causes: list["PreferenceInformation"] = []
-        causes_by_name: dict[str, list["PreferenceInformation"]] = collections.defaultdict(list)
+        """Given causes return which causes conflict with each other
+        For each cause check one of two things:
+            1. If it's specifier conflicts with another causes parent version
+            2. If it's specifier conflicts with another causes specifier
 
-        # First do a pass of causes to see which ones have the same name
-        # as next step is O(n^2) and the smaller the list we can work on
-        # the faster it will be
-        for cause in causes:
+        Any causes which match this criteria are returned as conflicting causes
+        """
+        conflicting_causes: list["PreferenceInformation"] = []
+
+        # Build a relationship between causes, cause ids, and cause parent names
+        causes_id_and_parents_by_name: dict[str, list[tuple[int, Candidate]]] = collections.defaultdict(list)
+        causes_by_id = {id(c): c for c in causes}
+        for cause_id, cause in causes_by_id.items():
+            if cause.parent:
+                causes_id_and_parents_by_name[cause.parent.name].append((cause_id, cause.parent))
+
+        conflicting_ids: set[int] = set()
+        for cause_id, cause in causes_by_id.items():
+            if cause_id in conflicting_ids:
+                continue
+
+            cause_id_and_parents = causes_id_and_parents_by_name.get(cause.requirement.name)
+            if not cause_id_and_parents:
+                continue
+
+            conflicting_alternative_cause_ids: set[int] = set()
+            for alternative_cause_id, parent in cause_id_and_parents:
+                if not cause.requirement.is_satisfied_by(parent):
+                    conflicting_alternative_cause_ids.add(alternative_cause_id)
+
+            if conflicting_alternative_cause_ids:
+                conflicting_ids.add(cause_id)
+                conflicting_ids.update(conflicting_alternative_cause_ids)
+
+        remaining_causes: list["PreferenceInformation"]  = []
+        for cause_id, cause in causes_by_id.items():
+            if cause_id in conflicting_ids:
+                conflicting_causes.append(cause)
+            else:
+                remaining_causes.append(cause)
+
+        # For comparing if two specifiers conflict first do a pass of causes to
+        # see which ones have the same name, as the next step is O(n^2) and the
+        # smaller the lists to compare with each other the faster it will be
+        causes_by_name: dict[str, list["PreferenceInformation"]] = collections.defaultdict(list)
+        for cause in remaining_causes:
             causes_by_name[cause.requirement.name].append(cause)
 
-        # Go through each
         for causes_list in causes_by_name.values():
             if len(causes_list) < 2:
                 continue
@@ -298,9 +333,20 @@ class PipProvider(_ProviderBase):
                     specifier = alternative_cause.requirement.get_candidate_lookup()[
                         1
                     ].specifier
+
+                    # Specifiers which provide no restrictions can be skipped
+                    if not str(specifier):
+                        continue
+
                     alternative_specifier = (
                         alternative_cause.requirement.get_candidate_lookup()[1].specifier
                     )
+
+                    # Alternative specifiers which provide no restrictions can be skipped
+                    if not str(alternative_specifier):
+                        continue
+
+                    # If intersection of specifiers are empty they are impossibe to fill
                     specifier_intersection = specifier and alternative_specifier
                     if not str(specifier_intersection):
                         conflicting_causes.append(cause)
