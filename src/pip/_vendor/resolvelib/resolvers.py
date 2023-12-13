@@ -407,27 +407,45 @@ class Resolution(object):
             self._r.starting_round(index=round_index)
 
             criteria_names = set(self.state.criteria.keys())
-            approximate_unsatisfied_names_set = criteria_names - self.state.mapping.keys()
-            if not approximate_unsatisfied_names_set:
-                approximate_unsatisfied_names = [
+            unsatisfied_names_set = criteria_names - self.state.mapping.keys()
+            if not unsatisfied_names_set:
+                unsatisfied_names = [
                    key
                     for key, criterion in self.state.criteria.items()
                     if not self._is_current_pin_satisfying(key, criterion)
                 ]
+                approximate_unsatisfied_names = False
             else:
-                approximate_unsatisfied_names = list(approximate_unsatisfied_names_set)
+                unsatisfied_names = list(unsatisfied_names_set)
+                approximate_unsatisfied_names = True
 
             # All criteria are accounted for. Nothing more to pin, we are done!
-            if not approximate_unsatisfied_names:
+            if not unsatisfied_names:
                 self._r.ending(state=self.state)
                 return self.state
 
             # keep track of satisfied names to calculate diff after pinning
-            satisfied_names = criteria_names - approximate_unsatisfied_names_set
+            satisfied_names = criteria_names - unsatisfied_names_set
 
             # Choose the most preferred unpinned criterion to try.
-            name = min(approximate_unsatisfied_names, key=self._get_preference)
+            name = min(unsatisfied_names, key=self._get_preference)
+            if approximate_unsatisfied_names:
+                backup_state = State(self.state.mapping.copy(), self.state.criteria.copy(), self.state.backtrack_causes[:])
+            else:
+                backup_state = None
+
             failure_causes = self._attempt_to_pin_criterion(name)
+
+            if failure_causes and approximate_unsatisfied_names and backup_state is not None:
+                self._states[-1] = backup_state
+                unsatisfied_names = [
+                   key
+                    for key, criterion in self.state.criteria.items()
+                    if not self._is_current_pin_satisfying(key, criterion)
+                ]
+                satisfied_names = criteria_names - unsatisfied_names_set
+                name = min(unsatisfied_names, key=self._get_preference)
+                failure_causes = self._attempt_to_pin_criterion(name)
 
             if failure_causes:
                 causes = [i for c in failure_causes for i in c.information]
