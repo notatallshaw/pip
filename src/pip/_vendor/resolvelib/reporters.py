@@ -41,3 +41,6 @@ class BaseReporter(object):
 
     def pinning(self, candidate):
         """Called when adding a candidate to the potential solution."""
+
+    def fallback(self) -> None:
+        """Called when falling back from backjumping to backtracking."""

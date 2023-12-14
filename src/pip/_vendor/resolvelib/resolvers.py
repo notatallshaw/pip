@@ -113,6 +113,8 @@ class Resolution(object):
     def __init__(self, provider, reporter):
         self._p = provider
         self._r = reporter
+        self._started_fallback = False
+        self._fallback_states = None
         self._states = []
 
     @property
@@ -267,6 +269,70 @@ class Resolution(object):
         # All candidates tried, nothing works. This criterion is a dead
         # end, signal for backtracking.
         return causes
+    
+    def _backtrack_iteration(self):
+        broken_state = self._states.pop()
+        name, candidate = broken_state.mapping.popitem()
+        incompatibilities_from_broken = [
+            (k, list(v.incompatibilities))
+            for k, v in broken_state.criteria.items()
+        ]
+
+        return name, candidate, incompatibilities_from_broken
+
+    def _backjump_iteration(
+        self,
+        causes,
+        incompatible_deps,
+    ):
+        # Ensure to backtrack to a state that caused the incompatibility
+        incompatible_state = False
+        name, candidate, broken_state = None, None, None
+
+        if self._fallback_states is None:
+            fallback_states = [
+                State(
+                    s.mapping.copy(),
+                    s.criteria.copy(),
+                    s.backtrack_causes[:],
+                )
+                for s in self._states
+            ]
+        else:
+            fallback_states = None
+
+        backjump_count = 0
+        while not incompatible_state:
+            backjump_count += 1
+
+            # Retrieve the last candidate pin and known incompatibilities
+            try:
+                broken_state = self._states.pop()
+                name, candidate = broken_state.mapping.popitem()
+            except (IndexError, KeyError):
+                raise ResolutionImpossible(causes)
+            current_dependencies = {
+                self._p.identify(d)
+                for d in self._p.get_dependencies(candidate)
+            }
+            incompatible_state = not current_dependencies.isdisjoint(
+                incompatible_deps
+            )
+
+            # Backup states first time a backjump goes
+            # further than a backtrack would have
+            if self._fallback_states is None and backjump_count == 2:
+                self._fallback_states = fallback_states
+
+        if name is None or candidate is None or broken_state is None:
+            raise ResolutionImpossible(causes)
+
+        incompatibilities_from_broken = [
+            (k, list(v.incompatibilities))
+            for k, v in broken_state.criteria.items()
+        ]
+
+        return name, candidate, incompatibilities_from_broken
 
     def _backjump(self, causes):
         """Perform backjumping.
@@ -298,6 +364,17 @@ class Resolution(object):
         5a. If this causes Y' to conflict, we need to backtrack again. Make Y'
             the new Z and go back to step 2.
         5b. If the incompatibilities apply cleanly, end backtracking.
+
+        If backtracking each iteraction the the loop will:
+
+        1.  Discard Z.
+        2.  Discard Y but remember its incompatibility information gathered
+            previously, and the failure we're dealing with right now.
+        3.  Push a new state Y' based on X, and apply the incompatibility
+            information from Y to Y'.
+        4a. If this causes Y' to conflict, we need to backtrack again. Make Y'
+            the new Z and go back to step 2.
+        4b. If the incompatibilities apply cleanly, end backtracking.
         """
         incompatible_reqs = itertools.chain(
             (c.parent for c in causes if c.parent is not None),
@@ -308,34 +385,46 @@ class Resolution(object):
             # Remove the state that triggered backtracking.
             del self._states[-1]
 
-            # Ensure to backtrack to a state that caused the incompatibility
-            incompatible_state = False
-            while not incompatible_state:
-                # Retrieve the last candidate pin and known incompatibilities.
-                try:
-                    broken_state = self._states.pop()
-                    name, candidate = broken_state.mapping.popitem()
-                except (IndexError, KeyError):
-                    raise ResolutionImpossible(causes)
-                current_dependencies = {
-                    self._p.identify(d)
-                    for d in self._p.get_dependencies(candidate)
-                }
-                incompatible_state = not current_dependencies.isdisjoint(
-                    incompatible_deps
-                )
+            name, candidate, incompatibilities_from_broken = None, None, None
 
-            incompatibilities_from_broken = [
-                (k, list(v.incompatibilities))
-                for k, v in broken_state.criteria.items()
-            ]
+            if not self._started_fallback:
+                try:
+                    (
+                        name,
+                        candidate,
+                        incompatibilities_from_broken,
+                    ) = self._backjump_iteration(
+                        causes=causes, incompatible_deps=incompatible_deps
+                    )
+                except ResolutionImpossible:
+                    if self._fallback_states is None:
+                        raise
+
+                    # Backjumping failed but fallback to backtracking was requested
+                    self._states = self._fallback_states
+                    self._started_fallback = True
+                    self._r.fallback()
+
+            if self._started_fallback:
+                (
+                    name,
+                    candidate,
+                    incompatibilities_from_broken,
+                ) = self._backtrack_iteration()
+
+            if (
+                name is None
+                or candidate is None
+                or incompatibilities_from_broken is None
+            ):
+                raise ResolutionImpossible(causes)
 
             # Also mark the newly known incompatibility.
             incompatibilities_from_broken.append((name, [candidate]))
 
             # Create a new state from the last known-to-work one, and apply
             # the previously gathered incompatibility information.
-            def _patch_criteria():
+            def _patch_criteria() -> bool:
                 for k, incompatibilities in incompatibilities_from_broken:
                     if not incompatibilities:
                         continue
@@ -355,7 +444,7 @@ class Resolution(object):
                             {k: incompatibilities},
                         ),
                     )
-                    candidates = build_iter_view(matches)
+                    candidates: IterableView[CT] = build_iter_view(matches)
                     if not candidates:
                         return False
                     incompatibilities.extend(criterion.incompatibilities)
