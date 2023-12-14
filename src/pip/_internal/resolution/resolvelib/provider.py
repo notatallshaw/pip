@@ -330,17 +330,20 @@ class PipProvider(_ProviderBase):
             while causes_list:
                 cause = causes_list.pop()
                 for i, alternative_cause in enumerate(causes_list):
-                    specifier = alternative_cause.requirement.get_candidate_lookup()[
-                        1
-                    ].specifier
+                    candidate = cause.requirement.get_candidate_lookup()[1]
+                    if candidate is None:
+                        continue
+                    specifier = candidate.specifier
 
                     # Specifiers which provide no restrictions can be skipped
                     if not str(specifier):
                         continue
 
-                    alternative_specifier = (
-                        alternative_cause.requirement.get_candidate_lookup()[1].specifier
-                    )
+                    alternative_candidate = alternative_cause.requirement.get_candidate_lookup()[1]
+                    if alternative_candidate is None:
+                        continue
+
+                    alternative_specifier = alternative_candidate.specifier
 
                     # Alternative specifiers which provide no restrictions can be skipped
                     if not str(alternative_specifier):
