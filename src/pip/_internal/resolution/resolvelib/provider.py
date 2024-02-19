@@ -13,6 +13,8 @@ from typing import (
 
 from pip._vendor.resolvelib.providers import AbstractProvider
 
+from pip._internal.resolution.resolvelib.requirements import SpecifierRequirement
+
 from .base import Candidate, Constraint, Requirement
 from .candidates import REQUIRES_PYTHON_IDENTIFIER
 from .factory import Factory
@@ -253,3 +255,41 @@ class PipProvider(_ProviderBase):
             if backtrack_cause.parent and identifier == backtrack_cause.parent.name:
                 return True
         return False
+
+    def unpin_requirement(
+        self,
+        identifiers: Iterable[str],
+        resolutions: Mapping[str, Candidate],
+        candidates: Mapping[str, Iterator[Candidate]],
+        information: Mapping[str, Iterable["PreferenceInformation"]],
+        backtrack_causes: Sequence["PreferenceInformation"],
+    ) -> Iterable[str]:
+        """
+        Return identifiers that are already pinned (not in identifiers)
+
+        Resolvelib will backjump back to a state when it it not already pinned
+        """
+        if not backtrack_causes:
+            return []
+
+        # Check if any causes have requirements with upper bounds specifiers
+        upper_bounded: set[str] = set()
+        for cause in backtrack_causes:
+            requirement = cause.requirement
+            if not isinstance(requirement, SpecifierRequirement):
+                continue
+
+            for specifier in requirement.install_requirement.specifier:
+                if specifier.operator in ("<", "<="):
+                    upper_bounded.add(requirement.name)
+                    upper_bounded.add(requirement.project_name)
+                    break
+
+        if not upper_bounded:
+            return []
+
+        requirements_to_unpin = upper_bounded - set(identifiers)
+        if requirements_to_unpin:
+            return requirements_to_unpin
+
+        return []

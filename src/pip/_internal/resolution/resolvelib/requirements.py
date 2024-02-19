@@ -58,6 +58,10 @@ class SpecifierRequirement(Requirement):
     def name(self) -> str:
         return format_name(self.project_name, self._extras)
 
+    @property
+    def install_requirement(self) -> InstallRequirement:
+        return self._ireq
+
     def format_for_error(self) -> str:
         # Convert comma-separated specifiers into "A, B, ..., F and G"
         # This makes the specifier a bit more "human readable", without

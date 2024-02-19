@@ -131,3 +131,8 @@ class AbstractResolver(object):
         :raises: ``self.base_exception`` or its subclass.
         """
         raise NotImplementedError
+
+    def unpin_requirement(
+        self, identifiers, resolutions, candidates, information, backtrack_causes
+    ):
+        return []

@@ -267,7 +267,7 @@ class Resolution(object):
         # end, signal for backtracking.
         return causes
 
-    def _backjump(self, causes):
+    def _backjump(self, causes=None, incompatible_deps=None):
         """Perform backjumping.
 
         When we enter here, the stack is like this::
@@ -298,11 +298,15 @@ class Resolution(object):
             the new Z and go back to step 2.
         5b. If the incompatibilities apply cleanly, end backtracking.
         """
-        incompatible_reqs = itertools.chain(
-            (c.parent for c in causes if c.parent is not None),
-            (c.requirement for c in causes),
-        )
-        incompatible_deps = {self._p.identify(r) for r in incompatible_reqs}
+        if causes:
+            incompatible_reqs = itertools.chain(
+                (c.parent for c in causes if c.parent is not None),
+                (c.requirement for c in causes),
+            )
+            incompatible_deps = {self._p.identify(r) for r in incompatible_reqs}
+        else:
+            incompatible_deps = incompatible_deps
+
         while len(self._states) >= 3:
             # Remove the state that triggered backtracking.
             del self._states[-1]
@@ -378,6 +382,12 @@ class Resolution(object):
         # No way to backtrack anymore.
         return False
 
+    def _extract_causes(self, criteron):
+        """Extract causes from list of criterion and deduplicate"""
+        return list(
+            {id(i): i for c in criteron for i in c.information}.values()
+        )
+
     def resolve(self, requirements, max_rounds):
         if self._states:
             raise RuntimeError("already resolved")
@@ -402,7 +412,7 @@ class Resolution(object):
         # something to backtrack to if it fails. The root state is basically
         # pinning the virtual "root" package in the graph.
         self._push_new_state()
-
+        override_unsatisfied_names = None
         for round_index in range(max_rounds):
             self._r.starting_round(index=round_index)
 
@@ -423,16 +433,61 @@ class Resolution(object):
             )
 
             # Choose the most preferred unpinned criterion to try.
-            name = min(unsatisfied_names, key=self._get_preference)
-            failure_causes = self._attempt_to_pin_criterion(name)
+            if override_unsatisfied_names:
+                override_unsatisfied_set  = set(override_unsatisfied_names)
+                unsatisfied_set = set(unsatisfied_names)
+                _unsatisfied_names = override_unsatisfied_set & unsatisfied_set
+                # HACK: resolvelib doesn't know anything about extras,
+                # this would need to be guided on the pip side somehow
+                for unsatisfied in unsatisfied_names:
+                    if unsatisfied in _unsatisfied_names:
+                        continue
 
-            if failure_causes:
-                causes = [i for c in failure_causes for i in c.information]
+                    if "[" in unsatisfied:
+                        unsatisfied: str = unsatisfied.split("[")[0]
+                        if unsatisfied in override_unsatisfied_set:
+                            _unsatisfied_names.add(unsatisfied)
+                    
+                    if _unsatisfied_names:
+                        unsatisfied_names = _unsatisfied_names
+                
+                override_unsatisfied_names = None
+            name = min(unsatisfied_names, key=self._get_preference)
+
+            failure_criterion = self._attempt_to_pin_criterion(name)
+
+            override_unsatisfied_names = None
+            if failure_criterion:
+                causes = self._extract_causes(failure_criterion)
                 # Backjump if pinning fails. The backjump process puts us in
                 # an unpinned state, so we can work on it in the next round.
                 self._r.resolving_conflicts(causes=causes)
-                success = self._backjump(causes)
-                self.state.backtrack_causes[:] = causes
+
+                # Check with the provider if any requirements should be
+                # unpinned, these unpinned requirements will then be preffered
+                unpin_requirements = list(
+                    self._p.unpin_requirement(
+                        identifiers=unsatisfied_names,
+                        resolutions=self.state.mapping,
+                        candidates=IteratorMapping(
+                            self.state.criteria,
+                            operator.attrgetter("candidates"),
+                        ),
+                        information=IteratorMapping(
+                            self.state.criteria,
+                            operator.attrgetter("information"),
+                        ),
+                        backtrack_causes=self.state.backtrack_causes,
+                    )
+                )
+                if unpin_requirements:
+                    print(unpin_requirements)
+                    self._backjump(incompatible_deps=unpin_requirements)
+                    override_unsatisfied_names = unpin_requirements
+                    self.state.backtrack_causes[:] = []
+                else:
+                    success = self._backjump(causes=causes)
+                    self.state.backtrack_causes[:] = causes
 
                 # Dead ends everywhere. Give up.
                 if not success:
