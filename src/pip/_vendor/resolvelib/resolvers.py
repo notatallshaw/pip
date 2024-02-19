@@ -481,7 +481,6 @@ class Resolution(object):
                     )
                 )
                 if unpin_requirements:
-                    print(unpin_requirements)
                     self._backjump(incompatible_deps=unpin_requirements)
                     override_unsatisfied_names = unpin_requirements
                     self.state.backtrack_causes[:] = []
