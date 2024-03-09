@@ -226,7 +226,7 @@ jobs:
       - name: Install Ubuntu dependencies
         run: sudo apt-get install bzr
 
-      - run: pip install nox 'virtualenv<20' 'setuptools != 60.6.0'
+      - run: pip install nox virtualenv 'setuptools != 60.6.0'
 
       # Main check
       - name: Run integration tests
