@@ -170,8 +170,7 @@ class _OrderedStructure:
             -1 if the element does not exist.
         :rtype: int
         """
-        sorted_elements = self.topological_sort()
-        return sorted_elements.index(element) if element in sorted_elements else -1
+        return self.topological_sort().index(element) if self.element_exists(element) else -1
 
     def element_exists(self, element: Hashable) -> bool:
         """
@@ -373,7 +372,7 @@ class PipProvider(_ProviderBase):
     ) -> Iterable[str]:
         """
         Return identifiers that are already pinned (not in identifiers)
-        Resolvelib will backjump back to a state when it it not already pinned
+        Resolvelib will backjump back to a state when they are not pinned
         """
         if not backtrack_causes:
             return []
