@@ -13,7 +13,7 @@ from . import __version__ as requests_version
 charset_normalizer = None
 
 try:
-    import chardet
+    from pip._vendor import chardet
 except ImportError:
     chardet = None
 

@@ -47,7 +47,7 @@ from .exceptions import RequestsDependencyWarning
 charset_normalizer_version = None
 
 try:
-    from chardet import __version__ as chardet_version
+    from pip._vendor.chardet import __version__ as chardet_version
 except ImportError:
     chardet_version = None
 
