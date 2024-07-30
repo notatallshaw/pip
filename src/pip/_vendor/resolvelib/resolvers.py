@@ -316,6 +316,10 @@ class Resolution(object):
                     name, candidate = broken_state.mapping.popitem()
                 except (IndexError, KeyError):
                     raise ResolutionImpossible(causes)
+                
+                if name not in incompatible_deps:
+                    break
+
                 current_dependencies = {
                     self._p.identify(d)
                     for d in self._p.get_dependencies(candidate)
