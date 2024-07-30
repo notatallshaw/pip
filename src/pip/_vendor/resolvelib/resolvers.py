@@ -317,6 +317,8 @@ class Resolution(object):
                 except (IndexError, KeyError):
                     raise ResolutionImpossible(causes)
                 
+                break
+                
                 if name not in incompatible_deps:
                     break
 
