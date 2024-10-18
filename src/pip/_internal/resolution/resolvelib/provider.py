@@ -190,8 +190,8 @@ class PipProvider(_ProviderBase):
         return (
             not requires_python,
             not pinned,
-            not upper_bound,
             not backtrack_cause,
+            not upper_bound,
             inferred_depth,
             requested_order,
             not unfree,
