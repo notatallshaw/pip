@@ -411,24 +411,21 @@ class Resolution(Generic[RT, CT, KT]):
             # keep track of satisfied names to calculate diff after pinning
             satisfied_names = set(self.state.criteria.keys()) - set(unsatisfied_names)
 
-            if len(unsatisfied_names) > 1:
-                narrowed_unstatisfied_names = list(
-                    self._p.narrow_requirement_selection(
-                        identifiers=unsatisfied_names,
-                        resolutions=self.state.mapping,
-                        candidates=IteratorMapping(
-                            self.state.criteria,
-                            operator.attrgetter("candidates"),
-                        ),
-                        information=IteratorMapping(
-                            self.state.criteria,
-                            operator.attrgetter("information"),
-                        ),
-                        backtrack_causes=self.state.backtrack_causes,
-                    )
+            narrowed_unstatisfied_names = list(
+                self._p.narrow_requirement_selection(
+                    identifiers=unsatisfied_names,
+                    resolutions=self.state.mapping,
+                    candidates=IteratorMapping(
+                        self.state.criteria,
+                        operator.attrgetter("candidates"),
+                    ),
+                    information=IteratorMapping(
+                        self.state.criteria,
+                        operator.attrgetter("information"),
+                    ),
+                    backtrack_causes=self.state.backtrack_causes,
                 )
-            else:
-                narrowed_unstatisfied_names = unsatisfied_names
+            )
 
             # If there are no unsatisfied names use unsatisfied names
             if not narrowed_unstatisfied_names:

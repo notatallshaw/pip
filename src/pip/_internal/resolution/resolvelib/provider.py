@@ -105,6 +105,36 @@ class PipProvider(_ProviderBase):
     def identify(self, requirement_or_candidate: Union[Requirement, Candidate]) -> str:
         return requirement_or_candidate.name
 
+    def narrow_requirement_selection(
+        self,
+        identifiers: Iterable[str],
+        resolutions: Mapping[str, Candidate],
+        candidates: Mapping[str, Iterator[Candidate]],
+        information: Mapping[str, Iterable["PreferenceInformation"]],
+        backtrack_causes: Sequence["PreferenceInformation"],
+    ) -> Iterable[str]:
+        for identifier in identifiers:
+            if identifier in self._user_requested:
+                self._known_depths[identifier] = 1.0
+                continue
+
+            if identifier not in information:
+                self._known_depths[identifier] = math.inf
+                continue
+
+            parents = [
+                parent for _, parent in information[identifier] if parent is not None
+            ]
+            if not parents:
+                self._known_depths[identifier] = math.inf
+                continue
+
+            self._known_depths[identifier] = (
+                min(self._known_depths[parent.name] for parent in parents) + 1.0
+            )
+
+        return identifiers
+
     def get_preference(
         self,
         identifier: str,
@@ -158,23 +188,8 @@ class PipProvider(_ProviderBase):
         pinned = any(op[:2] == "==" for op in operators)
         unfree = bool(operators)
 
-        try:
-            requested_order: Union[int, float] = self._user_requested[identifier]
-        except KeyError:
-            requested_order = math.inf
-            if has_information:
-                parent_depths = (
-                    self._known_depths[parent.name] if parent is not None else 0.0
-                    for _, parent in information[identifier]
-                )
-                inferred_depth = min(d for d in parent_depths) + 1.0
-            else:
-                inferred_depth = math.inf
-        else:
-            inferred_depth = 1.0
-        self._known_depths[identifier] = inferred_depth
-
         requested_order = self._user_requested.get(identifier, math.inf)
+        inferred_depth = self._known_depths[identifier]
 
         # Requires-Python has only one candidate and the check is basically
         # free, so we always do it first to avoid needless work if it fails.
