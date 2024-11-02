@@ -144,19 +144,24 @@ class PipProvider(_ProviderBase):
 
         if has_information:
             lookups = (r.get_candidate_lookup() for r, _ in information[identifier])
-            candidate, ireqs = zip(*lookups)
+            _icandidates, ireqs = zip(*lookups)
         else:
-            candidate, ireqs = None, ()
+            _icandidates, ireqs = (), ()
 
-        operators = [
-            specifier.operator
+        operators_versions = [
+            (specifier.operator, specifier.version)
             for specifier_set in (ireq.specifier for ireq in ireqs if ireq)
             for specifier in specifier_set
         ]
-
-        direct = candidate is not None
-        pinned = any(op[:2] == "==" for op in operators)
-        unfree = bool(operators)
+        upper_bound = any(
+            op in ("<", "<=", "~=") or (op == "==" and "*" in ver)
+            for op, ver in operators_versions
+        )
+        pinned = any(
+            op == "===" or (op == "==" and "*" not in ver)
+            for op, ver in operators_versions
+        )
+        unfree = bool(operators_versions)
 
         requested_order = self._user_requested.get(identifier, math.inf)
 
@@ -171,8 +176,8 @@ class PipProvider(_ProviderBase):
 
         return (
             not requires_python,
-            not direct,
             not pinned,
+            not upper_bound,
             not backtrack_cause,
             requested_order,
             not unfree,
