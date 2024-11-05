@@ -11,8 +11,18 @@ from typing import (
     TypeVar,
     Union,
 )
+import functools
+import itertools
+import operator
 
+from pip._vendor.dep_logic.specifiers import from_specifierset
+from pip._vendor.dep_logic.specifiers.special import EmptySpecifier
 from pip._vendor.resolvelib.providers import AbstractProvider
+
+from pip._internal.resolution.resolvelib.requirements import (
+    ExplicitRequirement,
+    SpecifierRequirement,
+)
 
 from .base import Candidate, Constraint, Requirement
 from .candidates import REQUIRES_PYTHON_IDENTIFIER
@@ -133,22 +143,74 @@ class PipProvider(_ProviderBase):
             An iterable of requirement names that the resolver will use to
             limit the next step of resolution
         """
-
-        cause_identifiers = set()
+        explicit_cause_identifiers = set()
+        specifier_cause_identifiers = set()
+        specifiers_per_name = collections.defaultdict(set)
+        backtrack_causes_per_name_per_specifier = collections.defaultdict(lambda: collections.defaultdict(list))
         for backtrack_cause in backtrack_causes:
-            cause_identifiers.add(backtrack_cause.requirement.name)
-            if backtrack_cause.parent:
-                cause_identifiers.add(backtrack_cause.parent.name)
+            requirement = backtrack_cause.requirement
+            if isinstance(requirement, ExplicitRequirement):
+                explicit_cause_identifiers.add(backtrack_cause.requirement.name)
+                if backtrack_cause.parent:
+                    explicit_cause_identifiers.add(backtrack_cause.parent.name)
+                continue
 
-        causing_identifiers = []
+            if not isinstance(requirement, SpecifierRequirement):
+                continue
+
+            specifier_cause_identifiers.add(backtrack_cause.requirement.name)
+            if backtrack_cause.parent:
+                specifier_cause_identifiers.add(backtrack_cause.parent.name)
+
+            base_requirement = requirement._ireq.req
+            if base_requirement is None:
+                continue
+
+            specifiers_per_name[requirement.name].add(base_requirement.specifier)
+            backtrack_causes_per_name_per_specifier[requirement.name][base_requirement.specifier].append(backtrack_cause)
+
+        # We now filter out any specifiers which don't actually cause disjoint requirements
+        narrowed_specifier_names = set()
+        for name, specifiers in specifiers_per_name.items():
+            if len(specifiers) > 2:
+                packaging_and_dep_specifiers = [(s, from_specifierset(s)) for s in specifiers]
+                for i in range(len(packaging_and_dep_specifiers)):
+                    test_pack_specifier, test_dep_specifier = packaging_and_dep_specifiers[i]
+                    result = functools.reduce(operator.and_,  [s[1] for j, s in enumerate(packaging_and_dep_specifiers) if j != i])
+                    if result != EmptySpecifier():
+                        continue
+
+                    if any((s[1] & test_dep_specifier) == EmptySpecifier() for s in packaging_and_dep_specifiers):
+                        continue
+
+                    del backtrack_causes_per_name_per_specifier[name][test_pack_specifier]
+                    narrowed_specifier_names.add(name)
+
+        # Recalculate specifier_cause_identifiers
+        if narrowed_specifier_names:
+            specifier_cause_identifiers = set()
+            for bcs_per_spec in backtrack_causes_per_name_per_specifier.values():
+                for bcs in bcs_per_spec.values():
+                    for bc in bcs:
+                        specifier_cause_identifiers.add(backtrack_cause.requirement.name)
+                        if bc.parent:
+                            specifier_cause_identifiers.add(bc.parent.name)
+
+        causing_specifier_identifiers = []
+        causing_explicit_identifiers = []
         for identifier in identifiers:
             if identifier == REQUIRES_PYTHON_IDENTIFIER:
                 return [identifier]
-            if identifier in cause_identifiers:
-                causing_identifiers.append(identifier)
+            if identifier in explicit_cause_identifiers:
+                causing_explicit_identifiers.append(identifier)
+            if identifier in specifier_cause_identifiers:
+                causing_specifier_identifiers.append(identifier)
 
-        if causing_identifiers:
-            return causing_identifiers
+        if causing_explicit_identifiers:
+            return causing_explicit_identifiers
+
+        if causing_specifier_identifiers:
+            return causing_specifier_identifiers
 
         return identifiers
 
