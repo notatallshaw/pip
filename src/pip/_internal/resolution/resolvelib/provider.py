@@ -1,5 +1,7 @@
 import collections
+import functools
 import math
+import operator
 from functools import lru_cache
 from typing import (
     TYPE_CHECKING,
@@ -11,9 +13,6 @@ from typing import (
     TypeVar,
     Union,
 )
-import functools
-import itertools
-import operator
 
 from pip._vendor.dep_logic.specifiers import from_specifierset
 from pip._vendor.dep_logic.specifiers.special import EmptySpecifier
@@ -143,6 +142,28 @@ class PipProvider(_ProviderBase):
             An iterable of requirement names that the resolver will use to
             limit the next step of resolution
         """
+
+        # Calculate Depths
+        for identifier in identifiers:
+            if identifier in self._user_requested:
+                self._known_depths[identifier] = 1.0
+                continue
+
+            if identifier not in information:
+                self._known_depths[identifier] = math.inf
+                continue
+
+            parents = [
+                parent for _, parent in information[identifier] if parent is not None
+            ]
+            if not parents:
+                self._known_depths[identifier] = math.inf
+                continue
+
+            self._known_depths[identifier] = (
+                min(self._known_depths[parent.name] for parent in parents) + 1.0
+            )
+
         explicit_cause_identifiers = set()
         specifier_cause_identifiers = set()
         specifiers_per_name = collections.defaultdict(set)
@@ -273,6 +294,7 @@ class PipProvider(_ProviderBase):
         unfree = bool(operators_versions)
 
         requested_order = self._user_requested.get(identifier, math.inf)
+        inferred_depth = self._known_depths[identifier]
 
         # Requires-Python has only one candidate and the check is basically
         # free, so we always do it first to avoid needless work if it fails.
@@ -282,6 +304,7 @@ class PipProvider(_ProviderBase):
             not requires_python,
             not pinned,
             not upper_bound,
+            inferred_depth,
             requested_order,
             not unfree,
             identifier,
