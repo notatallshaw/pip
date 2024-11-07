@@ -1,5 +1,7 @@
 import collections
+import functools
 import math
+import operator
 from functools import lru_cache
 from typing import (
     TYPE_CHECKING,
@@ -11,13 +13,12 @@ from typing import (
     TypeVar,
     Union,
 )
-import functools
-import itertools
-import operator
 
 from pip._vendor.dep_logic.specifiers import from_specifierset
 from pip._vendor.dep_logic.specifiers.special import EmptySpecifier
+from pip._vendor.packaging.specifiers import SpecifierSet
 from pip._vendor.resolvelib.providers import AbstractProvider
+from pip._vendor.resolvelib.structs import RequirementInformation
 
 from pip._internal.resolution.resolvelib.requirements import (
     ExplicitRequirement,
@@ -145,8 +146,6 @@ class PipProvider(_ProviderBase):
         """
         explicit_cause_identifiers = set()
         specifier_cause_identifiers = set()
-        specifiers_per_name = collections.defaultdict(set)
-        backtrack_causes_per_name_per_specifier = collections.defaultdict(lambda: collections.defaultdict(list))
         for backtrack_cause in backtrack_causes:
             requirement = backtrack_cause.requirement
             if isinstance(requirement, ExplicitRequirement):
@@ -156,11 +155,44 @@ class PipProvider(_ProviderBase):
                 continue
 
             if not isinstance(requirement, SpecifierRequirement):
-                continue
+                raise RuntimeError("Unexpected requirement")
 
             specifier_cause_identifiers.add(backtrack_cause.requirement.name)
             if backtrack_cause.parent:
                 specifier_cause_identifiers.add(backtrack_cause.parent.name)
+
+        explicit_identifiers: list[str] = []
+        specifier_identifiers: list[str] = []
+        for identifer in identifiers:
+            if identifer == REQUIRES_PYTHON_IDENTIFIER:
+                return [identifer]
+            if identifer in explicit_cause_identifiers:
+                explicit_identifiers.append(identifer)
+            if identifer in specifier_cause_identifiers:
+                specifier_identifiers.append(identifer)
+
+
+        if explicit_identifiers:
+            return explicit_identifiers
+
+        if specifier_identifiers:
+            return specifier_identifiers
+
+        return identifiers
+
+    def disjoint_causes(self, backtrack_causes: Sequence[RequirementInformation[Requirement, Candidate]]) -> Sequence[RequirementInformation[Requirement, Candidate]]:
+        print("checking disjoint causes")
+        specifiers_per_name = collections.defaultdict(set)
+        explicit_specifier_causes: list[RequirementInformation[Requirement, Candidate]] = []
+        backtrack_causes_per_name_per_specifier: dict[str, dict[SpecifierSet, list[RequirementInformation[Requirement, Candidate]]]] = collections.defaultdict(lambda: collections.defaultdict(list))
+        for backtrack_cause in backtrack_causes:
+            requirement = backtrack_cause.requirement
+
+            if isinstance(requirement, ExplicitRequirement):
+                explicit_specifier_causes.append(backtrack_cause)
+
+            if not isinstance(requirement, SpecifierRequirement):
+                continue
 
             base_requirement = requirement._ireq.req
             if base_requirement is None:
@@ -170,7 +202,6 @@ class PipProvider(_ProviderBase):
             backtrack_causes_per_name_per_specifier[requirement.name][base_requirement.specifier].append(backtrack_cause)
 
         # We now filter out any specifiers which don't actually cause disjoint requirements
-        narrowed_specifier_names = set()
         for name, specifiers in specifiers_per_name.items():
             if len(specifiers) > 2:
                 packaging_and_dep_specifiers = [(s, from_specifierset(s)) for s in specifiers]
@@ -184,35 +215,13 @@ class PipProvider(_ProviderBase):
                         continue
 
                     del backtrack_causes_per_name_per_specifier[name][test_pack_specifier]
-                    narrowed_specifier_names.add(name)
 
-        # Recalculate specifier_cause_identifiers
-        if narrowed_specifier_names:
-            specifier_cause_identifiers = set()
-            for bcs_per_spec in backtrack_causes_per_name_per_specifier.values():
-                for bcs in bcs_per_spec.values():
-                    for bc in bcs:
-                        specifier_cause_identifiers.add(backtrack_cause.requirement.name)
-                        if bc.parent:
-                            specifier_cause_identifiers.add(bc.parent.name)
+        disjoint_specifier_causes: list[RequirementInformation[Requirement, Candidate]] = []
+        for backtrack_per_specifier in backtrack_causes_per_name_per_specifier.values():
+            for bcs in backtrack_per_specifier.values():
+                disjoint_specifier_causes.extend(bcs)
 
-        causing_specifier_identifiers = []
-        causing_explicit_identifiers = []
-        for identifier in identifiers:
-            if identifier == REQUIRES_PYTHON_IDENTIFIER:
-                return [identifier]
-            if identifier in explicit_cause_identifiers:
-                causing_explicit_identifiers.append(identifier)
-            if identifier in specifier_cause_identifiers:
-                causing_specifier_identifiers.append(identifier)
-
-        if causing_explicit_identifiers:
-            return causing_explicit_identifiers
-
-        if causing_specifier_identifiers:
-            return causing_specifier_identifiers
-
-        return identifiers
+        return explicit_specifier_causes + disjoint_specifier_causes
 
     def get_preference(
         self,
@@ -274,12 +283,7 @@ class PipProvider(_ProviderBase):
 
         requested_order = self._user_requested.get(identifier, math.inf)
 
-        # Requires-Python has only one candidate and the check is basically
-        # free, so we always do it first to avoid needless work if it fails.
-        requires_python = identifier == REQUIRES_PYTHON_IDENTIFIER
-
         return (
-            not requires_python,
             not pinned,
             not upper_bound,
             requested_order,

@@ -3,7 +3,7 @@ from __future__ import annotations
 import collections
 import itertools
 import operator
-from typing import TYPE_CHECKING, Collection, Generic, Iterable, Mapping
+from typing import TYPE_CHECKING, Collection, Generic, Iterable, Mapping, Sequence
 
 from ..structs import (
     CT,
@@ -365,9 +365,9 @@ class Resolution(Generic[RT, CT, KT]):
 
     def _extract_causes(
         self, criteron: list[Criterion[RT, CT]]
-    ) -> list[RequirementInformation[RT, CT]]:
+    ) -> Sequence[RequirementInformation[RT, CT]]:
         """Extract causes from list of criterion and deduplicate"""
-        return list({id(i): i for c in criteron for i in c.information}.values())
+        return self._p.disjoint_causes(list({id(i): i for c in criteron for i in c.information}.values()))
 
     def resolve(self, requirements: Iterable[RT], max_rounds: int) -> State[RT, CT, KT]:
         if self._states:

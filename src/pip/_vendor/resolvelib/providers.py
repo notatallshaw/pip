@@ -194,3 +194,6 @@ class AbstractProvider(Generic[RT, CT, KT]):
             Iterable[KT]: A non-empty subset of `identifiers`.
         """
         return identifiers
+
+    def disjoint_causes(self, backtrack_causes: Sequence[RequirementInformation[RT, CT]]) -> Sequence[RequirementInformation[RT, CT]]:
+        return backtrack_causes
