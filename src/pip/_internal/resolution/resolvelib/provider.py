@@ -13,6 +13,8 @@ from typing import (
 
 from pip._vendor.resolvelib.providers import AbstractProvider
 
+from pip._internal.resolution.resolvelib.requirements import ExplicitRequirement
+
 from .base import Candidate, Constraint, Requirement
 from .candidates import REQUIRES_PYTHON_IDENTIFIER
 from .factory import Factory
@@ -142,9 +144,12 @@ class PipProvider(_ProviderBase):
 
         if has_information:
             lookups = (r.get_candidate_lookup() for r, _ in information[identifier])
-            candidate, ireqs = zip(*lookups)
+            _icandidates, ireqs = zip(*lookups)
+            direct = any(
+                isinstance(r, ExplicitRequirement) for r, _ in information[identifier]
+            )
         else:
-            candidate, ireqs = None, ()
+            direct, _icandidates, ireqs = False, (), ()
 
         operators = [
             (specifier.operator, specifier.version)
@@ -152,7 +157,6 @@ class PipProvider(_ProviderBase):
             for specifier in specifier_set
         ]
 
-        direct = candidate is not None
         pinned = any(op[:2] == "==" and "*" not in ver for (op, ver) in operators)
         unfree = bool(operators)
         requested_order = self._user_requested.get(identifier, math.inf)
