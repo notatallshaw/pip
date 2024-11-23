@@ -47,6 +47,14 @@ def build_req_info(
             {"pinned-package": 1},
             (True, False, False, True, 1, False, "pinned-package"),
         ),
+        # Not pinned package with "==1.*"
+        (
+            "not-pinned-package",
+            {"not-pinned-package": [build_req_info("not-pinned-package==1.*")]},
+            [],
+            {"not-pinned-package": 1},
+            (True, False, True, True, 1, False, 'not-pinned-package'),
+        ),
         # Package that caused backtracking
         (
             "backtrack-package",
