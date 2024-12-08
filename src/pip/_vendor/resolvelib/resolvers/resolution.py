@@ -324,11 +324,6 @@ class Resolution(Generic[RT, CT, KT]):
                 except (IndexError, KeyError):
                     raise ResolutionImpossible(causes) from None
 
-                # Only backjump if the current broken state is
-                # an incompatible dependency
-                if name not in incompatible_deps:
-                    break
-
                 # If the current dependencies and the incompatible dependencies
                 # are overlapping then we have found a cause of the incompatibility
                 current_dependencies = {
@@ -341,7 +336,7 @@ class Resolution(Generic[RT, CT, KT]):
                 # broken_state.mapping is empty, so stop backtracking for
                 # a chance for the resolution to recover
                 if not broken_state.mapping:
-                    break
+                    raise ValueError("BIG FAIL")
 
             incompatibilities_from_broken = [
                 (k, list(v.incompatibilities)) for k, v in broken_state.criteria.items()
