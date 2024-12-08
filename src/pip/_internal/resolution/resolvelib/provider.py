@@ -1,4 +1,7 @@
+import collections
+import functools
 import math
+import operator
 from functools import lru_cache
 from typing import (
     TYPE_CHECKING,
@@ -11,7 +14,15 @@ from typing import (
     Union,
 )
 
+from pip._vendor.dep_logic.specifiers import EmptySpecifier, from_specifierset
+from pip._vendor.packaging.specifiers import SpecifierSet
 from pip._vendor.resolvelib.providers import AbstractProvider
+from pip._vendor.resolvelib.structs import RequirementInformation
+
+from pip._internal.resolution.resolvelib.requirements import (
+    ExplicitRequirement,
+    SpecifierRequirement,
+)
 
 from .base import Candidate, Constraint, Requirement
 from .candidates import REQUIRES_PYTHON_IDENTIFIER
@@ -236,3 +247,85 @@ class PipProvider(_ProviderBase):
             if backtrack_cause.parent and identifier == backtrack_cause.parent.name:
                 return True
         return False
+
+    def disjoint(
+        self, backtrack_causes: Sequence["PreferenceInformation"]
+    ) -> Sequence["PreferenceInformation"]:
+        specifiers_per_name = collections.defaultdict(set)
+        backtrack_causes_per_name_per_specifier: dict[
+            str,
+            dict[SpecifierSet, list[RequirementInformation[Requirement, Candidate]]],
+        ] = collections.defaultdict(lambda: collections.defaultdict(list))
+
+        for backtrack_cause in backtrack_causes:
+            requirement = backtrack_cause.requirement
+
+            if isinstance(requirement, ExplicitRequirement):
+                specifier = SpecifierSet(f"=={requirement.candidate.version}")
+                name = requirement.candidate.name
+                specifiers_per_name[name].add(specifier)
+                backtrack_causes_per_name_per_specifier[name][specifier].append(
+                    backtrack_cause
+                )
+            elif isinstance(requirement, SpecifierRequirement):
+                base_requirement = requirement._ireq.req
+                if base_requirement is None:
+                    continue
+
+                specifiers_per_name[requirement.name].add(base_requirement.specifier)
+                backtrack_causes_per_name_per_specifier[requirement.name][
+                    base_requirement.specifier
+                ].append(backtrack_cause)
+            else:
+                raise ValueError(f"Unknown requirement type {type(requirement)}")
+
+        # Reduce to only specifiers which logically caused disjoint requirements
+        disjoint_specifiers: set[str] = set()
+        for name, specifiers in specifiers_per_name.copy().items():
+            for specifier in specifiers:
+                if from_specifierset(specifier) == EmptySpecifier():
+                    disjoint_specifiers.add(name)
+                    del specifiers_per_name[name]
+                    break
+
+        for name, specifiers in specifiers_per_name.items():
+            if len(specifiers) < 2:
+                continue
+
+            packaging_and_dep_specifiers = [
+                (s, from_specifierset(s)) for s in specifiers
+            ]
+            for i in range(len(packaging_and_dep_specifiers)):
+                test_pack_specifier, test_dep_specifier = packaging_and_dep_specifiers[
+                    i
+                ]
+                result = functools.reduce(
+                    operator.and_,
+                    [
+                        s[1]
+                        for j, s in enumerate(packaging_and_dep_specifiers)
+                        if j != i
+                    ],
+                )
+                if result != EmptySpecifier():
+                    continue
+
+                if any(
+                    (s[1] & test_dep_specifier) == EmptySpecifier()
+                    for s in packaging_and_dep_specifiers
+                ):
+                    continue
+
+                del backtrack_causes_per_name_per_specifier[name][test_pack_specifier]
+
+        disjoint_specifier_causes: list[
+            RequirementInformation[Requirement, Candidate]
+        ] = []
+        for backtrack_per_specifier in backtrack_causes_per_name_per_specifier.values():
+            for bcs in backtrack_per_specifier.values():
+                disjoint_specifier_causes.extend(bcs)
+
+        if not disjoint_specifier_causes:
+            raise ValueError("Failed to find at least 1 disjoint cause")
+
+        return disjoint_specifier_causes
