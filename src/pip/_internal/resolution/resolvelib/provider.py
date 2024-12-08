@@ -114,6 +114,59 @@ class PipProvider(_ProviderBase):
     def identify(self, requirement_or_candidate: Union[Requirement, Candidate]) -> str:
         return requirement_or_candidate.name
 
+    def narrow_requirement_selection(
+        self,
+        identifiers: Iterable[str],
+        resolutions: Mapping[str, Candidate],
+        candidates: Mapping[str, Iterator[Candidate]],
+        information: Mapping[str, Iterable["PreferenceInformation"]],
+        backtrack_causes: Sequence["PreferenceInformation"],
+    ) -> Iterable[str]:
+        """
+        Narrows down the selection of requirements to consider for the next
+        resolution step.
+
+        This method uses principles of conflict-driven clause learning (CDCL)
+        to focus on the closest conflicts first.
+
+        :params identifiers: Iterable of requirement names currently under
+            consideration.
+        :params resolutions: Current mapping of resolved package identifiers
+            to their selected candidates.
+        :params candidates: Mapping of each package's possible candidates.
+        :params information: Mapping of requirement information for each package.
+        :params backtrack_causes: Sequence of requirements, if non-empty,
+            were the cause of the resolver backtracking
+
+        Returns:
+            An iterable of requirement names that the resolver will use to
+            limit the next step of resolution
+        """
+        cause_identifiers = set()
+        for backtrack_cause in backtrack_causes:
+            requirement = backtrack_cause.requirement
+            if isinstance(requirement, ExplicitRequirement):
+                cause_identifiers.add(backtrack_cause.requirement.name)
+                if backtrack_cause.parent:
+                    cause_identifiers.add(backtrack_cause.parent.name)
+                continue
+
+            if not isinstance(requirement, SpecifierRequirement):
+                raise RuntimeError("Unexpected requirement")
+
+            cause_identifiers.add(backtrack_cause.requirement.name)
+            if backtrack_cause.parent:
+                cause_identifiers.add(backtrack_cause.parent.name)
+
+        for identifer in identifiers:
+            if identifer == REQUIRES_PYTHON_IDENTIFIER:
+                return [identifer]
+
+        if cause_identifiers:
+            return list(cause_identifiers)
+
+        return identifiers
+
     def get_preference(
         self,
         identifier: str,
@@ -168,20 +221,10 @@ class PipProvider(_ProviderBase):
         unfree = bool(operators)
         requested_order = self._user_requested.get(identifier, math.inf)
 
-        # Requires-Python has only one candidate and the check is basically
-        # free, so we always do it first to avoid needless work if it fails.
-        requires_python = identifier == REQUIRES_PYTHON_IDENTIFIER
-
-        # Prefer the causes of backtracking on the assumption that the problem
-        # resolving the dependency tree is related to the failures that caused
-        # the backtracking
-        backtrack_cause = self.is_backtrack_cause(identifier, backtrack_causes)
 
         return (
-            not requires_python,
             not direct,
             not pinned,
-            not backtrack_cause,
             requested_order,
             not unfree,
             identifier,
@@ -237,16 +280,6 @@ class PipProvider(_ProviderBase):
         with_requires = not self._ignore_dependencies
         return [r for r in candidate.iter_dependencies(with_requires) if r is not None]
 
-    @staticmethod
-    def is_backtrack_cause(
-        identifier: str, backtrack_causes: Sequence["PreferenceInformation"]
-    ) -> bool:
-        for backtrack_cause in backtrack_causes:
-            if identifier == backtrack_cause.requirement.name:
-                return True
-            if backtrack_cause.parent and identifier == backtrack_cause.parent.name:
-                return True
-        return False
 
     def disjoint(
         self, backtrack_causes: Sequence["PreferenceInformation"]
