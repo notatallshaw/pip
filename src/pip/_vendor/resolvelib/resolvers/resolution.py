@@ -77,6 +77,10 @@ class Resolution(Generic[RT, CT, KT]):
         self._r = reporter
         self._states: list[State[RT, CT, KT]] = []
 
+        # Optimistic backjumping variables
+        self._optimistic_backjumping = True
+        self._save_states: list[State[RT, CT, KT]] | None = None
+
     @property
     def state(self) -> State[RT, CT, KT]:
         try:
@@ -324,10 +328,29 @@ class Resolution(Generic[RT, CT, KT]):
                 except (IndexError, KeyError):
                     raise ResolutionImpossible(causes) from None
 
-                # Only backjump if the current broken state is
-                # an incompatible dependency
-                if name not in incompatible_deps:
+                # If optimistic backjumping is False we can't assume backjumping
+                # is valid for anythong other than the name being in incompatible
+                # dependencies, this is because a resolvelib "cause" is not the same
+                # as a "cause" in standard satisfiability algorithms. But in most
+                # practical cases they are identical or close enough, so the resolver
+                # starts with optimistic backjumping and falls back only in the case
+                # of resolution impossible
+                safe_backjump = name in incompatible_deps
+                if not self._optimistic_backjumping and not safe_backjump:
                     break
+
+                # If this is the first time we do a non-regular backjump we save
+                # the current state so we can restore it later, if there is an
+                # impossible resolution
+                if not safe_backjump and self._save_states is None:
+                    self._save_states = [
+                        State(
+                            mapping=s.mapping.copy(),
+                            criteria=s.criteria.copy(),
+                            backtrack_causes=s.backtrack_causes[:],
+                        )
+                        for s in self._states
+                    ]
 
                 # If the current dependencies and the incompatible dependencies
                 # are overlapping then we have found a cause of the incompatibility
@@ -448,12 +471,33 @@ class Resolution(Generic[RT, CT, KT]):
                 # Backjump if pinning fails. The backjump process puts us in
                 # an unpinned state, so we can work on it in the next round.
                 self._r.resolving_conflicts(causes=causes)
-                success = self._backjump(causes)
-                self.state.backtrack_causes[:] = causes
 
-                # Dead ends everywhere. Give up.
-                if not success:
-                    raise ResolutionImpossible(self.state.backtrack_causes)
+                # Handle where we are optimistically backjumping and there are
+                # saved states and resolution fails
+                try:
+                    success = self._backjump(causes)
+                except ResolutionImpossible:
+                    if self._optimistic_backjumping and self._save_states:
+                        failed_optimistic_backjumping = True
+                    else:
+                        raise
+                else:
+                    failed_optimistic_backjumping = bool(
+                        not success
+                        and self._optimistic_backjumping
+                        and self._save_states
+                    )
+
+                if failed_optimistic_backjumping and self._save_states:
+                    self._optimistic_backjumping = False
+                    self._states = self._save_states
+                    self._save_states = None
+                else:
+                    self.state.backtrack_causes[:] = causes
+
+                    # Dead ends everywhere. Give up.
+                    if not success:
+                        raise ResolutionImpossible(self.state.backtrack_causes)
             else:
                 # discard as information sources any invalidated names
                 # (unsatisfied names that were previously satisfied)
