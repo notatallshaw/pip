@@ -1,3 +1,4 @@
+from collections import defaultdict
 import math
 from functools import lru_cache
 from typing import (
@@ -99,6 +100,8 @@ class PipProvider(_ProviderBase):
         self._ignore_dependencies = ignore_dependencies
         self._upgrade_strategy = upgrade_strategy
         self._user_requested = user_requested
+        self._current_backtrack_causes: set[str] = set()
+        self._cause_counter: dict[str, int] = defaultdict(int)
 
     def identify(self, requirement_or_candidate: Union[Requirement, Candidate]) -> str:
         return requirement_or_candidate.name
@@ -131,22 +134,19 @@ class PipProvider(_ProviderBase):
             An iterable of requirement names that the resolver will use to
             limit the next step of resolution
         """
-
+        self._current_backtrack_causes.clear()
         cause_identifiers = set()
         for backtrack_cause in backtrack_causes:
             cause_identifiers.add(backtrack_cause.requirement.name)
             if backtrack_cause.parent:
+                self._cause_counter[backtrack_cause.parent.name] += 1
                 cause_identifiers.add(backtrack_cause.parent.name)
 
-        causing_identifiers = []
         for identifier in identifiers:
             if identifier == REQUIRES_PYTHON_IDENTIFIER:
                 return [identifier]
             if identifier in cause_identifiers:
-                causing_identifiers.append(identifier)
-
-        if causing_identifiers:
-            return causing_identifiers
+                self._current_backtrack_causes.add(identifier)
 
         return identifiers
 
@@ -209,12 +209,9 @@ class PipProvider(_ProviderBase):
         unfree = bool(operators)
         requested_order = self._user_requested.get(identifier, math.inf)
 
-        # Requires-Python has only one candidate and the check is basically
-        # free, so we always do it first to avoid needless work if it fails.
-        requires_python = identifier == REQUIRES_PYTHON_IDENTIFIER
-
         return (
-            not requires_python,
+            self._cause_counter[identifier],
+            identifier not in self._current_backtrack_causes,
             not direct,
             not pinned,
             not descriptive_upper_bound,
