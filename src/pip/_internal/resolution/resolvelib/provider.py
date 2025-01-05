@@ -195,19 +195,18 @@ class PipProvider(_ProviderBase):
             )
         else:
             direct, _icandidates, ireqs = False, (), ()
-            _icandidates, ireqs = (), ()
 
-        operators_versions = [
+        operators = [
             (specifier.operator, specifier.version)
             for specifier_set in (ireq.specifier for ireq in ireqs if ireq)
             for specifier in specifier_set
         ]
-        pinned = any(
-            op == "===" or (op == "==" and "*" not in ver)
-            for op, ver in operators_versions
-        )
-        unfree = bool(operators_versions)
 
+        pinned = any(op[:2] == "==" and "*" not in ver for (op, ver) in operators)
+        descriptive_upper_bound = any(op in ("<", "<=") for (op, _) in operators)
+        implicit_upper_bound = any(op == "~=" or (op == "==" and "*" in ver) for (op, ver) in operators)
+        exclusion = any(op == "!=" for (op, _) in operators)
+        unfree = bool(operators)
         requested_order = self._user_requested.get(identifier, math.inf)
 
         # Requires-Python has only one candidate and the check is basically
@@ -218,6 +217,9 @@ class PipProvider(_ProviderBase):
             not requires_python,
             not direct,
             not pinned,
+            not descriptive_upper_bound,
+            not implicit_upper_bound,
+            not exclusion,
             requested_order,
             not unfree,
             identifier,
