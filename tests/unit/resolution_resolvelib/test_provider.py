@@ -100,6 +100,14 @@ class PreferenceInformationBuilder:
             {},
             (True, True, False, True, math.inf, False, "pinned-package"),
         ),
+        # Star-specified package, i.e. with "*"
+        (
+            "star-specified-package",
+            {"star-specified-package": [build_req_info("star-specified-package==1.*")]},
+            [],
+            {},
+            (True, False, True, True, math.inf, False, "star-specified-package"),
+        ),
         # Package that caused backtracking
         (
             "backtrack-package",
