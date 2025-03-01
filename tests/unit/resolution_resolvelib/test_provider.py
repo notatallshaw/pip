@@ -4,17 +4,11 @@ from typing import TYPE_CHECKING, Dict, Iterable, Optional, Sequence
 
 import pytest
 
-from pip._vendor.packaging.version import Version
 from pip._vendor.resolvelib.resolvers import RequirementInformation
 
-from pip._internal.metadata import BaseDistribution
-from pip._internal.models.link import Link
 from pip._internal.req.constructors import install_req_from_req_string
 from pip._internal.resolution.resolvelib.base import Candidate
-from pip._internal.resolution.resolvelib.candidates import (
-    REQUIRES_PYTHON_IDENTIFIER,
-    LinkCandidate,
-)
+from pip._internal.resolution.resolvelib.candidates import REQUIRES_PYTHON_IDENTIFIER
 from pip._internal.resolution.resolvelib.factory import Factory
 from pip._internal.resolution.resolvelib.provider import PipProvider
 from pip._internal.resolution.resolvelib.requirements import (
@@ -30,9 +24,10 @@ if TYPE_CHECKING:
     PreferenceInformation = RequirementInformation[Requirement, Candidate]
 
 
-class FakeLinkCandidate(LinkCandidate):
-    def _prepare(self) -> BaseDistribution:
-        return None  # type: ignore
+class FakeCandidate(Candidate):
+    """A minimal fake candidate for testing purposes."""
+
+    def __init__(self) -> None: ...
 
 
 @dataclass
@@ -57,32 +52,22 @@ class PreferenceInformationBuilder:
         )
         return requirement_information
 
-    def build_direct(self, factory: Factory) -> "PreferenceInformation":
-        link = Link(f"file:///fake/path/{self.name}-0.0-py3-none-any.whl")
-        template = install_req_from_req_string(f"{self.name}==0.0")
-        candidate = FakeLinkCandidate(
-            link=link,
-            template=template,
-            factory=factory,
-            name=self.name,  # type: ignore
-            version=Version("0.0"),
-        )
-        direct_requirement = ExplicitRequirement(candidate)
+    def build_direct(self) -> "PreferenceInformation":
+        """Build a direct requirement using a minimal FakeCandidate."""
+        direct_requirement = ExplicitRequirement(FakeCandidate())
         return RequirementInformation(
             requirement=direct_requirement, parent=self.parent
         )
 
-    def __call__(self, factory: Optional[Factory] = None) -> "PreferenceInformation":
+    def __call__(self) -> "PreferenceInformation":
         if self.is_direct:
-            if factory is None:
-                raise ValueError("Direct requirements require a factory")
-            return self.build_direct(factory)
+            return self.build_direct()
 
         return self.build()
 
 
 @pytest.mark.parametrize(
-    "identifier, information, backtrack_causes, user_requested, expected",
+    "identifier, pref_info_builders, backtrack_builders, user_requested, expected",
     [
         # Test case for REQUIRES_PYTHON_IDENTIFIER
         (
@@ -160,8 +145,8 @@ class PreferenceInformationBuilder:
 )
 def test_get_preference(
     identifier: str,
-    information: Sequence[PreferenceInformationBuilder],
-    backtrack_causes: Sequence[PreferenceInformationBuilder],
+    pref_info_builders: Sequence[PreferenceInformationBuilder],
+    backtrack_builders: Sequence[PreferenceInformationBuilder],
     user_requested: Dict[str, int],
     expected: "Preference",
     factory: Factory,
@@ -175,13 +160,13 @@ def test_get_preference(
     )
 
     preference_information_map: dict[str, Iterable[PreferenceInformation]] = {}
-    for preference_information in information:
-        preference_information_map[preference_information.name] = [
-            preference_information(factory)
+    for preference_info_builder in pref_info_builders:
+        preference_information_map[preference_info_builder.name] = [
+            preference_info_builder()
         ]
 
     backtrack_causes_information: list[PreferenceInformation] = [
-        backtrack_preference(factory) for backtrack_preference in backtrack_causes
+        bb() for bb in backtrack_builders
     ]
 
     preference = provider.get_preference(
