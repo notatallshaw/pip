@@ -164,6 +164,7 @@ class PipProvider(_ProviderBase):
 
         return (
             not requires_python,
+            requested_order == math.inf,
             not direct,
             not pinned,
             not backtrack_cause,
