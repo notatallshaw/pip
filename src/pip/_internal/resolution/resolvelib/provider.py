@@ -144,7 +144,7 @@ class PipProvider(_ProviderBase):
                 continue
 
         if current_backtrack_causes:
-            for problematic_package in self._problematic_package:
+            for problematic_package in self._problematic_package.copy():
                 if problematic_package not in current_backtrack_causes:
                     del self._problematic_package[problematic_package]
 
