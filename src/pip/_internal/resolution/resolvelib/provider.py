@@ -144,16 +144,10 @@ class PipProvider(_ProviderBase):
                 continue
 
         if current_backtrack_causes:
-            for problematic_package in self._problematic_package.copy():
-                if problematic_package not in current_backtrack_causes:
-                    del self._problematic_package[problematic_package]
-
             for identifier in current_backtrack_causes:
                 self._problematic_package[identifier] += 1
 
             return current_backtrack_causes
-
-        self._problematic_package.clear()
 
         return identifiers
 
@@ -208,9 +202,9 @@ class PipProvider(_ProviderBase):
         requested_order = self._user_requested.get(identifier, math.inf)
 
         return (
-            self._problematic_package.get(identifier, 0),
             not direct,
             not pinned,
+            self._problematic_package.get(identifier, 0) // 5,
             requested_order,
             not unfree,
             identifier,
