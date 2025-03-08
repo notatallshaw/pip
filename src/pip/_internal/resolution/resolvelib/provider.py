@@ -193,12 +193,17 @@ class PipProvider(_ProviderBase):
 
         direct = candidate is not None
         pinned = any(((op[:2] == "==") and ("*" not in ver)) for op, ver in operators)
+        upper_bounded = any(
+            ((op in ("<", "<=", "~=")) or (op == "==" and "*" in ver))
+            for op, ver in operators
+        )
         unfree = bool(operators)
         requested_order = self._user_requested.get(identifier, math.inf)
 
         return (
             not direct,
             not pinned,
+            not upper_bounded,
             requested_order,
             not unfree,
             identifier,
