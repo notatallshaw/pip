@@ -1,5 +1,5 @@
-from collections import defaultdict
 import math
+from collections import defaultdict
 from functools import lru_cache
 from typing import (
     TYPE_CHECKING,
@@ -152,6 +152,8 @@ class PipProvider(_ProviderBase):
                 self._problematic_package[identifier] += 1
 
             return current_backtrack_causes
+
+        self._problematic_package.clear()
 
         return identifiers
 
