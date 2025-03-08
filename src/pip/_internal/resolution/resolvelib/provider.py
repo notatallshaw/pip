@@ -1,3 +1,4 @@
+from collections import defaultdict
 import math
 from functools import lru_cache
 from typing import (
@@ -99,6 +100,7 @@ class PipProvider(_ProviderBase):
         self._ignore_dependencies = ignore_dependencies
         self._upgrade_strategy = upgrade_strategy
         self._user_requested = user_requested
+        self._problematic_package: Dict[str, int] = defaultdict(int)
 
     def identify(self, requirement_or_candidate: Union[Requirement, Candidate]) -> str:
         return requirement_or_candidate.name
@@ -142,6 +144,13 @@ class PipProvider(_ProviderBase):
                 continue
 
         if current_backtrack_causes:
+            for problematic_package in self._problematic_package:
+                if problematic_package not in current_backtrack_causes:
+                    del self._problematic_package[problematic_package]
+
+            for identifier in current_backtrack_causes:
+                self._problematic_package[identifier] += 1
+
             return current_backtrack_causes
 
         return identifiers
@@ -197,6 +206,7 @@ class PipProvider(_ProviderBase):
         requested_order = self._user_requested.get(identifier, math.inf)
 
         return (
+            self._problematic_package.get(identifier, 0),
             not direct,
             not pinned,
             requested_order,
