@@ -298,7 +298,65 @@ In this situation, you could consider:
 - Refactoring your project to reduce the number of dependencies (for
   example, by breaking up a monolithic code base into smaller pieces).
 
-### Getting help
+## Handling `ResolutionTooDeep` Errors
+
+Sometimes pip's dependency resolver may exceed its search depth and terminate
+with a `ResolutionTooDeep` error. This typically occurs when the dependency
+graph is extremely complex or when there are too many package versions to
+evaluate.
+
+To address this error, consider the following strategies:
+
+### Specify Reasonable Lower Bounds
+
+By setting a higher lower bound for your dependencies, you narrow the search
+space. This excludes older versions that might trigger excessive backtracking.
+For example:
+
+```{pip-cli}
+$ pip install "package_coffee>=0.44.0" "package_tea>=4.0.0"
+```
+
+### Use the `--upgrade` Flag
+
+The `--upgrade` flag directs pip to ignore already installed versions and
+search for the latest versions that meet your requirements. This can help
+avoid unnecessary resolution paths:
+
+```{pip-cli}
+$ pip install --upgrade package_coffee package_tea
+```
+
+### Utilize Constraint Files
+
+If you need to impose additional version restrictions on transitive
+dependencies (dependencies of dependencies), consider using a constraint
+file. A constraint file specifies version limits for packages that are
+indirectly required. For example:
+
+```
+# constraints.txt
+indirect_dependency>=2.0.0
+```
+
+Then install your packages with:
+
+```{pip-cli}
+$ pip install --constraint constraints.txt package_coffee package_tea
+```
+
+### Use Upper Bounds Sparingly
+
+Although upper bounds are generally discouraged because they can complicate
+dependency management, they may be necessary when certain versions are known
+to cause conflicts. Use them cautiously—for example:
+
+```{pip-cli}
+$ pip install "package_coffee>=0.44.0,<1.0.0" "package_tea>=4.0.0"
+```
+
+
+## Getting help
 
 If none of the suggestions above work for you, we recommend that you ask
 for help on:
