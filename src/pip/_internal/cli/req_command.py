@@ -82,6 +82,7 @@ class RequirementCommand(IndexGroupCommand):
 
         self.cmd_opts.add_option(cmdoptions.dependency_groups())
         self.cmd_opts.add_option(cmdoptions.no_clean())
+        self.cmd_opts.add_option(cmdoptions.max_resolution_rounds())
 
     @staticmethod
     def determine_resolver_variant(options: Values) -> str:
@@ -189,6 +190,7 @@ class RequirementCommand(IndexGroupCommand):
                 force_reinstall=force_reinstall,
                 upgrade_strategy=upgrade_strategy,
                 py_version_info=py_version_info,
+                max_resolution_rounds=options.max_resolution_rounds,
             )
         import pip._internal.resolution.legacy.resolver
 

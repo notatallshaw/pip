@@ -52,6 +52,7 @@ class Resolver(BaseResolver):
         force_reinstall: bool,
         upgrade_strategy: str,
         py_version_info: Optional[Tuple[int, ...]] = None,
+        max_resolution_rounds: int = 200000,
     ):
         super().__init__()
         assert upgrade_strategy in self._allowed_strategies
@@ -69,6 +70,7 @@ class Resolver(BaseResolver):
         )
         self.ignore_dependencies = ignore_dependencies
         self.upgrade_strategy = upgrade_strategy
+        self.max_resolution_rounds = max_resolution_rounds
         self._result: Optional[Result] = None
 
     def resolve(
@@ -92,9 +94,8 @@ class Resolver(BaseResolver):
         )
 
         try:
-            limit_how_complex_resolution_can_be = 200000
             result = self._result = resolver.resolve(
-                collected.requirements, max_rounds=limit_how_complex_resolution_can_be
+                collected.requirements, max_rounds=self.max_resolution_rounds
             )
 
         except ResolutionImpossible as e:

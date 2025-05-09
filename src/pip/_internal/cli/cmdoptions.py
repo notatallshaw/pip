@@ -1052,6 +1052,21 @@ no_python_version_warning: Callable[..., Option] = partial(
 )
 
 
+max_resolution_rounds: Callable[..., Option] = partial(
+    Option,
+    "--max-resolution-rounds",
+    dest="max_resolution_rounds",
+    type="int",
+    default=200_000,
+    metavar="N",
+    help="Maximum number of rounds to attempt when resolving dependencies. "
+    "Once this limit is reached, pip will stop trying to resolve and raise"
+    " an error. Always needs to be  greater than the number of packages to"
+    " resolve, even for fully pinned dependencies. If not specified, a "
+    "default of 200,000 is used.",
+)
+
+
 # Features that are now always on. A warning is printed if they are used.
 ALWAYS_ENABLED_FEATURES = [
     "truststore",  # always on since 24.2
