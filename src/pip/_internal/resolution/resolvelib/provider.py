@@ -212,9 +212,11 @@ class PipProvider(_ProviderBase):
             for op, ver in operators
         )
         unfree = bool(operators)
+        user_requested = identifier in self._user_requested
         requested_order = self._user_requested.get(identifier, math.inf)
 
         return (
+            not user_requested,
             not direct,
             not pinned,
             not upper_bounded,
