@@ -3,7 +3,7 @@ from __future__ import annotations
 import collections
 import itertools
 import operator
-from typing import TYPE_CHECKING, Collection, Generic, Iterable, Mapping
+from typing import TYPE_CHECKING, Generic
 
 from ..structs import (
     CT,
@@ -27,8 +27,12 @@ from .exceptions import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Collection, Iterable, Mapping
+
     from ..providers import AbstractProvider, Preference
     from ..reporters import BaseReporter
+
+_OPTIMISTIC_BACKJUMPING: bool = True
 
 
 def _build_result(state: State[RT, CT, KT]) -> Result[RT, CT, KT]:
@@ -61,6 +65,20 @@ def _build_result(state: State[RT, CT, KT]) -> Result[RT, CT, KT]:
     )
 
 
+def _calc_optimistic_backjumping_timeout(current_round: int, max_rounds: int) -> int:
+    """Calculate the timeout for optimistic backjumping.
+
+    This is an arbitarily tuned function that gives some "nice" values
+    for the timeout.
+
+    When optimistic backjumping is used it should be MUCH faster than
+    the normal backjumping, so we only give it a limited amount of
+    time to work.
+    """
+    remaining_rounds = max_rounds - current_round
+    return int(remaining_rounds / 20)
+
+
 class Resolution(Generic[RT, CT, KT]):
     """Stateful resolution object.
 
@@ -76,6 +94,11 @@ class Resolution(Generic[RT, CT, KT]):
         self._p = provider
         self._r = reporter
         self._states: list[State[RT, CT, KT]] = []
+
+        # Optimistic backjumping variables
+        self._optimistic_backjumping = _OPTIMISTIC_BACKJUMPING
+        self._save_states: list[State[RT, CT, KT]] | None = None
+        self._calc_optimistic_backjumping_timeout = _calc_optimistic_backjumping_timeout
 
     @property
     def state(self) -> State[RT, CT, KT]:
@@ -324,13 +347,30 @@ class Resolution(Generic[RT, CT, KT]):
                 except (IndexError, KeyError):
                     raise ResolutionImpossible(causes) from None
 
-                # Only backjump if the current broken state is
-                # an incompatible dependency
-                if name not in incompatible_deps:
+                if not self._optimistic_backjumping and name not in incompatible_deps:
+                    # For safe backjumping only backjump if the current dependency
+                    # is not the same as the incompatible dependency
                     break
 
+                # On the first time a non-safe backjump is done the state
+                # is saved so we can restore it later if the resolution fails
+                if (
+                    self._optimistic_backjumping
+                    and self._save_states is None
+                    and name not in incompatible_deps
+                ):
+                    self._save_states = [
+                        State(
+                            mapping=s.mapping.copy(),
+                            criteria=s.criteria.copy(),
+                            backtrack_causes=s.backtrack_causes[:],
+                        )
+                        for s in self._states
+                    ]
+
                 # If the current dependencies and the incompatible dependencies
-                # are overlapping then we have found a cause of the incompatibility
+                # are overlapping then we have likely found a cause of the
+                # incompatibility
                 current_dependencies = {
                     self._p.identify(d) for d in self._p.get_dependencies(candidate)
                 }
@@ -394,8 +434,36 @@ class Resolution(Generic[RT, CT, KT]):
         # pinning the virtual "root" package in the graph.
         self._push_new_state()
 
+        # Variables for optimistic backjumping timeout checks
+        optimistic_rounds_timeout: int | None = None
+        optimistic_backjumping_start_round: int | None = None
+
         for round_index in range(max_rounds):
             self._r.starting_round(index=round_index)
+
+            # Handle if optimistic backjumping has been running for too long
+            if self._optimistic_backjumping and self._save_states is not None:
+                if optimistic_backjumping_start_round is None:
+                    optimistic_backjumping_start_round = round_index
+                    optimistic_rounds_timeout = (
+                        self._calc_optimistic_backjumping_timeout(
+                            round_index, max_rounds - round_index
+                        )
+                    )
+                    if optimistic_rounds_timeout <= 0:
+                        self._optimistic_backjumping = False
+                        self._states = self._save_states
+                        continue
+                elif optimistic_rounds_timeout is not None:
+                    if (
+                        round_index - optimistic_backjumping_start_round
+                        >= optimistic_rounds_timeout
+                    ):
+                        self._optimistic_backjumping = False
+                        self._states = self._save_states
+                        continue  # Continue with the next round after reverting
+                else:
+                    raise AssertionError("optimistic_rounds_timeout should not be None")
 
             unsatisfied_names = [
                 key
@@ -448,12 +516,32 @@ class Resolution(Generic[RT, CT, KT]):
                 # Backjump if pinning fails. The backjump process puts us in
                 # an unpinned state, so we can work on it in the next round.
                 self._r.resolving_conflicts(causes=causes)
-                success = self._backjump(causes)
-                self.state.backtrack_causes[:] = causes
 
-                # Dead ends everywhere. Give up.
-                if not success:
-                    raise ResolutionImpossible(self.state.backtrack_causes)
+                try:
+                    success = self._backjump(causes)
+                except ResolutionImpossible:
+                    if self._optimistic_backjumping and self._save_states:
+                        failed_optimistic_backjumping = True
+                    else:
+                        raise
+                else:
+                    failed_optimistic_backjumping = bool(
+                        not success
+                        and self._optimistic_backjumping
+                        and self._save_states
+                    )
+
+                # Record the round when optimistic backjumping starts
+                if failed_optimistic_backjumping and self._save_states:
+                    self._optimistic_backjumping = False
+                    self._states = self._save_states
+                    self._save_states = None
+                else:
+                    self.state.backtrack_causes[:] = causes
+
+                    # Dead ends everywhere. Give up.
+                    if not success:
+                        raise ResolutionImpossible(self.state.backtrack_causes)
             else:
                 # discard as information sources any invalidated names
                 # (unsatisfied names that were previously satisfied)
