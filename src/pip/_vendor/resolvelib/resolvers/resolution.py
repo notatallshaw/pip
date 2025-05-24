@@ -32,8 +32,7 @@ if TYPE_CHECKING:
     from ..providers import AbstractProvider, Preference
     from ..reporters import BaseReporter
 
-_OPTIMISTIC_BACKJUMPING: bool = True
-
+_OPTIMISTIC_BACKJUMPING_RATIO: float = 0.1
 
 def _build_result(state: State[RT, CT, KT]) -> Result[RT, CT, KT]:
     mapping = state.mapping
@@ -65,20 +64,6 @@ def _build_result(state: State[RT, CT, KT]) -> Result[RT, CT, KT]:
     )
 
 
-def _calc_optimistic_backjumping_timeout(current_round: int, max_rounds: int) -> int:
-    """Calculate the timeout for optimistic backjumping.
-
-    This is an arbitarily tuned function that gives some "nice" values
-    for the timeout.
-
-    When optimistic backjumping is used it should be MUCH faster than
-    the normal backjumping, so we only give it a limited amount of
-    time to work.
-    """
-    remaining_rounds = max_rounds - current_round
-    return int(remaining_rounds / 20)
-
-
 class Resolution(Generic[RT, CT, KT]):
     """Stateful resolution object.
 
@@ -96,9 +81,9 @@ class Resolution(Generic[RT, CT, KT]):
         self._states: list[State[RT, CT, KT]] = []
 
         # Optimistic backjumping variables
-        self._optimistic_backjumping = _OPTIMISTIC_BACKJUMPING
+        self._optimistic_backjumping_ratio = _OPTIMISTIC_BACKJUMPING_RATIO
         self._save_states: list[State[RT, CT, KT]] | None = None
-        self._calc_optimistic_backjumping_timeout = _calc_optimistic_backjumping_timeout
+        self._optimistic_start_round: int | None = None
 
     @property
     def state(self) -> State[RT, CT, KT]:
@@ -297,6 +282,25 @@ class Resolution(Generic[RT, CT, KT]):
             )
         return True
 
+    def _save_state(self) -> None:
+        """Save states for potential rollback if optimistic backjumping fails."""
+        if self._save_states is None:
+            self._save_states = [
+                State(
+                    mapping=s.mapping.copy(),
+                    criteria=s.criteria.copy(),
+                    backtrack_causes=s.backtrack_causes[:],
+                )
+                for s in self._states
+            ]
+
+    def _rollback_states(self) -> None:
+        """Rollback states and disable optimistic backjumping."""
+        self._optimistic_backjumping_ratio = 0.0
+        if self._save_states:
+            self._states = self._save_states
+            self._save_states = None
+
     def _backjump(self, causes: list[RequirementInformation[RT, CT]]) -> bool:
         """Perform backjumping.
 
@@ -347,26 +351,16 @@ class Resolution(Generic[RT, CT, KT]):
                 except (IndexError, KeyError):
                     raise ResolutionImpossible(causes) from None
 
-                if not self._optimistic_backjumping and name not in incompatible_deps:
-                    # For safe backjumping only backjump if the current dependency
-                    # is not the same as the incompatible dependency
+                if not self._optimistic_backjumping_ratio and name not in incompatible_deps:
+                # For safe backjumping only backjump if the current dependency
+                # is not the same as the incompatible dependency
                     break
 
                 # On the first time a non-safe backjump is done the state
                 # is saved so we can restore it later if the resolution fails
-                if (
-                    self._optimistic_backjumping
-                    and self._save_states is None
-                    and name not in incompatible_deps
-                ):
-                    self._save_states = [
-                        State(
-                            mapping=s.mapping.copy(),
-                            criteria=s.criteria.copy(),
-                            backtrack_causes=s.backtrack_causes[:],
-                        )
-                        for s in self._states
-                    ]
+                if self._optimistic_backjumping_ratio and self._save_states is None and name not in incompatible_deps:
+                    self._save_state()
+
 
                 # If the current dependencies and the incompatible dependencies
                 # are overlapping then we have likely found a cause of the
@@ -442,28 +436,19 @@ class Resolution(Generic[RT, CT, KT]):
             self._r.starting_round(index=round_index)
 
             # Handle if optimistic backjumping has been running for too long
-            if self._optimistic_backjumping and self._save_states is not None:
+            if self._optimistic_backjumping_ratio and self._save_states is not None:
                 if optimistic_backjumping_start_round is None:
                     optimistic_backjumping_start_round = round_index
-                    optimistic_rounds_timeout = (
-                        self._calc_optimistic_backjumping_timeout(
-                            round_index, max_rounds - round_index
-                        )
-                    )
+                    optimistic_rounds_timeout = int(
+                         (max_rounds - round_index) * self._optimistic_backjumping_ratio)
+
                     if optimistic_rounds_timeout <= 0:
-                        self._optimistic_backjumping = False
-                        self._states = self._save_states
+                        self._rollback_states()
                         continue
                 elif optimistic_rounds_timeout is not None:
-                    if (
-                        round_index - optimistic_backjumping_start_round
-                        >= optimistic_rounds_timeout
-                    ):
-                        self._optimistic_backjumping = False
-                        self._states = self._save_states
-                        continue  # Continue with the next round after reverting
-                else:
-                    raise AssertionError("optimistic_rounds_timeout should not be None")
+                    if round_index - optimistic_backjumping_start_round >= optimistic_rounds_timeout:
+                        self._rollback_states()
+                        continue
 
             unsatisfied_names = [
                 key
@@ -520,22 +505,19 @@ class Resolution(Generic[RT, CT, KT]):
                 try:
                     success = self._backjump(causes)
                 except ResolutionImpossible:
-                    if self._optimistic_backjumping and self._save_states:
+                    if self._optimistic_backjumping_ratio and self._save_states:
                         failed_optimistic_backjumping = True
                     else:
                         raise
                 else:
                     failed_optimistic_backjumping = bool(
                         not success
-                        and self._optimistic_backjumping
+                        and self._optimistic_backjumping_ratio
                         and self._save_states
                     )
 
-                # Record the round when optimistic backjumping starts
                 if failed_optimistic_backjumping and self._save_states:
-                    self._optimistic_backjumping = False
-                    self._states = self._save_states
-                    self._save_states = None
+                    self._rollback_states()
                 else:
                     self.state.backtrack_causes[:] = causes
 
