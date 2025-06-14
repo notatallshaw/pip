@@ -100,6 +100,9 @@ class PipProvider(_ProviderBase):
         self._upgrade_strategy = upgrade_strategy
         self._user_requested = user_requested
 
+        # All packages that are unambigiously required by the user.
+        self._required = set(user_requested)
+
     def identify(self, requirement_or_candidate: Requirement | Candidate) -> str:
         return requirement_or_candidate.name
 
@@ -139,7 +142,42 @@ class PipProvider(_ProviderBase):
             # Check if this identifier is a backtrack cause
             if identifier in backtrack_identifiers:
                 current_backtrack_causes.append(identifier)
-                continue
+
+            # An identifier might be required because either:
+            # * It is user requested
+            # * It is a child of a required package that is pinned or
+            #   explicit (VCS or URL) e.g.
+            #     User requested `foo==1.0` and `bar` depends on `foo`,
+            #     so `bar` is required.
+            if identifier not in self._required:
+                # Check if parent is in the required set and if the parent
+                # is pinned or explicit, then this identifier is required.
+                for info in information.get(identifier, ()):
+                    parent = info.parent
+                    if parent is None:
+                        continue
+
+                    if parent.name not in self._required:
+                        continue
+
+                    parents_information = list(information[parent.name])
+                    if len(parents_information) != 1:
+                        continue
+
+                    parent_information = parents_information[0]
+
+                    if isinstance(parent_information, ExplicitRequirement):
+                        self._required.add(identifier)
+                        break
+
+                    for specifier in parent_information.requirement._ireq.specifier:
+                        if specifier.operator in ("==", "===") and "*" not in specifier.version:
+                            self._required.add(identifier)
+                            break
+                    else:
+                        # If we didn't break, then the parent is not pinned.
+                        continue
+                    break
 
         if current_backtrack_causes:
             return current_backtrack_causes
@@ -213,8 +251,10 @@ class PipProvider(_ProviderBase):
         )
         unfree = bool(operators)
         requested_order = self._user_requested.get(identifier, math.inf)
+        required = identifier in self._required
 
         return (
+            not required,
             not direct,
             not pinned,
             not upper_bounded,
