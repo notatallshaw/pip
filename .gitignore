@@ -15,6 +15,7 @@ docs/build/
 
 # mypy
 .mypy_cache/
+tests/typing/untracked-vendored-stubs
 
 # Unit test / coverage reports
 .[nt]ox/

@@ -194,19 +194,42 @@ def typecheck(session: nox.Session) -> None:
         "--no-deps",
     )
     stubs_directories = stubs_dir.glob("*-stubs")
+
+    # We now make a fake pip package in the stubs dir. When mypy finds this
+    # directory it will use any file it finds, but continue to find files from the
+    # real pip directory.
     pip_stubs_dir = stubs_dir / "pip"
-
     pip_stubs_dir.mkdir()
-    (pip_stubs_dir / "__init__.pyi").write_text("__version__: str")
-    (pip_stubs_dir / "py.typed").write_text("partial\n")
 
-    pip_vendor_dir = pip_stubs_dir / "_vendor"
+    pip_vendor_dir = stubs_dir / "pip" / "_vendor"
     pip_vendor_dir.mkdir()
-    (pip_vendor_dir / "__init__.pyi").touch()
 
+    # Generate real pip/__init__.pyi and pip/_vendor/__init__.pyi files. We are
+    # obliged to have these files so that mypy understands that this is the pip
+    # package, and that it should take these stubs into account.
+    # We use stubgen, as the __init__.pyi files must be representative of what is
+    # in the real pip project.
+    real_pip_init = Path("src/pip/__init__.py")
+    real_pip_vendor_init = Path("src/pip/_vendor/__init__.py")
+
+    # stubgen has a problem generating for pip/_vendored/__init__.py, so we
+    # trick it it by copying it to a different path and generating from there
+    tmp_pip_vendor_init = stubs_dir / "pip_vendor.py"
+    shutil.copy(real_pip_vendor_init, tmp_pip_vendor_init)
+
+    session.run(
+        "stubgen",
+        str(real_pip_init),
+        str(tmp_pip_vendor_init),
+        "--output",
+        str(stubs_dir),
+    )
+
+    tmp_pip_vendor_init.unlink()
+    shutil.move(stubs_dir / "pip_vendor.pyi", pip_vendor_dir / "__init__.pyi")
+
+    # Move the vendored stub files into the pip vendored stubpackage.
     for stubs_directory in stubs_directories:
-        if stubs_directory == pip_stubs_dir:
-            continue
         stubs_directory.rename(pip_vendor_dir / stubs_directory.name.split("-stubs")[0])
 
     mypy_cmd = [
