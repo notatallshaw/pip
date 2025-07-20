@@ -1,5 +1,7 @@
 """xmlrpclib.Transport implementation"""
 
+from __future__ import annotations
+
 import logging
 import urllib.parse
 import xmlrpc.client
@@ -33,19 +35,20 @@ class PipXmlrpcTransport(xmlrpc.client.Transport):
 
     def request(
         self,
-        host: "_HostType",
+        host: _HostType,
         handler: str,
-        request_body: "SizedBuffer",
+        request_body: SizedBuffer,
         verbose: bool = False,
-    ) -> tuple["_Marshallable", ...]:
+    ) -> tuple[_Marshallable, ...]:
         assert isinstance(host, str)
         parts = (self._scheme, host, handler, None, None, None)
         url = urllib.parse.urlunparse(parts)
+        assert isinstance(request_body, bytes)
         try:
             headers = {"Content-Type": "text/xml"}
             response = self._session.post(
                 url,
-                data=cast(bytes, request_body),
+                data=request_body,
                 headers=headers,
                 stream=True,
             )

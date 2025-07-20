@@ -23,6 +23,7 @@ nox.needs_version = ">=2024.03.02"  # for session.run_install()
 LOCATIONS = {
     "common-wheels": "tests/data/common_wheels",
     "protected-pip": "tools/protected_pip.py",
+    "untracked-vendored-type-stubs": "tests/typing/untracked-vendored-stubs",
 }
 
 AUTHORS_FILE = "AUTHORS.txt"
@@ -181,14 +182,52 @@ def typecheck(session: nox.Session) -> None:
         "all",
     )
 
-    session.run(
-        "mypy",
-        "src/pip",
-        "tests",
-        "tools",
-        "noxfile.py",
-        "--exclude=tests/data",
+    stubs_dir = Path(LOCATIONS["untracked-vendored-type-stubs"])
+    if stubs_dir.exists():
+        shutil.rmtree(stubs_dir)
+
+    run_with_protected_pip(
+        session,
+        "install",
+        f"--target={stubs_dir}",
+        "--group=type-stubs-for-vendoring",
+        "--no-deps",
     )
+    stubs_directories = stubs_dir.glob("*-stubs")
+    pip_stubs_dir = stubs_dir / "pip"
+
+    pip_stubs_dir.mkdir()
+    (pip_stubs_dir / "__init__.pyi").write_text("__version__: str")
+    (pip_stubs_dir / "py.typed").write_text("partial\n")
+
+    pip_vendor_dir = pip_stubs_dir / "_vendor"
+    pip_vendor_dir.mkdir()
+    (pip_vendor_dir / "__init__.pyi").touch()
+
+    for stubs_directory in stubs_directories:
+        if stubs_directory == pip_stubs_dir:
+            continue
+        stubs_directory.rename(pip_vendor_dir / stubs_directory.name.split("-stubs")[0])
+
+    mypy_cmd = [
+        "mypy",
+        "--warn-redundant-casts",  # Not configurable via pyproject.toml currently.
+    ]
+    if session.posargs:
+        # Allow passing specific files/directories to be checked.
+        mypy_cmd.extend(session.posargs)
+    else:
+        # Otherwise, run against all important files.
+        mypy_cmd.extend(
+            [
+                "src/pip",
+                "tests",
+                "tools",
+                "noxfile.py",
+            ]
+        )
+
+    session.run(*mypy_cmd)
 
 
 @nox.session

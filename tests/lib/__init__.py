@@ -21,7 +21,12 @@ from urllib.request import pathname2url
 from zipfile import ZipFile
 
 import pytest
-from scripttest import FoundDir, FoundFile, ProcResult, TestFileEnvironment
+from scripttest import (  # type: ignore[import-untyped]
+    FoundDir,
+    FoundFile,
+    ProcResult,
+    TestFileEnvironment,
+)
 
 from pip._vendor.packaging.utils import canonicalize_name
 

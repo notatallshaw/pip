@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from io import BytesIO
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
+
+if TYPE_CHECKING:
+    from pip._vendor.requests.models import Response
 
 _Hook = Callable[["MockResponse"], None]
 
@@ -23,7 +26,16 @@ class FakeStream:
         pass
 
 
-class MockResponse:
+if TYPE_CHECKING:
+    # Trick the type-checker into thinking that our MockResponse is a real
+    # requests Response (that way we will be allowed to use it as a Response
+    # in interfaces without needing to type: ignore).
+    inheritance = [Response]
+else:
+    inheritance = []
+
+
+class MockResponse(*inheritance):  # type: ignore[misc]
     request: MockRequest
     connection: MockConnection
     url: str

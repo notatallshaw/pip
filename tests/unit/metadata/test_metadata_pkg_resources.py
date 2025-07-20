@@ -18,7 +18,6 @@ from pip._internal.metadata.pkg_resources import (
 )
 
 pkg_resources = pytest.importorskip("pip._vendor.pkg_resources")
-from pip._vendor.pkg_resources import WorkingSet  # noqa: E402
 
 
 def _dist_is_local(dist: mock.Mock) -> bool:
@@ -72,13 +71,13 @@ workingset_stdlib = _MockWorkingSet(
 )
 def test_get_distribution(ws: _MockWorkingSet, req_name: str) -> None:
     """Ensure get_distribution() finds all kinds of distributions."""
-    dist = Environment(cast(WorkingSet, ws)).get_distribution(req_name)
+    dist = Environment(ws).get_distribution(req_name)
     assert dist is not None
     assert cast(Distribution, dist)._dist.project_name == req_name
 
 
 def test_get_distribution_nonexist() -> None:
-    dist = Environment(cast(WorkingSet, workingset)).get_distribution("non-exist")
+    dist = Environment(workingset).get_distribution("non-exist")
     assert dist is None
 
 

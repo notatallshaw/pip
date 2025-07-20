@@ -11,7 +11,7 @@ import venv as _venv
 from pathlib import Path
 from typing import Literal
 
-import virtualenv as _virtualenv
+import virtualenv as _virtualenv  # type: ignore[import-untyped]
 
 VirtualEnvironmentType = Literal["virtualenv", "venv"]
 

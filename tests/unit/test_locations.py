@@ -10,16 +10,12 @@ import sys
 import sysconfig
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 from unittest.mock import Mock
 
 import pytest
 
 from pip._internal.locations import SCHEME_KEYS, _should_use_sysconfig, get_scheme
-
-if TYPE_CHECKING:
-    # Vendored libraries with type stubs
-    from setuptools._distutils.dist import Distribution  # noqa: F401
 
 if sys.platform == "win32":
     pwd = Mock()
@@ -134,8 +130,7 @@ class TestDistutilsScheme:
         f.parent.mkdir()
         f.write_text("[install]\ninstall-scripts=" + install_scripts)
 
-        if not TYPE_CHECKING:
-            from distutils.dist import Distribution
+        from distutils.dist import Distribution
 
         # patch the function that returns what config files are present
         monkeypatch.setattr(
@@ -161,8 +156,7 @@ class TestDistutilsScheme:
         f = tmpdir / "config" / "setup.cfg"
         f.parent.mkdir()
         f.write_text("[install]\ninstall-lib=" + install_lib)
-        if not TYPE_CHECKING:
-            from distutils.dist import Distribution
+        from distutils.dist import Distribution
 
         # patch the function that returns what config files are present
         monkeypatch.setattr(

@@ -1,13 +1,11 @@
-from __future__ import annotations
-
-from collections.abc import Generator
-from typing import TYPE_CHECKING
+import typing
 
 from pip._internal.exceptions import NetworkConnectionError
 
-if TYPE_CHECKING:
-    # Vendored libraries with type stubs
-    from requests.models import Response
+if typing.TYPE_CHECKING:
+    from collections.abc import Generator
+
+    from pip._vendor.requests.models import Response
 
 # The following comments and HTTP headers were originally added by
 # Donald Stufft in git commit 22c562429a61bb77172039e480873fb239dd8c03.

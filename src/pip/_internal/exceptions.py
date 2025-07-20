@@ -27,8 +27,7 @@ from pip._vendor.rich.text import Text
 if TYPE_CHECKING:
     from hashlib import _Hash
 
-    # Vendored libraries with type stubs
-    from requests.models import PreparedRequest, Request, Response
+    from pip._vendor.requests.models import PreparedRequest, Request, Response
 
     from pip._internal.metadata import BaseDistribution
     from pip._internal.network.download import _FileDownload

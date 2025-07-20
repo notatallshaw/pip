@@ -24,8 +24,16 @@ from typing import (
     Any,
     Optional,
     Union,
-    cast,
 )
+
+from pip._vendor import requests, urllib3
+from pip._vendor.cachecontrol import CacheControlAdapter as _BaseCacheControlAdapter
+from pip._vendor.requests.adapters import DEFAULT_POOLBLOCK, BaseAdapter
+from pip._vendor.requests.adapters import HTTPAdapter as _BaseHTTPAdapter
+from pip._vendor.requests.models import PreparedRequest, Response
+from pip._vendor.requests.structures import CaseInsensitiveDict
+from pip._vendor.urllib3.connectionpool import ConnectionPool
+from pip._vendor.urllib3.exceptions import InsecureRequestWarning
 
 from pip import __version__
 from pip._internal.metadata import get_default_environment
@@ -42,28 +50,8 @@ from pip._internal.utils.urls import url_to_path
 if TYPE_CHECKING:
     from ssl import SSLContext
 
-    # Vendored libraries with type stubs
-    import requests
-    import urllib3
-    from requests.adapters import DEFAULT_POOLBLOCK, BaseAdapter
-    from requests.adapters import HTTPAdapter as _BaseHTTPAdapter
-    from requests.models import PreparedRequest, Response
-    from requests.structures import CaseInsensitiveDict
-    from urllib3 import ProxyManager
-    from urllib3.connectionpool import ConnectionPool
-    from urllib3.exceptions import InsecureRequestWarning
-    from urllib3.poolmanager import PoolManager
-
-    from pip._vendor.cachecontrol import CacheControlAdapter as _BaseCacheControlAdapter
-
-else:
-    from pip._vendor import requests, urllib3
-    from pip._vendor.cachecontrol import CacheControlAdapter as _BaseCacheControlAdapter
-    from pip._vendor.requests.adapters import DEFAULT_POOLBLOCK, BaseAdapter
-    from pip._vendor.requests.adapters import HTTPAdapter as _BaseHTTPAdapter
-    from pip._vendor.requests.models import PreparedRequest, Response
-    from pip._vendor.requests.structures import CaseInsensitiveDict
-    from pip._vendor.urllib3.exceptions import InsecureRequestWarning
+    from pip._vendor.urllib3 import ProxyManager
+    from pip._vendor.urllib3.poolmanager import PoolManager
 
 
 logger = logging.getLogger(__name__)
@@ -336,8 +324,9 @@ class InsecureCacheControlAdapter(CacheControlAdapter):
 
 
 class PipSession(requests.Session):
-    # Let the type checker know that we are using a custom auth handler.
+    # Let the type checker know that we are using a vendored requests.
     auth: MultiDomainBasicAuth
+    _trusted_host_adapter: _BaseHTTPAdapter
 
     timeout: int | None = None
 
@@ -400,23 +389,17 @@ class PipSession(requests.Session):
         # origin, and we don't want someone to be able to poison the cache and
         # require manual eviction from the cache to fix it.
         if cache:
-            secure_adapter = cast(
-                HTTPAdapter,
-                CacheControlAdapter(
-                    cache=SafeFileCache(cache),
-                    max_retries=retry,
-                    ssl_context=ssl_context,
-                ),
+            secure_adapter: _BaseHTTPAdapter = CacheControlAdapter(
+                cache=SafeFileCache(cache),
+                max_retries=retries,
+                ssl_context=ssl_context,
             )
-            self._trusted_host_adapter = cast(
-                HTTPAdapter,
-                InsecureCacheControlAdapter(
-                    cache=SafeFileCache(cache),
-                    max_retries=retry,
-                ),
+            self._trusted_host_adapter = InsecureCacheControlAdapter(
+                cache=SafeFileCache(cache),
+                max_retries=retries,
             )
         else:
-            secure_adapter = HTTPAdapter(max_retries=retry, ssl_context=ssl_context)
+            secure_adapter = HTTPAdapter(max_retries=retries, ssl_context=ssl_context)
             self._trusted_host_adapter = insecure_adapter
 
         self.mount("https://", secure_adapter)
@@ -540,8 +523,8 @@ class PipSession(requests.Session):
 
         return False
 
-    def request(  # type: ignore[override]
-        self, method: str, url: str, *args: Any, **kwargs: Any
+    def request(
+        self, method: str | bytes, url: str | bytes, *args: Any, **kwargs: Any
     ) -> Response:
         # Allow setting a default timeout on a session
         kwargs.setdefault("timeout", self.timeout)
