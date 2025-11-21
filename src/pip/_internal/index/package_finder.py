@@ -7,7 +7,6 @@ import functools
 import itertools
 import logging
 import re
-import sys
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import (
