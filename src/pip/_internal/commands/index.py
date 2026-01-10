@@ -18,6 +18,7 @@ from pip._internal.commands.search import (
 from pip._internal.exceptions import CommandError, DistributionNotFound, PipError
 from pip._internal.index.collector import LinkCollector
 from pip._internal.index.package_finder import PackageFinder
+from pip._internal.models.release_control import ReleaseControl
 from pip._internal.models.selection_prefs import SelectionPreferences
 from pip._internal.models.target_python import TargetPython
 from pip._internal.network.session import PipSession
@@ -97,10 +98,15 @@ class IndexCommand(IndexGroupCommand):
         link_collector = LinkCollector.create(session, options=options)
 
         # Pass allow_yanked=False to ignore yanked versions.
+        # Convert allow_all_prereleases to release_control
+        release_control = ReleaseControl()
+        if options.pre:
+            release_control.all_releases.add(":all:")
+
         selection_prefs = SelectionPreferences(
             allow_yanked=False,
+            release_control=release_control,
             format_control=options.format_control,
-            allow_all_prereleases=options.pre,
             ignore_requires_python=ignore_requires_python,
         )
 
