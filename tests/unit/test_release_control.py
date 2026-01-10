@@ -4,6 +4,8 @@ from optparse import Values
 
 import pytest
 
+from pip._vendor.packaging.utils import canonicalize_name
+
 from pip._internal.cli import cmdoptions
 from pip._internal.cli.base_command import Command
 from pip._internal.cli.status_codes import SUCCESS
@@ -83,7 +85,7 @@ def test_allows_prereleases(
     all_releases: set[str], only_final: set[str], package: str, expected: bool | None
 ) -> None:
     rc = ReleaseControl(all_releases, only_final)
-    assert rc.allows_prereleases(package) == expected
+    assert rc.allows_prereleases(canonicalize_name(package)) == expected
 
 
 def test_order_tracking_all_releases() -> None:

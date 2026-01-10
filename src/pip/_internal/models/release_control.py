@@ -1,48 +1,35 @@
 from __future__ import annotations
 
-from pip._vendor.packaging.utils import canonicalize_name
+from dataclasses import dataclass, field
+
+from pip._vendor.packaging.utils import NormalizedName, canonicalize_name
 
 from pip._internal.exceptions import CommandError
 
 
+# TODO: add slots=True when Python 3.9 is dropped
+@dataclass
 class ReleaseControl:
     """Helper for managing which release types can be installed."""
 
-    __slots__ = ["all_releases", "only_final", "_order"]
-
-    def __init__(
-        self,
-        all_releases: set[str] | None = None,
-        only_final: set[str] | None = None,
-    ) -> None:
-        if all_releases is None:
-            all_releases = set()
-        if only_final is None:
-            only_final = set()
-
-        self.all_releases = all_releases
-        self.only_final = only_final
-        # Track the order of arguments as (attribute_name, value) tuples
-        # This is used to reconstruct arguments in the correct order for subprocesses
-        self._order: list[tuple[str, str]] = []
-
-    def __eq__(self, other: object) -> bool:
-        if not isinstance(other, self.__class__):
-            return NotImplemented
-
-        # Only compare all_releases and only_final, not _order
-        # The _order list is for internal tracking and reconstruction
-        return (
-            self.all_releases == other.all_releases
-            and self.only_final == other.only_final
-        )
-
-    def __repr__(self) -> str:
-        return f"{self.__class__.__name__}({self.all_releases}, {self.only_final})"
+    all_releases: set[str] = field(default_factory=set)
+    only_final: set[str] = field(default_factory=set)
+    _order: list[tuple[str, str]] = field(
+        init=False, default_factory=list, compare=False, repr=False
+    )
 
     def handle_mutual_excludes(
         self, value: str, target: set[str], other: set[str], attr_name: str
     ) -> None:
+        """Parse and apply release control option value.
+
+        Processes comma-separated package names or special values `:all:` and `:none:`.
+
+        When adding packages to target, they're removed from other to maintain mutual
+        exclusivity between all_releases and only_final. All operations are tracked in
+        order so that the original command-line argument sequence can be reconstructed
+        when passing options to build subprocesses.
+        """
         if value.startswith("-"):
             raise CommandError(
                 "--all-releases / --only-final option requires 1 argument."
@@ -85,7 +72,7 @@ class ReleaseControl:
         """
         return self._order[:]
 
-    def allows_prereleases(self, canonical_name: str) -> bool | None:
+    def allows_prereleases(self, canonical_name: NormalizedName) -> bool | None:
         """
         Determine if pre-releases are allowed for a package.
 
