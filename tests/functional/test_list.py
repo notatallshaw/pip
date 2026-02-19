@@ -337,7 +337,9 @@ def pip_test_package_script(
     shared_data: TestData,
 ) -> PipTestEnvironment:
     tmpdir = tmpdir_factory.mktemp("pip_test_package")
-    script = script_factory(tmpdir.joinpath("workspace"))
+    env = os.environ.copy()
+    env["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
+    script = script_factory(tmpdir.joinpath("workspace"), environ=env)
     script.pip(
         "install",
         "--no-build-isolation",

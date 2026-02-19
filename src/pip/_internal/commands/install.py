@@ -6,8 +6,10 @@ import operator
 import os
 import shutil
 import site
+import sys
 from optparse import SUPPRESS_HELP, Values
 from pathlib import Path
+from typing import Any
 
 from pip._vendor.packaging.utils import canonicalize_name
 from pip._vendor.requests.exceptions import InvalidProxyURL
@@ -61,6 +63,13 @@ from pip._internal.utils.virtualenv import (
 from pip._internal.wheel_builder import build
 
 logger = getLogger(__name__)
+
+
+def prevent_import_hook(name: str, args: tuple[Any, ...]) -> None:
+    if name == "import":
+        raise RuntimeError(
+            f"Importing is not allowed during installation, but {args[0]!r} was imported."
+        )
 
 
 class InstallCommand(RequirementCommand):
@@ -277,6 +286,18 @@ class InstallCommand(RequirementCommand):
                 "to avoid mixing pip logging output with JSON output."
             ),
         )
+    
+    def _eager_import_modules(self) -> None:
+        """
+        After install we should never import any mouldes, but there
+        may be some lazy imports during the install process.
+        """
+        import netrc
+        try:
+            import _manylinux
+        except ImportError:
+            sys.modules["_manylinux"] = None
+
 
     @with_cleanup
     def run(self, options: Values, args: list[str]) -> int:
@@ -459,6 +480,8 @@ class InstallCommand(RequirementCommand):
             if options.target_dir or options.prefix_path:
                 warn_script_location = False
 
+            self._eager_import_modules()
+            sys.addaudithook(prevent_import_hook)
             installed = install_given_reqs(
                 to_install,
                 root=options.root_path,
