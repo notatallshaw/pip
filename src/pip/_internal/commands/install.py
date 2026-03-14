@@ -94,6 +94,8 @@ def _prevent_import_hook(name: str, args: tuple[Any, ...]) -> None:
             replacement=None,
             gone_in="26.3",
             issue=13842,
+            include_source=True,
+            stacklevel=3,
         )
 
 

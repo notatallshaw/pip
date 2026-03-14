@@ -358,6 +358,7 @@ def test_install_warns_on_unexpected_post_install_import(
         "Unexpected import of 'pip_unexpected_module_xyz' detected during install"
         in result.stderr
     )
+    assert "run_install.py:7)" in result.stderr
 
 
 def test_install_exit_status_code_when_no_requirements(
