@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from collections import defaultdict
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from functools import cache
 from typing import (
@@ -26,6 +27,8 @@ if TYPE_CHECKING:
     _ProviderBase = AbstractProvider[Requirement, Candidate, str]
 else:
     _ProviderBase = AbstractProvider
+
+_CONFLICT_PRIORITY_THRESHOLD = 5
 
 # Notes on the relationship between the provider, the factory, and the
 # candidate and requirement classes.
@@ -99,6 +102,8 @@ class PipProvider(_ProviderBase):
         self._ignore_dependencies = ignore_dependencies
         self._upgrade_strategy = upgrade_strategy
         self._user_requested = user_requested
+        self._conflict_pair_counts: defaultdict[frozenset[str], int] = defaultdict(int)
+        self._conflict_promoted: set[str] = set()
 
     @property
     def constraints(self) -> dict[str, Constraint]:
@@ -130,28 +135,65 @@ class PipProvider(_ProviderBase):
               Further, the current backtrack causes likely need to be resolved
               before other requirements as a resolution can't be found while
               there is a conflict.
+            * Identifiers repeatedly involved in conflicts get promoted so they
+              are resolved earlier. When a pair of identifiers conflicts more
+              than a threshold number of times, the one that was NOT already
+              pinned (i.e., the lower-priority one) gets promoted so its
+              constraints are known before the higher-priority one is pinned.
         """
         backtrack_identifiers = set()
+        pinned_in_conflict = set()
+        unpinned_in_conflict = set()
         for info in backtrack_causes:
-            backtrack_identifiers.add(info.requirement.name)
+            req_name = info.requirement.name
+            backtrack_identifiers.add(req_name)
+            if req_name in resolutions:
+                pinned_in_conflict.add(req_name)
+            else:
+                unpinned_in_conflict.add(req_name)
             if info.parent is not None:
-                backtrack_identifiers.add(info.parent.name)
+                parent_name = info.parent.name
+                backtrack_identifiers.add(parent_name)
+                if parent_name in resolutions:
+                    pinned_in_conflict.add(parent_name)
+                else:
+                    unpinned_in_conflict.add(parent_name)
+
+        # Track conflict pairs and promote identifiers that keep conflicting.
+        # When a pair (pinned_pkg, unpinned_pkg) repeatedly conflicts, promote
+        # the unpinned one so it gets resolved earlier next time. This avoids
+        # the pattern where we try many versions of a high-priority package
+        # before discovering that a low-priority package constrains it.
+        if pinned_in_conflict and unpinned_in_conflict:
+            for pinned in pinned_in_conflict:
+                for unpinned in unpinned_in_conflict:
+                    pair = frozenset({pinned, unpinned})
+                    self._conflict_pair_counts[pair] += 1
+                    if (
+                        self._conflict_pair_counts[pair]
+                        >= _CONFLICT_PRIORITY_THRESHOLD
+                    ):
+                        self._conflict_promoted.add(unpinned)
 
         current_backtrack_causes = []
+        promoted = []
         for identifier in identifiers:
-            # Requires-Python has only one candidate and the check is basically
-            # free, so we always do it first to avoid needless work if it fails.
-            # This skips calling get_preference() for all other identifiers.
             if identifier == REQUIRES_PYTHON_IDENTIFIER:
                 return [identifier]
 
-            # Check if this identifier is a backtrack cause
             if identifier in backtrack_identifiers:
                 current_backtrack_causes.append(identifier)
                 continue
 
+            if identifier in self._conflict_promoted:
+                promoted.append(identifier)
+                continue
+
         if current_backtrack_causes:
             return current_backtrack_causes
+
+        if promoted:
+            return promoted
 
         return identifiers
 
@@ -223,7 +265,10 @@ class PipProvider(_ProviderBase):
         unfree = bool(operators)
         requested_order = self._user_requested.get(identifier, math.inf)
 
+        delay_conflict = identifier not in self._conflict_promoted
+
         return (
+            delay_conflict,
             not direct,
             not pinned,
             not upper_bounded,
