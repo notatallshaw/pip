@@ -86,6 +86,14 @@ class Resolution(Generic[RT, CT, KT]):
         self._save_states: list[State[RT, CT, KT]] | None = None
         self._optimistic_start_round: int | None = None
 
+        # Per-candidate nogoods with transitive cause tracking.
+        # Follows the dependency chain to include root-cause pins,
+        # not just immediate parents.
+        self._candidate_nogoods: dict[
+            tuple[KT, int],
+            list[tuple[frozenset[tuple[KT, int]], Criterion[RT, CT]]],
+        ] = {}
+
     @property
     def state(self) -> State[RT, CT, KT]:
         try:
@@ -211,16 +219,77 @@ class Resolution(Generic[RT, CT, KT]):
             self._add_to_criteria(criteria, requirement, parent=candidate)
         return criteria
 
+    def _record_candidate_nogood(
+        self,
+        name: KT,
+        candidate: CT,
+        cause_criterion: Criterion[RT, CT],
+    ) -> None:
+        """Record a nogood with transitive cause tracking.
+
+        Follows one level up the dependency chain: for each parent in
+        the cause criterion, also include that parent's own parents
+        (from its criterion information) in the pin set.
+        """
+        pins: set[tuple[KT, int]] = set()
+        mapping = self.state.mapping
+        criteria = self.state.criteria
+        for info in cause_criterion.information:
+            if info.parent is not None:
+                parent_id = self._p.identify(info.parent)
+                if parent_id in mapping:
+                    pins.add((parent_id, id(mapping[parent_id])))
+                    # Follow one level up: find who required this parent
+                    parent_criterion = criteria.get(parent_id)
+                    if parent_criterion is not None:
+                        for pinfo in parent_criterion.information:
+                            if pinfo.parent is not None:
+                                gp_id = self._p.identify(pinfo.parent)
+                                if gp_id in mapping:
+                                    pins.add((gp_id, id(mapping[gp_id])))
+        if not pins:
+            return
+        key = (name, id(candidate))
+        if key not in self._candidate_nogoods:
+            self._candidate_nogoods[key] = []
+        self._candidate_nogoods[key].append((frozenset(pins), cause_criterion))
+
+    def _check_candidate_nogood(
+        self,
+        name: KT,
+        candidate: CT,
+    ) -> Criterion[RT, CT] | None:
+        """Check if this candidate is known to fail with current pins."""
+        key = (name, id(candidate))
+        nogoods = self._candidate_nogoods.get(key)
+        if not nogoods:
+            return None
+        mapping = self.state.mapping
+        for pin_set, cause in nogoods:
+            if all(
+                pid in mapping and id(mapping[pid]) == cid
+                for pid, cid in pin_set
+            ):
+                return cause
+        return None
+
     def _attempt_to_pin_criterion(self, name: KT) -> list[Criterion[RT, CT]]:
         criterion = self.state.criteria[name]
 
         causes: list[Criterion[RT, CT]] = []
         for candidate in criterion.candidates:
+            nogood_cause = self._check_candidate_nogood(name, candidate)
+            if nogood_cause is not None:
+                self._r.rejecting_candidate(nogood_cause, candidate)
+                causes.append(nogood_cause)
+                continue
+
             try:
                 criteria = self._get_updated_criteria(candidate)
             except RequirementsConflicted as e:
                 self._r.rejecting_candidate(e.criterion, candidate)
                 causes.append(e.criterion)
+                self._record_candidate_nogood(name, candidate, e.criterion)
                 continue
 
             # Check the newly-pinned candidate actually works. This should
