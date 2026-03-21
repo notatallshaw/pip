@@ -86,6 +86,11 @@ class Resolution(Generic[RT, CT, KT]):
         self._save_states: list[State[RT, CT, KT]] | None = None
         self._optimistic_start_round: int | None = None
 
+        # Incompatibility store (Approach 3)
+        self._incompatibilities: dict[
+            KT, list[tuple[frozenset[tuple[KT, int]], Criterion[RT, CT]]]
+        ] = {}
+
     @property
     def state(self) -> State[RT, CT, KT]:
         try:
@@ -211,16 +216,60 @@ class Resolution(Generic[RT, CT, KT]):
             self._add_to_criteria(criteria, requirement, parent=candidate)
         return criteria
 
+    def _record_incompatibility(
+        self, name: KT, candidate: CT, cause_criterion: Criterion[RT, CT],
+    ) -> None:
+        terms: set[tuple[KT, int]] = set()
+        terms.add((name, id(candidate)))
+        mapping = self.state.mapping
+        for info in cause_criterion.information:
+            if info.parent is not None:
+                parent_id = self._p.identify(info.parent)
+                if parent_id in mapping:
+                    terms.add((parent_id, id(mapping[parent_id])))
+        if len(terms) < 2:
+            return
+        incompat = frozenset(terms)
+        for term_id, _ in incompat:
+            self._incompatibilities.setdefault(term_id, []).append(
+                (incompat, cause_criterion))
+
+    def _check_incompatibility(
+        self, name: KT, candidate: CT,
+    ) -> Criterion[RT, CT] | None:
+        entries = self._incompatibilities.get(name)
+        if not entries:
+            return None
+        cand_term = (name, id(candidate))
+        mapping = self.state.mapping
+        for incompat, cause in entries:
+            if cand_term not in incompat:
+                continue
+            if all(
+                term == cand_term
+                or (term[0] in mapping and id(mapping[term[0]]) == term[1])
+                for term in incompat
+            ):
+                return cause
+        return None
+
     def _attempt_to_pin_criterion(self, name: KT) -> list[Criterion[RT, CT]]:
         criterion = self.state.criteria[name]
 
         causes: list[Criterion[RT, CT]] = []
         for candidate in criterion.candidates:
+            incompat_cause = self._check_incompatibility(name, candidate)
+            if incompat_cause is not None:
+                self._r.rejecting_candidate(incompat_cause, candidate)
+                causes.append(incompat_cause)
+                continue
+
             try:
                 criteria = self._get_updated_criteria(candidate)
             except RequirementsConflicted as e:
                 self._r.rejecting_candidate(e.criterion, candidate)
                 causes.append(e.criterion)
+                self._record_incompatibility(name, candidate, e.criterion)
                 continue
 
             # Check the newly-pinned candidate actually works. This should
