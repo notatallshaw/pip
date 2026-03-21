@@ -293,8 +293,30 @@ class Resolution(Generic[RT, CT, KT]):
 
             return []
 
-        # All candidates tried, nothing works. This criterion is a dead
-        # end, signal for backtracking.
+        # All candidates tried, nothing works.
+        # Intersection resolution: find common parents across all causes.
+        per_cause_parents: list[frozenset[tuple[KT, int]]] = []
+        mapping = self.state.mapping
+        for cause in causes:
+            parent_pins: set[tuple[KT, int]] = set()
+            for info in cause.information:
+                if info.parent is not None:
+                    parent_id = self._p.identify(info.parent)
+                    if parent_id in mapping and parent_id != name:
+                        parent_pins.add(
+                            (parent_id, id(mapping[parent_id])))
+            if parent_pins:
+                per_cause_parents.append(frozenset(parent_pins))
+        if len(per_cause_parents) >= 2:
+            common = per_cause_parents[0]
+            for ps in per_cause_parents[1:]:
+                common = common & ps
+            if len(common) >= 2:
+                for term_id, _ in common:
+                    self._incompatibilities.setdefault(
+                        term_id, []).append((common, causes[0]))
+
+        # Signal for backtracking.
         return causes
 
     def _patch_criteria(
