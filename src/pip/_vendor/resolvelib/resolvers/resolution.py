@@ -86,6 +86,21 @@ class Resolution(Generic[RT, CT, KT]):
         self._save_states: list[State[RT, CT, KT]] | None = None
         self._optimistic_start_round: int | None = None
 
+        # Per-candidate nogoods with generalization.
+        # When a candidate fails, record cause-parent pins.
+        # When ALL candidates for an identifier fail via nogoods with
+        # a common parent pin, create a generalized nogood for that
+        # identifier keyed only on the common pins.
+        self._candidate_nogoods: dict[
+            tuple[KT, int],
+            list[tuple[frozenset[tuple[KT, int]], Criterion[RT, CT]]],
+        ] = {}
+        # Generalized nogoods: identifier -> list of (pin_set, cause)
+        self._generalized_nogoods: dict[
+            KT,
+            list[tuple[frozenset[tuple[KT, int]], Criterion[RT, CT]]],
+        ] = {}
+
     @property
     def state(self) -> State[RT, CT, KT]:
         try:
@@ -211,16 +226,102 @@ class Resolution(Generic[RT, CT, KT]):
             self._add_to_criteria(criteria, requirement, parent=candidate)
         return criteria
 
+    def _record_candidate_nogood(
+        self,
+        name: KT,
+        candidate: CT,
+        cause_criterion: Criterion[RT, CT],
+    ) -> None:
+        """Record that this candidate failed with the current parent pins."""
+        pins: set[tuple[KT, int]] = set()
+        for info in cause_criterion.information:
+            if info.parent is not None:
+                parent_id = self._p.identify(info.parent)
+                if parent_id in self.state.mapping:
+                    pins.add((parent_id, id(self.state.mapping[parent_id])))
+        if not pins:
+            return
+        key = (name, id(candidate))
+        if key not in self._candidate_nogoods:
+            self._candidate_nogoods[key] = []
+        self._candidate_nogoods[key].append((frozenset(pins), cause_criterion))
+
+    def _check_candidate_nogood(
+        self,
+        name: KT,
+        candidate: CT,
+    ) -> Criterion[RT, CT] | None:
+        """Check if this candidate is known to fail with current pins."""
+        key = (name, id(candidate))
+        nogoods = self._candidate_nogoods.get(key)
+        if not nogoods:
+            return None
+        mapping = self.state.mapping
+        for pin_set, cause in nogoods:
+            if all(
+                pid in mapping and id(mapping[pid]) == cid
+                for pid, cid in pin_set
+            ):
+                return cause
+        return None
+
+    def _check_generalized_nogood(
+        self,
+        name: KT,
+        candidate: CT,
+    ) -> Criterion[RT, CT] | None:
+        """Check if a generalized nogood applies to any candidate for name."""
+        nogoods = self._generalized_nogoods.get(name)
+        if not nogoods:
+            return None
+        mapping = self.state.mapping
+        for pin_set, cause in nogoods:
+            if all(
+                pid in mapping and id(mapping[pid]) == cid
+                for pid, cid in pin_set
+            ):
+                return cause
+        return None
+
     def _attempt_to_pin_criterion(self, name: KT) -> list[Criterion[RT, CT]]:
         criterion = self.state.criteria[name]
 
         causes: list[Criterion[RT, CT]] = []
+        nogood_pin_sets: list[frozenset[tuple[KT, int]]] = []
+        all_from_nogoods = True
+
         for candidate in criterion.candidates:
+            # Check generalized nogoods first (applies to any candidate)
+            gen_cause = self._check_generalized_nogood(name, candidate)
+            if gen_cause is not None:
+                self._r.rejecting_candidate(gen_cause, candidate)
+                causes.append(gen_cause)
+                continue
+
+            # Check per-candidate nogoods
+            nogood_cause = self._check_candidate_nogood(name, candidate)
+            if nogood_cause is not None:
+                self._r.rejecting_candidate(nogood_cause, candidate)
+                causes.append(nogood_cause)
+                # Collect the pin sets for generalization
+                key = (name, id(candidate))
+                for pin_set, _ in self._candidate_nogoods.get(key, []):
+                    mapping = self.state.mapping
+                    if all(
+                        pid in mapping and id(mapping[pid]) == cid
+                        for pid, cid in pin_set
+                    ):
+                        nogood_pin_sets.append(pin_set)
+                        break
+                continue
+
+            all_from_nogoods = False
             try:
                 criteria = self._get_updated_criteria(candidate)
             except RequirementsConflicted as e:
                 self._r.rejecting_candidate(e.criterion, candidate)
                 causes.append(e.criterion)
+                self._record_candidate_nogood(name, candidate, e.criterion)
                 continue
 
             # Check the newly-pinned candidate actually works. This should
@@ -244,8 +345,21 @@ class Resolution(Generic[RT, CT, KT]):
 
             return []
 
-        # All candidates tried, nothing works. This criterion is a dead
-        # end, signal for backtracking.
+        # All candidates tried, nothing works.
+        # If multiple candidates were skipped via nogoods, try to
+        # generalize: find common pins across all nogood pin sets.
+        if nogood_pin_sets and len(nogood_pin_sets) >= 2:
+            common_pins = nogood_pin_sets[0]
+            for ps in nogood_pin_sets[1:]:
+                common_pins = common_pins & ps
+            if common_pins and causes:
+                if name not in self._generalized_nogoods:
+                    self._generalized_nogoods[name] = []
+                self._generalized_nogoods[name].append(
+                    (common_pins, causes[0])
+                )
+
+        # Signal for backtracking.
         return causes
 
     def _patch_criteria(
