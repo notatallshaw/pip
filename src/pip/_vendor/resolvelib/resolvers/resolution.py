@@ -86,6 +86,16 @@ class Resolution(Generic[RT, CT, KT]):
         self._save_states: list[State[RT, CT, KT]] | None = None
         self._optimistic_start_round: int | None = None
 
+        # Per-candidate nogoods: record when candidates fail due to
+        # specific parent pins (from _attempt_to_pin_criterion) and
+        # when candidates are popped during backjumping. Nogoods
+        # survive state rollbacks, providing learned information
+        # that the rollback mechanism would otherwise lose.
+        self._candidate_nogoods: dict[
+            tuple[KT, int],
+            list[tuple[frozenset[tuple[KT, int]], Criterion[RT, CT]]],
+        ] = {}
+
     @property
     def state(self) -> State[RT, CT, KT]:
         try:
@@ -211,16 +221,96 @@ class Resolution(Generic[RT, CT, KT]):
             self._add_to_criteria(criteria, requirement, parent=candidate)
         return criteria
 
+    def _record_candidate_nogood(
+        self,
+        name: KT,
+        candidate: CT,
+        cause_criterion: Criterion[RT, CT],
+    ) -> None:
+        """Record that this candidate failed with the current parent pins."""
+        pins: set[tuple[KT, int]] = set()
+        for info in cause_criterion.information:
+            if info.parent is not None:
+                parent_id = self._p.identify(info.parent)
+                if parent_id in self.state.mapping:
+                    pins.add((parent_id, id(self.state.mapping[parent_id])))
+        if not pins:
+            return
+        key = (name, id(candidate))
+        if key not in self._candidate_nogoods:
+            self._candidate_nogoods[key] = []
+        self._candidate_nogoods[key].append((frozenset(pins), cause_criterion))
+
+    def _record_backjump_nogood(
+        self,
+        name: KT,
+        candidate: CT,
+        causes: list[RequirementInformation[RT, CT]],
+    ) -> None:
+        """Record a nogood when a candidate is popped during backjumping.
+
+        Uses cause-related pins so the nogood is general enough to match
+        after backjumping changes unrelated pins. Nogoods survive state
+        rollbacks, providing learned information that would otherwise be lost.
+        """
+        pins: set[tuple[KT, int]] = set()
+        mapping = self.state.mapping
+        for info in causes:
+            if info.parent is not None:
+                parent_id = self._p.identify(info.parent)
+                if parent_id in mapping and parent_id != name:
+                    pins.add((parent_id, id(mapping[parent_id])))
+            req_id = self._p.identify(info.requirement)
+            if req_id in mapping and req_id != name:
+                pins.add((req_id, id(mapping[req_id])))
+        if not pins:
+            return
+        cause_criterion = Criterion(
+            candidates=iter(()),
+            information=list(causes),
+            incompatibilities=[],
+        )
+        key = (name, id(candidate))
+        if key not in self._candidate_nogoods:
+            self._candidate_nogoods[key] = []
+        self._candidate_nogoods[key].append((frozenset(pins), cause_criterion))
+
+    def _check_candidate_nogood(
+        self,
+        name: KT,
+        candidate: CT,
+    ) -> Criterion[RT, CT] | None:
+        """Check if this candidate is known to fail with current pins."""
+        key = (name, id(candidate))
+        nogoods = self._candidate_nogoods.get(key)
+        if not nogoods:
+            return None
+        mapping = self.state.mapping
+        for pin_set, cause in nogoods:
+            if all(
+                pid in mapping and id(mapping[pid]) == cid
+                for pid, cid in pin_set
+            ):
+                return cause
+        return None
+
     def _attempt_to_pin_criterion(self, name: KT) -> list[Criterion[RT, CT]]:
         criterion = self.state.criteria[name]
 
         causes: list[Criterion[RT, CT]] = []
         for candidate in criterion.candidates:
+            nogood_cause = self._check_candidate_nogood(name, candidate)
+            if nogood_cause is not None:
+                self._r.rejecting_candidate(nogood_cause, candidate)
+                causes.append(nogood_cause)
+                continue
+
             try:
                 criteria = self._get_updated_criteria(candidate)
             except RequirementsConflicted as e:
                 self._r.rejecting_candidate(e.criterion, candidate)
                 causes.append(e.criterion)
+                self._record_candidate_nogood(name, candidate, e.criterion)
                 continue
 
             # Check the newly-pinned candidate actually works. This should
@@ -395,6 +485,11 @@ class Resolution(Generic[RT, CT, KT]):
 
             # Also mark the newly known incompatibility.
             incompatibilities_from_broken.append((name, [candidate]))
+
+            # Record a nogood for this candidate. Unlike incompatibilities
+            # (which are lost on rollback), nogoods survive and prevent
+            # re-trying this candidate with the same pins.
+            self._record_backjump_nogood(name, candidate, causes)
 
             self._push_new_state()
             success = self._patch_criteria(incompatibilities_from_broken)
