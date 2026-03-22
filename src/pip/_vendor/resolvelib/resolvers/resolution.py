@@ -457,6 +457,32 @@ class Resolution(Generic[RT, CT, KT]):
             )
         return True
 
+    def _compute_backjump_target(
+        self, incompatible_deps: set[KT]
+    ) -> int | None:
+        """Compute a backjump target based on when conflicting packages were pinned.
+
+        Finds the second-highest state index where a conflicting package was
+        first pinned. This lets us skip states that are irrelevant to the
+        conflict. Returns None if we can't compute a useful target (fewer
+        than 2 conflicting packages found in the state stack).
+        """
+        if len(incompatible_deps) < 2:
+            return None
+
+        # Find the state index where each conflicting identifier was pinned
+        levels: dict[KT, int] = {}
+        for idx, state in enumerate(self._states):
+            for ident in incompatible_deps:
+                if ident not in levels and ident in state.mapping:
+                    levels[ident] = idx
+
+        if len(levels) < 2:
+            return None
+
+        sorted_levels = sorted(levels.values(), reverse=True)
+        return sorted_levels[1]
+
     def _save_state(self) -> None:
         """Save states for potential rollback if optimistic backjumping fails."""
         if self._save_states is None:
@@ -518,11 +544,65 @@ class Resolution(Generic[RT, CT, KT]):
         if self._supports_nogood_learning():
             self._learn_conflict(causes)
 
+        # Try a CDCL-style non-chronological backjump first. If the provider
+        # supports nogood learning, compute the optimal backjump target and
+        # try jumping directly there while collecting incompatibilities from
+        # every state we skip. If this fails, fall back to legacy backjumping.
+        if self._supports_nogood_learning():
+            cdcl_target = self._compute_backjump_target(incompatible_deps)
+            if cdcl_target is not None and len(self._states) >= 3:
+                # Save state stack in case we need to fall back
+                saved_states = [
+                    State(
+                        mapping=s.mapping.copy(),
+                        criteria=s.criteria.copy(),
+                        backtrack_causes=s.backtrack_causes[:],
+                    )
+                    for s in self._states
+                ]
+
+                # Remove the trigger state
+                del self._states[-1]
+
+                incompatibilities_from_broken: list[tuple[KT, list[CT]]] = []
+
+                # Pop states down to the target, collecting incompatibilities
+                while len(self._states) > cdcl_target + 2:
+                    skipped = self._states.pop()
+                    for k, v in skipped.criteria.items():
+                        if v.incompatibilities:
+                            incompatibilities_from_broken.append(
+                                (k, list(v.incompatibilities))
+                            )
+                    if skipped.mapping:
+                        sk, sc = next(reversed(skipped.mapping.items()))
+                        incompatibilities_from_broken.append((sk, [sc]))
+
+                if len(self._states) >= 3:
+                    broken_state = self._states.pop()
+                    if broken_state.mapping:
+                        name, candidate = broken_state.mapping.popitem()
+
+                        for k, v in broken_state.criteria.items():
+                            if v.incompatibilities:
+                                incompatibilities_from_broken.append(
+                                    (k, list(v.incompatibilities))
+                                )
+                        incompatibilities_from_broken.append((name, [candidate]))
+
+                        self._push_new_state()
+                        if self._patch_criteria(incompatibilities_from_broken):
+                            return True
+
+                # CDCL attempt failed. Restore state stack and fall through
+                # to legacy backjumping which handles this correctly.
+                self._states = saved_states
+
         while len(self._states) >= 3:
             # Remove the state that triggered backtracking.
             del self._states[-1]
 
-            # Optimistically backtrack to a state that caused the incompatibility
+            # Original backjumping logic (step-by-step)
             while True:
                 # Retrieve the last candidate pin and known incompatibilities.
                 try:
@@ -535,12 +615,8 @@ class Resolution(Generic[RT, CT, KT]):
                     not self._optimistic_backjumping_ratio
                     and name not in incompatible_deps
                 ):
-                    # For safe backjumping only backjump if the current dependency
-                    # is not the same as the incompatible dependency
                     break
 
-                # On the first time a non-safe backjump is done the state
-                # is saved so we can restore it later if the resolution fails
                 if (
                     self._optimistic_backjumping_ratio
                     and self._save_states is None
@@ -548,23 +624,15 @@ class Resolution(Generic[RT, CT, KT]):
                 ):
                     self._save_state()
 
-                # If the current dependencies and the incompatible dependencies
-                # are overlapping then we have likely found a cause of the
-                # incompatibility
                 current_dependencies = {
                     self._p.identify(d) for d in self._p.get_dependencies(candidate)
                 }
                 if not current_dependencies.isdisjoint(incompatible_deps):
                     break
 
-                # Fallback: We should not backtrack to the point where
-                # broken_state.mapping is empty, so stop backtracking for
-                # a chance for the resolution to recover
                 if not broken_state.mapping:
                     break
 
-                # Guard: We need at least two state to remain to both
-                # backtrack and push a new state
                 if len(self._states) <= 1:
                     raise ResolutionImpossible(causes)
 
