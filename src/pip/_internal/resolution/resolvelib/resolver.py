@@ -92,6 +92,7 @@ class Resolver(BaseResolver):
         resolver: RLResolver[Requirement, Candidate, str] = RLResolver(
             provider,
             reporter,
+            cdcl=True,
         )
 
         try:

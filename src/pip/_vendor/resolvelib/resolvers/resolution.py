@@ -70,21 +70,64 @@ class Resolution(Generic[RT, CT, KT]):
 
     This is designed as a one-off object that holds information to kick start
     the resolution process, and holds the results afterwards.
+
+    When ``cdcl`` mode is enabled, this resolver uses techniques inspired by
+    Conflict-Driven Clause Learning (CDCL) from SAT solving:
+    - Conflict Learning: Records combinations of candidates that lead to
+      conflicts, avoiding re-exploration of known-bad states.
+    - Non-chronological Backjumping: When a conflict occurs, jumps directly
+      to the decision level that caused the conflict, rather than backtracking
+      one level at a time.
+
+    These techniques were first introduced in the GRASP SAT solver:
+    - http://vlsicad.eecs.umich.edu/BK/Slots/cache/sat.inesc.pt/~jpms/grasp/
+
+    For background on CDCL and its application to constraint solving, see:
+    - https://en.wikipedia.org/wiki/Conflict-driven_clause_learning
+    - https://en.wikipedia.org/wiki/Backjumping
+
+    The adaptation of CDCL to dependency resolution follows the pattern of
+    conflict-directed backjumping described in:
+    - https://www.dcs.gla.ac.uk/~pat/cpM/papers/CI9(3).pdf
     """
 
     def __init__(
         self,
         provider: AbstractProvider[RT, CT, KT],
         reporter: BaseReporter[RT, CT, KT],
+        cdcl: bool = False,
     ) -> None:
         self._p = provider
         self._r = reporter
         self._states: list[State[RT, CT, KT]] = []
+        self._cdcl = cdcl
 
-        # Optimistic backjumping variables
-        self._optimistic_backjumping_ratio = _OPTIMISTIC_BACKJUMPING_RATIO
-        self._save_states: list[State[RT, CT, KT]] | None = None
-        self._optimistic_start_round: int | None = None
+        # Legacy optimistic backjumping variables (used when cdcl=False)
+        # These implement a heuristic backjumping strategy that can fall back
+        # to safe backtracking if the optimistic jumps don't work out.
+        if not cdcl:
+            self._optimistic_backjumping_ratio = _OPTIMISTIC_BACKJUMPING_RATIO
+            self._save_states: list[State[RT, CT, KT]] | None = None
+            self._optimistic_start_round: int | None = None
+        else:
+            # CDCL mode doesn't use optimistic backjumping - it has its own
+            # non-chronological backjumping based on conflict analysis
+            self._optimistic_backjumping_ratio = 0.0
+            self._save_states = None
+            self._optimistic_start_round = None
+
+        # CDCL-inspired learned conflicts (Learn rule from CDCL):
+        # Track combinations of candidates that are known to lead to conflicts.
+        # This allows us to skip candidate combinations that we've already
+        # proven don't work together.
+        #
+        # In CDCL SAT solving, this corresponds to adding learned clauses to
+        # the formula. Here, each entry is a frozenset of (identifier,
+        # candidate_semantic_id) pairs representing a conflict clause.
+        #
+        # Reference: "Learn" rule in CDCL formalization
+        # https://en.wikipedia.org/wiki/Conflict-driven_clause_learning#Formalization
+        self._learned_conflicts: set[frozenset[tuple[KT, object]]] = set()
 
     @property
     def state(self) -> State[RT, CT, KT]:
@@ -106,6 +149,131 @@ class Resolution(Generic[RT, CT, KT]):
             backtrack_causes=base.backtrack_causes[:],
         )
         self._states.append(state)
+
+    def _get_current_decisions_hashed(self) -> frozenset[tuple[KT, object]]:
+        """Get the current set of decisions as a hashable key.
+
+        Returns a frozenset of (identifier, candidate_semantic_id) tuples
+        representing the current resolution state.
+
+        This method should only be called when CDCL mode is enabled.
+        """
+        return frozenset(
+            (k, self._p.get_candidate_semantic_id(v))
+            for k, v in self.state.mapping.items()
+        )
+
+    def _find_relevant_decisions(
+        self, causes: list[RequirementInformation[RT, CT]]
+    ) -> list[tuple[KT, object]]:
+        """Find the minimal set of decisions relevant to the conflict.
+
+        This implements a simplified version of First UIP (Unique Implication Point)
+        conflict analysis from CDCL. We identify the packages that directly
+        contributed to the conflict through their requirements.
+
+        The minimal conflict clause includes only the packages whose requirements
+        directly caused the conflict - NOT the package that couldn't be satisfied.
+
+        For example, if package A requires X >= 1.0 and package B requires X < 1.0,
+        the conflict clause should be {A, B}, not {A, B, X}. This is because
+        the conflict exists regardless of which X version is tried.
+
+        :param causes: RequirementInformation objects describing the conflict.
+        :return: List of (identifier, candidate_semantic_id) pairs for relevant decisions.
+        """
+        result: list[tuple[KT, object]] = []
+        seen_ids: set[KT] = set()
+
+        # Add packages that directly caused the conflict (parents from causes)
+        # These might be pinned decisions OR candidates being tried
+        for cause in causes:
+            if cause.parent is not None:
+                parent_id = self._p.identify(cause.parent)
+                if parent_id not in seen_ids:
+                    seen_ids.add(parent_id)
+                    # Use the parent from the cause, which has the correct version
+                    parent_semantic = self._p.get_candidate_semantic_id(cause.parent)
+                    result.append((parent_id, parent_semantic))
+
+        # Don't include the unsatisfied package - the conflict exists regardless
+        # of which version of that package is tried
+
+        return result
+
+    def _learn_conflict(
+        self, causes: list[RequirementInformation[RT, CT]]
+    ) -> None:
+        """Learn a conflict clause from the current state (CDCL Learn rule).
+
+        When a conflict is detected, this method records the minimal set of
+        pinned candidates that led to this conflict. This allows us to skip
+        re-exploring the same state in the future.
+
+        This implements the CDCL "Learn" rule:
+        https://en.wikipedia.org/wiki/Conflict-driven_clause_learning#Formalization
+
+        We learn only the **relevant decisions** - packages directly involved
+        in the conflict plus their immediate parents. This produces smaller,
+        more general conflict clauses that can prune larger portions of the
+        search space.
+
+        This method should only be called when CDCL mode is enabled.
+
+        :param causes: RequirementInformation objects describing the conflict.
+        """
+        # Use minimal conflict clause (inspired by First UIP analysis)
+        # This learns only decisions relevant to the conflict, not all decisions
+        relevant_decisions = self._find_relevant_decisions(causes)
+
+        if len(relevant_decisions) >= 2:  # Only learn non-trivial conflicts
+            conflict_clause = frozenset(relevant_decisions)
+            self._learned_conflicts.add(conflict_clause)
+
+    def _would_conflict_with_learned(self, name: KT, candidate: CT) -> bool:
+        """Check if pinning this candidate would recreate a learned conflict.
+
+        This is analogous to CDCL's unit propagation and conflict detection.
+        Before trying a candidate, we check if it would result in a state
+        that we've already proven to be conflicting.
+
+        We check if any learned conflict:
+        1. Contains this (name, candidate) pair
+        2. Has all its OTHER decisions already present in current state
+
+        If both conditions are met, trying this candidate would recreate
+        the conflict.
+
+        Reference: Conflict detection in CDCL
+        https://en.wikipedia.org/wiki/Conflict-driven_clause_learning#Formalization
+
+        This method should only be called when CDCL mode is enabled.
+
+        :param name: The identifier being pinned.
+        :param candidate: The candidate being considered.
+        :return: True if this would recreate a known conflict.
+        """
+        if not self._learned_conflicts:
+            return False
+
+        candidate_semantic_id = self._p.get_candidate_semantic_id(candidate)
+        candidate_decision = (name, candidate_semantic_id)
+
+        # Get current decisions with semantic IDs
+        current_decisions = self._get_current_decisions_hashed()
+
+        # Check if any learned conflict would be completed by this candidate
+        for learned_conflict in self._learned_conflicts:
+            if candidate_decision not in learned_conflict:
+                continue
+            # Check if all OTHER decisions in the conflict are already present
+            other_decisions = learned_conflict - {candidate_decision}
+            if other_decisions <= current_decisions:
+                # All other decisions are present, adding this candidate
+                # would complete the learned conflict
+                return True
+
+        return False
 
     def _add_to_criteria(
         self,
@@ -215,7 +383,13 @@ class Resolution(Generic[RT, CT, KT]):
         criterion = self.state.criteria[name]
 
         causes: list[Criterion[RT, CT]] = []
+        skipped_due_to_learned_conflict = False
         for candidate in criterion.candidates:
+            # CDCL-inspired: Skip candidates that would recreate a learned conflict
+            if self._cdcl and self._would_conflict_with_learned(name, candidate):
+                skipped_due_to_learned_conflict = True
+                continue
+
             try:
                 criteria = self._get_updated_criteria(candidate)
             except RequirementsConflicted as e:
@@ -246,6 +420,13 @@ class Resolution(Generic[RT, CT, KT]):
 
         # All candidates tried, nothing works. This criterion is a dead
         # end, signal for backtracking.
+        # If we skipped candidates due to learned conflicts but have no other
+        # causes, we need to provide something for backjumping.
+        if not causes and skipped_due_to_learned_conflict:
+            # Use the criterion itself as the cause - this indicates we hit
+            # a learned conflict and need to backtrack
+            causes.append(criterion)
+
         return causes
 
     def _patch_criteria(
@@ -302,6 +483,78 @@ class Resolution(Generic[RT, CT, KT]):
             self._states = self._save_states
             self._save_states = None
 
+    def _compute_decision_levels(
+        self, identifiers: set[KT]
+    ) -> dict[KT, int]:
+        """Compute the decision level for each identifier in the conflict.
+
+        In CDCL terminology, the "decision level" of a variable is when it was
+        assigned. In our context, this corresponds to the position in the state
+        stack where a package was pinned.
+
+        This is used to compute the correct backjump target according to the
+        CDCL Backjump rule: jump to the second-highest decision level among
+        the literals in the conflict clause.
+
+        :param identifiers: Set of identifiers involved in the conflict.
+        :return: Dictionary mapping identifiers to their decision levels.
+        """
+        levels: dict[KT, int] = {}
+
+        # Walk through states from oldest to newest to find when each
+        # identifier was first pinned
+        for level, state in enumerate(self._states):
+            for ident in identifiers:
+                if ident not in levels and ident in state.mapping:
+                    levels[ident] = level
+
+        return levels
+
+    def _compute_cdcl_backjump_target(
+        self, incompatible_deps: set[KT]
+    ) -> int | None:
+        """Compute the optimal backjump target using CDCL conflict analysis.
+
+        This implements the CDCL "Backjump" rule:
+        https://en.wikipedia.org/wiki/Conflict-driven_clause_learning#Formalization
+
+        According to CDCL, after learning a conflict clause C = {l, l1, ..., ln}
+        where lev(l) > lev(l1) >= ... >= lev(ln), we should:
+        1. Backjump to decision level lev(ln) (second-highest level)
+        2. Assert the negation of l at that level
+
+        This achieves non-chronological backtracking - we jump directly to
+        the earliest relevant decision rather than stepping through each level.
+        This is what distinguishes CDCL from DPLL (which uses chronological
+        backtracking).
+
+        Reference: See also "Backjumping at internal nodes" in:
+        https://en.wikipedia.org/wiki/Backjumping#Backjumping_at_internal_nodes
+
+        :param incompatible_deps: Set of identifiers in the conflict clause.
+        :return: The state index to backjump to, or None if unable to compute.
+        """
+        if len(incompatible_deps) < 2:
+            return None
+
+        # Get decision levels for all conflict participants
+        levels = self._compute_decision_levels(incompatible_deps)
+
+        if not levels:
+            return None
+
+        # Find the two highest decision levels
+        sorted_levels = sorted(levels.values(), reverse=True)
+
+        if len(sorted_levels) < 2:
+            return None
+
+        # The CDCL backjump target is the second-highest level
+        # This is where we'll resume search after asserting the conflict
+        second_highest = sorted_levels[1]
+
+        return second_highest
+
     def _backjump(self, causes: list[RequirementInformation[RT, CT]]) -> bool:
         """Perform backjumping.
 
@@ -316,6 +569,26 @@ class Resolution(Generic[RT, CT, KT]):
         2. We want to reset state Y to unpinned, and pin another candidate.
         3. State X holds what state Y was before the pin, but does not
            have the incompatibility information gathered in state Y.
+
+        This method implements two different backjumping strategies:
+
+        **CDCL mode (cdcl=True):**
+        Uses conflict analysis to perform non-chronological backjumping:
+
+        - Computes the conflict clause from causes
+        - Determines decision levels for each package in the conflict
+        - Jumps directly to the second-highest decision level (CDCL Backjump rule)
+        - This can skip multiple levels at once, unlike chronological backtracking
+
+        Reference: CDCL Backjump rule
+        https://en.wikipedia.org/wiki/Conflict-driven_clause_learning#Formalization
+
+        **Legacy mode (cdcl=False):**
+        Uses the original optimistic backjumping heuristic:
+
+        - Tries to backjump based on dependency relationships
+        - Falls back to safe backtracking if optimistic jumps fail
+        - Controlled by _OPTIMISTIC_BACKJUMPING_RATIO
 
         Each iteration of the loop will:
 
@@ -338,12 +611,50 @@ class Resolution(Generic[RT, CT, KT]):
             (c.requirement for c in causes),
         )
         incompatible_deps = {self._p.identify(r) for r in incompatible_reqs}
+
+        # Learn this conflict so we don't explore it again (CDCL Learn rule)
+        if self._cdcl:
+            self._learn_conflict(causes)
+
+        # Compute optimal backjump target using CDCL conflict analysis
+        cdcl_target = None
+        if self._cdcl:
+            cdcl_target = self._compute_cdcl_backjump_target(incompatible_deps)
+
         while len(self._states) >= 3:
             # Remove the state that triggered backtracking.
             del self._states[-1]
 
+            # CDCL mode: Non-chronological backjumping based on conflict analysis
+            # In CDCL, we rely on learned conflicts (checked via _would_conflict_with_learned)
+            # to prevent re-exploring bad states, NOT on incompatibilities.
+            # Incompatibilities are unconditional exclusions, but CDCL conflicts
+            # are conditional - they only trigger when a specific combination exists.
+            if self._cdcl and cdcl_target is not None:
+                # Skip directly to the CDCL target level (non-chronological)
+                while len(self._states) > cdcl_target + 2:
+                    self._states.pop()
+
+                # Continue with the target state
+                if len(self._states) < 3:
+                    raise ResolutionImpossible(causes)
+
+                broken_state = self._states.pop()
+                if not broken_state.mapping:
+                    raise ResolutionImpossible(causes)
+
+                # In CDCL, we do NOT add candidates to incompatibilities.
+                # The learned conflict clause (recorded in _learn_conflict above)
+                # will prevent re-exploring this exact combination via
+                # _would_conflict_with_learned() in _attempt_to_pin_criterion().
+                # This is the key difference from regular backtracking:
+                # - Regular: marks candidate as globally bad (unconditional)
+                # - CDCL: learns that THIS COMBINATION is bad (conditional)
+                self._push_new_state()
+                return True
+
+            # Original backjumping logic (step-by-step)
             # Optimistically backtrack to a state that caused the incompatibility
-            broken_state = self.state
             while True:
                 # Retrieve the last candidate pin and known incompatibilities.
                 try:
@@ -410,10 +721,10 @@ class Resolution(Generic[RT, CT, KT]):
         return False
 
     def _extract_causes(
-        self, criteron: list[Criterion[RT, CT]]
+        self, criteria: list[Criterion[RT, CT]]
     ) -> list[RequirementInformation[RT, CT]]:
-        """Extract causes from list of criterion and deduplicate"""
-        return list({id(i): i for c in criteron for i in c.information}.values())
+        """Extract causes from list of criteria and deduplicate"""
+        return list({id(i): i for c in criteria for i in c.information}.values())
 
     def resolve(self, requirements: Iterable[RT], max_rounds: int) -> State[RT, CT, KT]:
         if self._states:
@@ -518,6 +829,7 @@ class Resolution(Generic[RT, CT, KT]):
                 # an unpinned state, so we can work on it in the next round.
                 self._r.resolving_conflicts(causes=causes)
 
+                success = False  # Default; will be set by _backjump if no exception
                 try:
                     success = self._backjump(causes)
                 except ResolutionImpossible:
@@ -561,9 +873,30 @@ class Resolution(Generic[RT, CT, KT]):
 
 
 class Resolver(AbstractResolver[RT, CT, KT]):
-    """The thing that performs the actual resolution work."""
+    """The thing that performs the actual resolution work.
+
+    When ``cdcl=True``, the resolver uses CDCL-inspired optimizations:
+
+    - **Conflict Learning**: Records which candidate combinations lead to
+      conflicts and avoids re-exploring them. This requires the provider to
+      implement ``get_candidate_semantic_id()``.
+    - **Non-chronological Backjumping**: Jumps directly to the decision level
+      that caused a conflict, rather than backtracking one level at a time.
+
+    When ``cdcl=False`` (default), the resolver uses the original backjumping
+    heuristics with optimistic jumps that can fall back to safe backtracking.
+    """
 
     base_exception = ResolverException
+
+    def __init__(
+        self,
+        provider: AbstractProvider[RT, CT, KT],
+        reporter: BaseReporter[RT, CT, KT],
+        cdcl: bool = False,
+    ) -> None:
+        super().__init__(provider, reporter)
+        self._cdcl = cdcl
 
     def resolve(  # type: ignore[override]
         self,
@@ -597,7 +930,7 @@ class Resolver(AbstractResolver[RT, CT, KT]):
             dependency, but you can try to resolve this by increasing the
             `max_rounds` argument.
         """
-        resolution = Resolution(self.provider, self.reporter)
+        resolution = Resolution(self.provider, self.reporter, cdcl=self._cdcl)
         state = resolution.resolve(requirements, max_rounds=max_rounds)
         return _build_result(state)
 
