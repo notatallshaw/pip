@@ -86,6 +86,13 @@ class Resolution(Generic[RT, CT, KT]):
         self._save_states: list[State[RT, CT, KT]] | None = None
         self._optimistic_start_round: int | None = None
 
+        # Nogood learning: track combinations of candidates that lead to
+        # conflicts so we can skip them before expensive provider calls.
+        # Each entry is a frozenset of (identifier, semantic_id) pairs.
+        # Only active when the provider implements get_candidate_semantic_id.
+        self._learned_conflicts: set[frozenset[tuple[KT, object]]] = set()
+        self._has_semantic_ids: bool | None = None
+
     @property
     def state(self) -> State[RT, CT, KT]:
         try:
@@ -106,6 +113,138 @@ class Resolution(Generic[RT, CT, KT]):
             backtrack_causes=base.backtrack_causes[:],
         )
         self._states.append(state)
+
+    def _supports_nogood_learning(self) -> bool:
+        """Check if the provider supports nogood learning via semantic IDs."""
+        if self._has_semantic_ids is None:
+            # Probe the first candidate in the mapping
+            for v in self.state.mapping.values():
+                self._has_semantic_ids = (
+                    self._p.get_candidate_semantic_id(v) is not NotImplemented
+                )
+                break
+            else:
+                self._has_semantic_ids = False
+        return self._has_semantic_ids
+
+    def _get_current_decisions_hashed(self) -> frozenset[tuple[KT, object]]:
+        """Get the current set of decisions as a hashable key."""
+        return frozenset(
+            (k, self._p.get_candidate_semantic_id(v))
+            for k, v in self.state.mapping.items()
+        )
+
+    def _find_relevant_decisions(
+        self, causes: list[RequirementInformation[RT, CT]]
+    ) -> list[tuple[KT, object]]:
+        """Find the minimal set of decisions relevant to the conflict.
+
+        This implements a simplified version of First UIP (Unique Implication Point)
+        conflict analysis from CDCL. We identify the packages that directly
+        contributed to the conflict through their requirements.
+
+        The minimal conflict clause includes only the packages whose requirements
+        directly caused the conflict - NOT the package that couldn't be satisfied.
+
+        For example, if package A requires X >= 1.0 and package B requires X < 1.0,
+        the conflict clause should be {A, B}, not {A, B, X}. This is because
+        the conflict exists regardless of which X version is tried.
+
+        :param causes: RequirementInformation objects describing the conflict.
+        :return: List of (identifier, candidate_semantic_id) pairs for relevant decisions.
+        """
+        result: list[tuple[KT, object]] = []
+        seen_ids: set[KT] = set()
+
+        # Add packages that directly caused the conflict (parents from causes)
+        # These might be pinned decisions OR candidates being tried
+        for cause in causes:
+            if cause.parent is not None:
+                parent_id = self._p.identify(cause.parent)
+                if parent_id not in seen_ids:
+                    seen_ids.add(parent_id)
+                    # Use the parent from the cause, which has the correct version
+                    parent_semantic = self._p.get_candidate_semantic_id(cause.parent)
+                    result.append((parent_id, parent_semantic))
+
+        # Don't include the unsatisfied package - the conflict exists regardless
+        # of which version of that package is tried
+
+        return result
+
+    def _learn_conflict(
+        self, causes: list[RequirementInformation[RT, CT]]
+    ) -> None:
+        """Learn a conflict clause from the current state (CDCL Learn rule).
+
+        When a conflict is detected, this method records the minimal set of
+        pinned candidates that led to this conflict. This allows us to skip
+        re-exploring the same state in the future.
+
+        This implements the CDCL "Learn" rule:
+        https://en.wikipedia.org/wiki/Conflict-driven_clause_learning#Formalization
+
+        We learn only the **relevant decisions** - packages directly involved
+        in the conflict plus their immediate parents. This produces smaller,
+        more general conflict clauses that can prune larger portions of the
+        search space.
+
+        This method should only be called when CDCL mode is enabled.
+
+        :param causes: RequirementInformation objects describing the conflict.
+        """
+        # Use minimal conflict clause (inspired by First UIP analysis)
+        # This learns only decisions relevant to the conflict, not all decisions
+        relevant_decisions = self._find_relevant_decisions(causes)
+
+        if len(relevant_decisions) >= 2:  # Only learn non-trivial conflicts
+            conflict_clause = frozenset(relevant_decisions)
+            self._learned_conflicts.add(conflict_clause)
+
+    def _would_conflict_with_learned(self, name: KT, candidate: CT) -> bool:
+        """Check if pinning this candidate would recreate a learned conflict.
+
+        This is analogous to CDCL's unit propagation and conflict detection.
+        Before trying a candidate, we check if it would result in a state
+        that we've already proven to be conflicting.
+
+        We check if any learned conflict:
+        1. Contains this (name, candidate) pair
+        2. Has all its OTHER decisions already present in current state
+
+        If both conditions are met, trying this candidate would recreate
+        the conflict.
+
+        Reference: Conflict detection in CDCL
+        https://en.wikipedia.org/wiki/Conflict-driven_clause_learning#Formalization
+
+        This method should only be called when CDCL mode is enabled.
+
+        :param name: The identifier being pinned.
+        :param candidate: The candidate being considered.
+        :return: True if this would recreate a known conflict.
+        """
+        if not self._learned_conflicts:
+            return False
+
+        candidate_semantic_id = self._p.get_candidate_semantic_id(candidate)
+        candidate_decision = (name, candidate_semantic_id)
+
+        # Get current decisions with semantic IDs
+        current_decisions = self._get_current_decisions_hashed()
+
+        # Check if any learned conflict would be completed by this candidate
+        for learned_conflict in self._learned_conflicts:
+            if candidate_decision not in learned_conflict:
+                continue
+            # Check if all OTHER decisions in the conflict are already present
+            other_decisions = learned_conflict - {candidate_decision}
+            if other_decisions <= current_decisions:
+                # All other decisions are present, adding this candidate
+                # would complete the learned conflict
+                return True
+
+        return False
 
     def _add_to_criteria(
         self,
@@ -215,7 +354,14 @@ class Resolution(Generic[RT, CT, KT]):
         criterion = self.state.criteria[name]
 
         causes: list[Criterion[RT, CT]] = []
+        skipped_by_learning: list[CT] = []
         for candidate in criterion.candidates:
+            # Skip candidates that would recreate a learned conflict.
+            # This avoids expensive provider calls for known-bad combinations.
+            if self._learned_conflicts and self._would_conflict_with_learned(name, candidate):
+                skipped_by_learning.append(candidate)
+                continue
+
             try:
                 criteria = self._get_updated_criteria(candidate)
             except RequirementsConflicted as e:
@@ -244,8 +390,36 @@ class Resolution(Generic[RT, CT, KT]):
 
             return []
 
+        # If no candidate worked but we skipped some due to learned conflicts,
+        # retry them. The learned conflict may have been overly conservative,
+        # or the context may have changed. This ensures learning is purely
+        # additive (never makes resolution worse than without learning).
+        for candidate in skipped_by_learning:
+            try:
+                criteria = self._get_updated_criteria(candidate)
+            except RequirementsConflicted as e:
+                self._r.rejecting_candidate(e.criterion, candidate)
+                causes.append(e.criterion)
+                continue
+
+            satisfied = all(
+                self._p.is_satisfied_by(requirement=r, candidate=candidate)
+                for r in criterion.iter_requirement()
+            )
+            if not satisfied:
+                raise InconsistentCandidate(candidate, criterion)
+
+            self._r.pinning(candidate=candidate)
+            self.state.criteria.update(criteria)
+
+            self.state.mapping.pop(name, None)
+            self.state.mapping[name] = candidate
+
+            return []
+
         # All candidates tried, nothing works. This criterion is a dead
         # end, signal for backtracking.
+
         return causes
 
     def _patch_criteria(
@@ -338,12 +512,17 @@ class Resolution(Generic[RT, CT, KT]):
             (c.requirement for c in causes),
         )
         incompatible_deps = {self._p.identify(r) for r in incompatible_reqs}
+
+        # Learn this conflict as a nogood so we can skip candidates that
+        # would recreate it, before making expensive provider calls.
+        if self._supports_nogood_learning():
+            self._learn_conflict(causes)
+
         while len(self._states) >= 3:
             # Remove the state that triggered backtracking.
             del self._states[-1]
 
             # Optimistically backtrack to a state that caused the incompatibility
-            broken_state = self.state
             while True:
                 # Retrieve the last candidate pin and known incompatibilities.
                 try:
@@ -410,10 +589,10 @@ class Resolution(Generic[RT, CT, KT]):
         return False
 
     def _extract_causes(
-        self, criteron: list[Criterion[RT, CT]]
+        self, criteria: list[Criterion[RT, CT]]
     ) -> list[RequirementInformation[RT, CT]]:
-        """Extract causes from list of criterion and deduplicate"""
-        return list({id(i): i for c in criteron for i in c.information}.values())
+        """Extract causes from list of criteria and deduplicate"""
+        return list({id(i): i for c in criteria for i in c.information}.values())
 
     def resolve(self, requirements: Iterable[RT], max_rounds: int) -> State[RT, CT, KT]:
         if self._states:
@@ -518,6 +697,7 @@ class Resolution(Generic[RT, CT, KT]):
                 # an unpinned state, so we can work on it in the next round.
                 self._r.resolving_conflicts(causes=causes)
 
+                success = False  # Default; will be set by _backjump if no exception
                 try:
                     success = self._backjump(causes)
                 except ResolutionImpossible:

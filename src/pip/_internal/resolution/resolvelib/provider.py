@@ -117,6 +117,9 @@ class PipProvider(_ProviderBase):
     def identify(self, requirement_or_candidate: Requirement | Candidate) -> str:
         return requirement_or_candidate.name
 
+    def get_candidate_semantic_id(self, candidate: Candidate) -> object:
+        return (candidate.name, candidate.version)
+
     def narrow_requirement_selection(
         self,
         identifiers: Iterable[str],

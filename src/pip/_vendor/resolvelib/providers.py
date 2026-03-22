@@ -103,7 +103,7 @@ class AbstractProvider(Generic[RT, CT, KT]):
         :param requirements: A mapping of requirements that all returned
             candidates must satisfy. Each key is an identifier, and the value
             an iterator of requirements for that dependency.
-        :param incompatibilities: A mapping of known incompatibile candidates of
+        :param incompatibilities: A mapping of known incompatible candidates of
             each dependency. Each key is an identifier, and the value an
             iterator of incompatibilities known to the resolver. All
             incompatibilities *must* be excluded from the return value.
@@ -180,7 +180,7 @@ class AbstractProvider(Generic[RT, CT, KT]):
         Must return a non-empty subset of `identifiers`, with the default
         implementation being to return `identifiers` unchanged. Those `identifiers`
         will then be passed to the sort key `get_preference` to pick the most
-        prefered requirement to attempt to pin, unless `narrow_requirement_selection`
+        preferred requirement to attempt to pin, unless `narrow_requirement_selection`
         returns only 1 requirement, in which case that will be used without
         calling the sort key `get_preference`.
 
@@ -194,3 +194,62 @@ class AbstractProvider(Generic[RT, CT, KT]):
             Iterable[KT]: A non-empty subset of `identifiers`.
         """
         return identifiers
+
+    def get_candidate_semantic_id(self, candidate: CT) -> object:
+        """Return a semantic identifier for conflict learning purposes.
+
+        This is an optional method that enables CDCL-inspired conflict learning
+        optimizations in the resolver. When implemented, the resolver can track
+        which combinations of candidates lead to conflicts and avoid re-exploring
+        the same conflict space.
+
+        **What "semantic identity" means:**
+
+        Two candidates have the same semantic identity if they are
+        **interchangeable for dependency resolution purposes**. This means:
+
+        - They satisfy the same set of requirements
+        - They have the same dependencies
+        - Choosing one vs the other would not change resolution outcomes
+
+        **Difference from ``identify()``:**
+
+        - ``identify()`` returns the same value for all candidates of the same
+          *package* (e.g., "requests" for all versions of requests).
+        - ``get_candidate_semantic_id()`` returns the same value for candidates
+          that are *interchangeable* in resolution.
+
+        **Python packaging example:**
+
+        For Python packages, the semantic ID typically includes name and version,
+        but NOT the distribution format (wheel vs sdist) or platform tags::
+
+            # CORRECT: name + version is sufficient for resolution semantics
+            def get_candidate_semantic_id(self, candidate):
+                return (candidate.name, candidate.version)
+
+        This is because ``requests==2.28.0`` from a wheel and from an sdist have
+        identical dependencies and satisfy identical requirements - they are
+        interchangeable for resolution.
+
+        **When extras matter:**
+
+        If your resolver treats extras as part of candidate identity (i.e.,
+        ``requests[security]`` is a different candidate than ``requests``), then
+        extras should be included::
+
+            def get_candidate_semantic_id(self, candidate):
+                return (candidate.name, candidate.version, frozenset(candidate.extras))
+
+        **The key question:** If you learned that candidate A conflicts with
+        candidate B, would that conflict also apply to candidate A'? If yes,
+        then A and A' should have the same semantic ID.
+
+        :param candidate: A candidate object.
+        :return: A hashable object. Candidates with equal semantic IDs are
+            treated as interchangeable for conflict learning.
+
+        The default implementation returns ``NotImplemented``, which signals to
+        the resolver that CDCL optimizations are not available for this provider.
+        """
+        return NotImplemented
