@@ -913,6 +913,57 @@ class SpecifierSet(BaseSpecifier):
         """
         return iter(self._specs)
 
+    def is_unsatisfiable(self) -> bool:
+        """Check whether this specifier set can never be satisfied.
+
+        Returns True if no version can satisfy all specifiers simultaneously.
+        """
+        from ._intervals import compute_intervals
+
+        if not self._specs:
+            return False
+        intervals = compute_intervals(
+            (s.operator, s.version) for s in self._specs
+        )
+        if intervals is not None:
+            return not intervals
+        # === present: intervals can still detect emptiness (=== modeled as
+        # full range). Compute inline.
+        from ._intervals import _intersect_intervals, specifier_to_intervals
+
+        computed = specifier_to_intervals(
+            next(iter(self._specs)).operator,
+            next(iter(self._specs)).version,
+        )
+        for s in list(self._specs)[1:]:
+            computed = _intersect_intervals(
+                computed, specifier_to_intervals(s.operator, s.version)
+            )
+            if not computed:
+                return True
+        return not computed
+
+    @property
+    def version_intervals(self) -> VersionIntervals | None:
+        """The version intervals satisfying this specifier set.
+
+        Returns a :class:`VersionIntervals` representing the set of versions
+        that satisfy all specifiers.  The object is hashable and supports
+        intersection (``&``) and membership testing.
+
+        Returns ``None`` if any specifier uses ``===``.
+        """
+        from ._intervals import VersionIntervals, compute_intervals, _FULL_RANGE
+
+        if not self._specs:
+            return VersionIntervals((_FULL_RANGE[0],))
+        intervals = compute_intervals(
+            (s.operator, s.version) for s in self._specs
+        )
+        if intervals is None:
+            return None
+        return VersionIntervals(tuple(intervals))
+
     def __contains__(self, item: UnparsedVersion) -> bool:
         """Return whether or not the item is contained in this specifier.
 
