@@ -86,6 +86,17 @@ class Resolution(Generic[RT, CT, KT]):
         self._save_states: list[State[RT, CT, KT]] | None = None
         self._optimistic_start_round: int | None = None
 
+        # Requirement-keyed conflict patterns.  When a candidate for package A
+        # fails because its dependency on D (with requirement key K) conflicts
+        # with existing requirements on D, we record (A, D, K) together with
+        # the cause criterion.  Future candidates for A that impose the same
+        # key K on D can be skipped if the conflicting requirements on D are
+        # still present.
+        self._dep_conflicts: dict[
+            tuple[KT, KT, object], Criterion[RT, CT]
+        ] = {}
+        self._prefetched_deps: list[RT] | None = None
+
     @property
     def state(self) -> State[RT, CT, KT]:
         try:
@@ -207,7 +218,13 @@ class Resolution(Generic[RT, CT, KT]):
 
     def _get_updated_criteria(self, candidate: CT) -> dict[KT, Criterion[RT, CT]]:
         criteria = self.state.criteria.copy()
-        for requirement in self._p.get_dependencies(candidate=candidate):
+        # Use pre-fetched deps if available (set by _attempt_to_pin_criterion
+        # to avoid a redundant get_dependencies call).
+        deps = self._prefetched_deps
+        self._prefetched_deps = None
+        if deps is None:
+            deps = list(self._p.get_dependencies(candidate=candidate))
+        for requirement in deps:
             self._add_to_criteria(criteria, requirement, parent=candidate)
         return criteria
 
@@ -216,10 +233,25 @@ class Resolution(Generic[RT, CT, KT]):
 
         causes: list[Criterion[RT, CT]] = []
         for candidate in criterion.candidates:
+            # Get dependencies up front so we can check for known conflicts
+            # before the more expensive _get_updated_criteria call.
+            deps = list(self._p.get_dependencies(candidate=candidate))
+
+            # Check if any dependency matches a previously recorded conflict
+            # pattern.  If so, skip this candidate without calling find_matches
+            # for each of its dependencies.
+            conflict_cause = self._matches_dep_conflict(name, deps)
+            if conflict_cause is not None:
+                self._r.rejecting_candidate(conflict_cause, candidate)
+                causes.append(conflict_cause)
+                continue
+
             try:
+                self._prefetched_deps = deps
                 criteria = self._get_updated_criteria(candidate)
             except RequirementsConflicted as e:
                 self._r.rejecting_candidate(e.criterion, candidate)
+                self._record_dep_conflict(name, deps, e.criterion)
                 causes.append(e.criterion)
                 continue
 
@@ -247,6 +279,68 @@ class Resolution(Generic[RT, CT, KT]):
         # All candidates tried, nothing works. This criterion is a dead
         # end, signal for backtracking.
         return causes
+
+    def _record_dep_conflict(
+        self,
+        name: KT,
+        deps: list[RT],
+        cause_criterion: Criterion[RT, CT],
+    ) -> None:
+        """Record a conflict pattern after a candidate fails.
+
+        The cause_criterion is the criterion that became unsatisfiable when the
+        candidate's dependencies were added.  We identify which dependency
+        triggered it and record the pattern so future candidates with the same
+        dependency key can be skipped.
+        """
+        # The last entry in the cause criterion's information is the
+        # requirement that was just added (the candidate's dependency).
+        if not cause_criterion.information:
+            return
+        cause_req = cause_criterion.information[-1].requirement
+        cause_dep_id = self._p.identify(cause_req)
+
+        # Find the matching dep in the candidate's dependency list and get
+        # its requirement key.
+        for dep in deps:
+            dep_id = self._p.identify(dep)
+            if dep_id != cause_dep_id:
+                continue
+            dep_key = self._p.get_requirement_key(dep)
+            if dep_key is not None:
+                self._dep_conflicts[(name, dep_id, dep_key)] = cause_criterion
+            break
+
+    def _matches_dep_conflict(
+        self, name: KT, deps: list[RT]
+    ) -> Criterion[RT, CT] | None:
+        """Check if any dependency matches a known conflict pattern.
+
+        Returns the stored cause criterion if the candidate should be skipped,
+        or None if no known conflict matches.
+        """
+        if not self._dep_conflicts:
+            return None
+        for dep in deps:
+            dep_id = self._p.identify(dep)
+            dep_key = self._p.get_requirement_key(dep)
+            if dep_key is None:
+                continue
+            pattern_key = (name, dep_id, dep_key)
+            if pattern_key not in self._dep_conflicts:
+                continue
+            # Verify the conflict still holds: intersect this dep's intervals
+            # with all existing requirement keys on the same identifier.
+            if dep_id not in self.state.criteria:
+                continue
+            combined = dep_key
+            for req in self.state.criteria[dep_id].iter_requirement():
+                req_key = self._p.get_requirement_key(req)
+                if req_key is not None:
+                    combined = combined & req_key
+                    if not combined:
+                        return self._dep_conflicts[pattern_key]
+        return None
 
     def _patch_criteria(
         self, incompatibilities_from_broken: list[tuple[KT, list[CT]]]
@@ -410,10 +504,10 @@ class Resolution(Generic[RT, CT, KT]):
         return False
 
     def _extract_causes(
-        self, criteron: list[Criterion[RT, CT]]
+        self, criteria: list[Criterion[RT, CT]]
     ) -> list[RequirementInformation[RT, CT]]:
-        """Extract causes from list of criterion and deduplicate"""
-        return list({id(i): i for c in criteron for i in c.information}.values())
+        """Extract causes from list of criteria and deduplicate"""
+        return list({id(i): i for c in criteria for i in c.information}.values())
 
     def resolve(self, requirements: Iterable[RT], max_rounds: int) -> State[RT, CT, KT]:
         if self._states:

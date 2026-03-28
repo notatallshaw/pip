@@ -16,7 +16,7 @@ from pip._internal.req.req_install import InstallRequirement
 from .base import Candidate, Constraint, Requirement
 from .candidates import REQUIRES_PYTHON_IDENTIFIER
 from .factory import Factory
-from .requirements import ExplicitRequirement
+from .requirements import ExplicitRequirement, SpecifierRequirement
 
 if TYPE_CHECKING:
     from pip._vendor.resolvelib.providers import Preference
@@ -304,3 +304,16 @@ class PipProvider(_ProviderBase):
         with_requires = not self._ignore_dependencies
         # iter_dependencies() can perform nontrivial work so delay until needed.
         return (r for r in candidate.iter_dependencies(with_requires) if r is not None)
+
+    @staticmethod
+    def get_requirement_key(requirement: Requirement) -> object:
+        """Return a hashable key for the requirement's version constraint.
+
+        Two requirements with the same key impose the same version range.
+        Used by the resolver to generalise learned conflicts across candidates.
+        """
+        if isinstance(requirement, SpecifierRequirement):
+            ireq = requirement._ireq
+            if ireq.req is not None:
+                return ireq.req.specifier.version_intervals
+        return None
