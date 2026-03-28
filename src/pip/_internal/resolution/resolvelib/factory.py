@@ -267,6 +267,12 @@ class Factory:
             hashes &= ireq.hashes(trust_internet=False)
             extras |= frozenset(ireq.extras)
 
+        # Early conflict detection: if the combined specifiers from all
+        # requirements are contradictory, no version can satisfy them.
+        # Return empty immediately instead of querying the package index.
+        if specifier.is_unsatisfiable():
+            return ()
+
         def _get_installed_candidate() -> Candidate | None:
             """Get the candidate for the currently-installed version."""
             # If --force-reinstall is set, we want the version from the index
