@@ -339,7 +339,9 @@ class Resolution(Generic[RT, CT, KT]):
                 if req_key is not None:
                     combined = combined & req_key
                     if not combined:
-                        return self._dep_conflicts[pattern_key]
+                        # Use current criterion for accurate backjumping
+                        # instead of the stale stored one.
+                        return self.state.criteria[dep_id]
         return None
 
     def _patch_criteria(
