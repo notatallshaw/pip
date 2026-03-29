@@ -86,13 +86,10 @@ class Resolution(Generic[RT, CT, KT]):
         self._save_states: list[State[RT, CT, KT]] | None = None
         self._optimistic_start_round: int | None = None
 
-        # Range-based conflict patterns.  When a candidate for package A fails
-        # because its dependency on D conflicts with existing requirements on D,
-        # we record the combined existing constraint range on D.  Future
-        # candidates for A whose dep on D is disjoint from that range are
-        # skipped.  This generalises across candidates with different but
-        # still-conflicting requirements (e.g. boto3 pinning different exact
-        # botocore versions that all conflict with the same upper bound).
+        # Range-based conflict patterns with cross-package learning.
+        # Maps (source_package, dep_package) to list of constraint ranges
+        # on dep_package that are known to conflict with source candidates.
+        # Persists across backjumps (learned facts don't expire).
         self._dep_conflicts: dict[tuple[KT, KT], list[object]] = {}
         self._prefetched_deps: list[RT] | None = None
 
@@ -324,6 +321,30 @@ class Resolution(Generic[RT, CT, KT]):
             self._dep_conflicts[key] = []
         if existing_combined not in self._dep_conflicts[key]:
             self._dep_conflicts[key].append(existing_combined)
+
+        # Cross-package learning: the candidate's dep requirement is also
+        # known to conflict with the existing constraint.  Record it the
+        # other way around so that if another package later imposes the same
+        # existing constraint, the resolver knows it conflicts with
+        # candidates requiring this dep range.
+        candidate_dep_key = None
+        for d in deps:
+            if self._p.identify(d) == cause_dep_id:
+                candidate_dep_key = self._p.get_requirement_key(d)
+                break
+        if candidate_dep_key is not None:
+            # For each parent that contributed to the existing constraint,
+            # record that their constraint range conflicts with
+            # candidate_dep_key.
+            for info in cause_criterion.information[:-1]:
+                if info.parent is None:
+                    continue
+                parent_id = self._p.identify(info.parent)
+                cross_key = (parent_id, cause_dep_id)
+                if cross_key not in self._dep_conflicts:
+                    self._dep_conflicts[cross_key] = []
+                if candidate_dep_key not in self._dep_conflicts[cross_key]:
+                    self._dep_conflicts[cross_key].append(candidate_dep_key)
 
     def _matches_dep_conflict(
         self, name: KT, deps: list[RT]
