@@ -86,15 +86,14 @@ class Resolution(Generic[RT, CT, KT]):
         self._save_states: list[State[RT, CT, KT]] | None = None
         self._optimistic_start_round: int | None = None
 
-        # Requirement-keyed conflict patterns.  When a candidate for package A
-        # fails because its dependency on D (with requirement key K) conflicts
-        # with existing requirements on D, we record (A, D, K) together with
-        # the cause criterion.  Future candidates for A that impose the same
-        # key K on D can be skipped if the conflicting requirements on D are
-        # still present.
-        self._dep_conflicts: dict[
-            tuple[KT, KT, object], Criterion[RT, CT]
-        ] = {}
+        # Range-based conflict patterns.  When a candidate for package A fails
+        # because its dependency on D conflicts with existing requirements on D,
+        # we record the combined existing constraint range on D.  Future
+        # candidates for A whose dep on D is disjoint from that range are
+        # skipped.  This generalises across candidates with different but
+        # still-conflicting requirements (e.g. boto3 pinning different exact
+        # botocore versions that all conflict with the same upper bound).
+        self._dep_conflicts: dict[tuple[KT, KT], list[object]] = {}
         self._prefetched_deps: list[RT] | None = None
 
     @property
@@ -286,38 +285,52 @@ class Resolution(Generic[RT, CT, KT]):
         deps: list[RT],
         cause_criterion: Criterion[RT, CT],
     ) -> None:
-        """Record a conflict pattern after a candidate fails.
+        """Record a range-based conflict pattern after a candidate fails.
 
-        The cause_criterion is the criterion that became unsatisfiable when the
-        candidate's dependencies were added.  We identify which dependency
-        triggered it and record the pattern so future candidates with the same
-        dependency key can be skipped.
+        Instead of recording the candidate's specific requirement key, record
+        the combined existing constraint range on the conflicting dependency.
+        This allows future candidates with *different* but still-conflicting
+        requirements to be skipped.
         """
-        # The last entry in the cause criterion's information is the
-        # requirement that was just added (the candidate's dependency).
         if not cause_criterion.information:
             return
-        cause_req = cause_criterion.information[-1].requirement
-        cause_dep_id = self._p.identify(cause_req)
+        cause_dep_id = self._p.identify(
+            cause_criterion.information[-1].requirement
+        )
 
-        # Find the matching dep in the candidate's dependency list and get
-        # its requirement key.
-        for dep in deps:
-            dep_id = self._p.identify(dep)
-            if dep_id != cause_dep_id:
+        # Verify this dep is actually in the candidate's dependency list.
+        has_dep = any(
+            self._p.identify(d) == cause_dep_id for d in deps
+        )
+        if not has_dep:
+            return
+
+        # Compute the combined existing constraint range on the conflicting
+        # dep (all requirements EXCEPT the candidate's, which is last).
+        existing_combined = None
+        for info in cause_criterion.information[:-1]:
+            rk = self._p.get_requirement_key(info.requirement)
+            if rk is None:
                 continue
-            dep_key = self._p.get_requirement_key(dep)
-            if dep_key is not None:
-                self._dep_conflicts[(name, dep_id, dep_key)] = cause_criterion
-            break
+            existing_combined = (
+                rk if existing_combined is None else (existing_combined & rk)
+            )
+
+        if existing_combined is None or not existing_combined:
+            return
+
+        key = (name, cause_dep_id)
+        if key not in self._dep_conflicts:
+            self._dep_conflicts[key] = []
+        if existing_combined not in self._dep_conflicts[key]:
+            self._dep_conflicts[key].append(existing_combined)
 
     def _matches_dep_conflict(
         self, name: KT, deps: list[RT]
     ) -> Criterion[RT, CT] | None:
-        """Check if any dependency matches a known conflict pattern.
+        """Check if any dependency matches a known range-based conflict.
 
-        Returns the stored cause criterion if the candidate should be skipped,
-        or None if no known conflict matches.
+        Returns the current dep criterion for backjump accuracy, or None.
         """
         if not self._dep_conflicts:
             return None
@@ -326,20 +339,17 @@ class Resolution(Generic[RT, CT, KT]):
             dep_key = self._p.get_requirement_key(dep)
             if dep_key is None:
                 continue
-            pattern_key = (name, dep_id, dep_key)
-            if pattern_key not in self._dep_conflicts:
+            key = (name, dep_id)
+            if key not in self._dep_conflicts:
                 continue
-            # Verify the conflict still holds: intersect this dep's intervals
-            # with all existing requirement keys on the same identifier.
-            if dep_id not in self.state.criteria:
-                continue
-            combined = dep_key
-            for req in self.state.criteria[dep_id].iter_requirement():
-                req_key = self._p.get_requirement_key(req)
-                if req_key is not None:
-                    combined = combined & req_key
-                    if not combined:
-                        return self._dep_conflicts[pattern_key]
+            # Check if this candidate's requirement is disjoint from any
+            # recorded existing constraint range.
+            for existing_range in self._dep_conflicts[key]:
+                if not (dep_key & existing_range):
+                    # Use CURRENT criterion for accurate backjumping
+                    # (not a stale stored one).
+                    if dep_id in self.state.criteria:
+                        return self.state.criteria[dep_id]
         return None
 
     def _patch_criteria(
