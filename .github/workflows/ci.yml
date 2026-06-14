@@ -198,7 +198,7 @@ jobs:
           --durations=15
 
   tests-windows:
-    name: tests / ${{ matrix.python }} / ${{ matrix.os }} / ${{ matrix.group.number }}
+    name: tests / ${{ matrix.python }} / ${{ matrix.os }} / ${{ matrix.group }}
     runs-on: ${{ matrix.os }}-latest
 
     needs: [determine-changes]
@@ -220,9 +220,13 @@ jobs:
           - "3.14"
           - "3.15"
           - "3.14t"
-        group:
-          - { number: 1, pytest-filter: "not test_install" }
-          - { number: 2, pytest-filter: "test_install" }
+        # Windows tests are expensively slow, so the unit and functional suites
+        # are sharded across several runners. Tests are split by a stable hash
+        # of their node id (see --num-test-groups), which keeps the shards
+        # balanced regardless of how tests are named or added over time. This is
+        # the same idea as the pytest-split plugin, kept dependency-free:
+        # https://github.com/jerry-git/pytest-split
+        group: [1, 2, 3]
 
     steps:
       # The D: drive is significantly faster than the system C: drive.
@@ -260,30 +264,42 @@ jobs:
       - run: python -m pip install nox
 
       # Main check
-      - name: Run unit tests (group 1)
-        if: matrix.group.number == 1
+      #
+      # --dist worksteal re-balances by handing queued tests from busy workers
+      # to idle ones, which trims the long tail of slow install tests:
+      # https://pytest-xdist.readthedocs.io/en/stable/distribution.html
+      - name: Run tests (shard ${{ matrix.group }} of 3)
         run: >-
           python -m nox -s test-${{ matrix.python }} --
-          tests/unit
-          --verbose --numprocesses auto --showlocals
-
-      - name: Run integration tests (group ${{ matrix.group.number }})
-        run: >-
-          python -m nox -s test-${{ matrix.python }} --no-install --
-          tests/functional -k "${{ matrix.group.pytest-filter }}"
+          tests/unit tests/functional
+          --num-test-groups 3 --test-group ${{ matrix.group }}
           --verbose --numprocesses auto --showlocals --durations=15
+          --dist worksteal
 
   tests-zipapp:
-    name: tests / zipapp
-    # The macos-latest (M1) runners are the fastest available on GHA, even
-    # beating out the ubuntu-latest runners. The zipapp tests are slow by
-    # nature, and we don't care where they run, so we pick the fastest one.
-    runs-on: macos-latest
+    name: tests / zipapp / ${{ matrix.group }}
+    # Sharded across runners (see below), so we want a runner with plenty of
+    # spare capacity to start the shards promptly rather than the fastest single
+    # runner: the macos-latest pool is capacity-limited and the shards queue
+    # there. The zipapp suite is platform-agnostic, so ubuntu is a good fit.
+    runs-on: ubuntu-latest
 
-    needs: [packaging, determine-changes]
+    # Not gated on the packaging job: this job builds its own zipapp and does
+    # not consume packaging's artifacts, so waiting for it only delays the
+    # start. The same gate was dropped from the other test jobs in #13338.
+    needs: [determine-changes]
     if: >-
       needs.determine-changes.outputs.tests == 'true' ||
       github.event_name != 'pull_request'
+
+    strategy:
+      fail-fast: true
+      matrix:
+        # zipimport cannot cache bytecode to disk, so a source-only zipapp
+        # recompiles every pip module on each invocation, which makes this
+        # suite slow. Shard it across several runners; tests are split by a
+        # stable hash of their node id (see --num-test-groups).
+        group: [1, 2, 3]
 
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -293,20 +309,28 @@ jobs:
         with:
           python-version: "3.10"
 
-      - name: Install MacOS dependencies
-        run: brew install breezy subversion
+      - name: Install Ubuntu dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install brz subversion
 
       - run: python -m pip install .
       - run: python -m pip install nox
 
       # Main check
-      - name: Run integration tests
+      #
+      # --dist worksteal re-balances by handing queued tests from busy workers
+      # to idle ones, trimming the long tail of slow tests:
+      # https://pytest-xdist.readthedocs.io/en/stable/distribution.html
+      - name: Run integration tests (shard ${{ matrix.group }} of 3)
         run: >-
           python -m nox -s test-3.10 --
           tests/functional
+          --num-test-groups 3 --test-group ${{ matrix.group }}
           --verbose --numprocesses auto --showlocals
           --durations=15
           --use-zipapp
+          --dist worksteal
 
   check:  # This job does nothing and is only used for the branch protection
     if: always()
