@@ -5,7 +5,7 @@ import pytest
 
 from pip._vendor.rich.text import Text
 
-import pip._internal.cli.parser
+import pip._internal.utils.logging
 from pip._internal.cli.status_codes import ERROR, SUCCESS
 from pip._internal.commands import commands_dict, create_command
 from pip._internal.exceptions import CommandError
@@ -133,12 +133,14 @@ def test_help_command_colors(
     monkeypatch.delenv("PIP_NO_COLOR", raising=False)
     monkeypatch.delenv("FORCE_COLOR", raising=False)
 
-    PipConsole = pip._internal.cli.parser.PipConsole
+    # ``print_help`` imports ``PipConsole`` from ``utils.logging`` lazily (to keep
+    # rich off the CLI startup path), so patch it there rather than on ``parser``.
+    PipConsole = pip._internal.utils.logging.PipConsole
 
     TestConsole = functools.partial(
         PipConsole, force_terminal=True, color_system="standard", width=80
     )
-    monkeypatch.setattr(pip._internal.cli.parser, "PipConsole", TestConsole)
+    monkeypatch.setattr(pip._internal.utils.logging, "PipConsole", TestConsole)
 
     if envvar:
         monkeypatch.setenv(envvar, "1")

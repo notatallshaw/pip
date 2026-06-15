@@ -21,14 +21,14 @@ from typing import TYPE_CHECKING, Literal
 
 from pip._vendor.packaging.requirements import InvalidRequirement
 from pip._vendor.packaging.version import InvalidVersion
-from pip._vendor.rich.console import Console, ConsoleOptions, RenderResult
-from pip._vendor.rich.markup import escape
-from pip._vendor.rich.text import Text
 
 if TYPE_CHECKING:
     from hashlib import _Hash
 
     from pip._vendor.requests.models import PreparedRequest, Request, Response
+    from pip._vendor.rich.console import Console, ConsoleOptions, RenderResult
+    from pip._vendor.rich.markup import escape  # noqa: F401
+    from pip._vendor.rich.text import Text
 
     from pip._internal.metadata import BaseDistribution
     from pip._internal.models.link import Link
@@ -36,6 +36,28 @@ if TYPE_CHECKING:
     from pip._internal.req.req_install import InstallRequirement
 
 logger = logging.getLogger(__name__)
+
+
+# ``pip._vendor.rich`` is relatively expensive to import (it pulls in
+# ``rich.console`` and, transitively, large vendored modules). ``exceptions`` is
+# imported on essentially every pip code path, but the rich names below are only
+# needed when an error is actually constructed or rendered. Defer the import via
+# module ``__getattr__`` (PEP 562) so that merely importing this module -- as the
+# CLI startup path does -- does not pay the rich import cost.
+def __getattr__(name: str) -> object:
+    if name in ("Console", "ConsoleOptions", "RenderResult"):
+        import pip._vendor.rich.console as _console
+
+        return getattr(_console, name)
+    if name == "escape":
+        from pip._vendor.rich.markup import escape
+
+        return escape
+    if name == "Text":
+        from pip._vendor.rich.text import Text
+
+        return Text
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 #
@@ -52,6 +74,8 @@ def _prefix_with_indent(
     prefix: str,
     indent: str,
 ) -> Text:
+    from pip._vendor.rich.text import Text
+
     if isinstance(s, Text):
         text = s
     else:
@@ -215,6 +239,9 @@ class MissingPyProjectBuildRequires(DiagnosticPipError):
     reference = "missing-pyproject-build-system-requires"
 
     def __init__(self, *, package: str) -> None:
+        from pip._vendor.rich.markup import escape
+        from pip._vendor.rich.text import Text
+
         super().__init__(
             message=f"Can not process {escape(package)}",
             context=Text(
@@ -232,6 +259,9 @@ class InvalidPyProjectBuildRequires(DiagnosticPipError):
     reference = "invalid-pyproject-build-system-requires"
 
     def __init__(self, *, package: str, reason: str) -> None:
+        from pip._vendor.rich.markup import escape
+        from pip._vendor.rich.text import Text
+
         super().__init__(
             message=f"Can not process {escape(package)}",
             context=Text(
@@ -402,6 +432,9 @@ class InstallationSubprocessError(DiagnosticPipError, InstallationError):
         exit_code: int,
         output_lines: list[str] | None,
     ) -> None:
+        from pip._vendor.rich.markup import escape
+        from pip._vendor.rich.text import Text
+
         if output_lines is None:
             output_prompt = Text("No available output.")
         else:
@@ -439,6 +472,8 @@ class MetadataGenerationFailed(DiagnosticPipError, InstallationError):
         *,
         package_details: str,
     ) -> None:
+        from pip._vendor.rich.markup import escape
+
         super().__init__(
             message="Encountered error while generating package metadata.",
             context=escape(package_details),
@@ -700,6 +735,8 @@ class ExternallyManagedEnvironment(DiagnosticPipError):
     reference = "externally-managed-environment"
 
     def __init__(self, error: str | None) -> None:
+        from pip._vendor.rich.text import Text
+
         if error is None:
             context = Text(_DEFAULT_EXTERNALLY_MANAGED_ERROR)
         else:
@@ -764,6 +801,8 @@ class UninstallMissingRecord(DiagnosticPipError):
     reference = "uninstall-no-record-file"
 
     def __init__(self, *, distribution: BaseDistribution) -> None:
+        from pip._vendor.rich.text import Text
+
         installer = distribution.installer
         if not installer or installer == "pip":
             dep = f"{distribution.raw_name}=={distribution.version}"
@@ -791,6 +830,8 @@ class LegacyDistutilsInstall(DiagnosticPipError):
     reference = "uninstall-distutils-installed-package"
 
     def __init__(self, *, distribution: BaseDistribution) -> None:
+        from pip._vendor.rich.text import Text
+
         super().__init__(
             message=Text(f"Cannot uninstall {distribution}"),
             context=(
@@ -811,6 +852,8 @@ class InvalidInstalledPackage(DiagnosticPipError):
         dist: BaseDistribution,
         invalid_exc: InvalidRequirement | InvalidVersion,
     ) -> None:
+        from pip._vendor.rich.text import Text
+
         installed_location = dist.installed_location
 
         if isinstance(invalid_exc, InvalidRequirement):
@@ -839,6 +882,8 @@ class IncompleteDownloadError(DiagnosticPipError):
     reference = "incomplete-download"
 
     def __init__(self, download: _FileDownload) -> None:
+        from pip._vendor.rich.text import Text
+
         # Dodge circular import.
         from pip._internal.utils.misc import format_size
 
@@ -904,6 +949,8 @@ class InvalidEggFragment(DiagnosticPipError):
     reference = "invalid-egg-fragment"
 
     def __init__(self, link: Link, fragment: str) -> None:
+        from pip._vendor.rich.markup import escape
+
         hint = ""
         if ">" in fragment or "=" in fragment or "<" in fragment:
             hint = (
@@ -936,6 +983,8 @@ class BuildDependencyInstallError(DiagnosticPipError):
         cause: Exception,
         log_lines: list[str] | None,
     ) -> None:
+        from pip._vendor.rich.text import Text
+
         if isinstance(cause, PipError):
             note = "This is likely not a problem with pip."
         else:

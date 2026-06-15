@@ -14,11 +14,9 @@ from contextlib import suppress
 from typing import Any, NoReturn
 
 from pip._vendor.rich.markup import escape
-from pip._vendor.rich.theme import Theme
 
 from pip._internal.cli.status_codes import UNKNOWN_ERROR
 from pip._internal.configuration import Configuration, ConfigurationError
-from pip._internal.utils.logging import PipConsole
 from pip._internal.utils.misc import redact_auth_from_url, strtobool
 
 logger = logging.getLogger(__name__)
@@ -238,7 +236,6 @@ class ConfigOptionParser(CustomOptionParser):
 
         for _, value in self.config.items():
             for section_key, val in value.items():
-
                 section, key = section_key.split(".", 1)
                 if section in override_order:
                     section_items_dict[section][key] = val
@@ -352,6 +349,13 @@ class ConfigOptionParser(CustomOptionParser):
             or bool(strtobool(os.environ.get("PIP_NO_COLOR", "no") or "no"))
             or "NO_COLOR" in os.environ
         )
+        # Imported lazily: ``utils.logging`` pulls in the relatively expensive
+        # ``rich.console``/``rich.logging`` modules, which are only needed once
+        # we actually render help output.
+        from pip._vendor.rich.theme import Theme
+
+        from pip._internal.utils.logging import PipConsole
+
         console = PipConsole(
             theme=Theme(PrettyHelpFormatter.styles), no_color=no_color, file=file
         )

@@ -8,7 +8,6 @@ import os
 import posixpath
 import re
 import urllib.parse
-import urllib.request
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import (
@@ -130,6 +129,11 @@ def _clean_file_url_path(part: str) -> str:
     # should not be quoted. On Linux where drive letters do not
     # exist, the colon should be quoted. We rely on urllib.request
     # to do the right thing here.
+    #
+    # Imported lazily: urllib.request pulls in http.client/ssl, which is a
+    # noticeable chunk of startup, and this is the only function that needs it.
+    import urllib.request
+
     ret = urllib.request.pathname2url(urllib.request.url2pathname(part))
     if ret.startswith("///"):
         # Remove any URL authority section, leaving only the URL path.

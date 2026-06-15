@@ -12,9 +12,6 @@ import traceback
 from collections.abc import Callable, Iterator
 from optparse import Values
 
-from pip._vendor.rich import reconfigure
-from pip._vendor.rich import traceback as rich_traceback
-
 from pip._internal.cli import cmdoptions
 from pip._internal.cli.command_context import CommandContextMixIn
 from pip._internal.cli.parser import ConfigOptionParser, UpdatingDefaultsHelpFormatter
@@ -34,7 +31,6 @@ from pip._internal.exceptions import (
     PreviousBuildDirError,
 )
 from pip._internal.utils.filesystem import check_path_owner
-from pip._internal.utils.logging import BrokenStdoutLoggingError, setup_logging
 from pip._internal.utils.misc import get_prog, normalize_path
 from pip._internal.utils.temp_dir import TempDirectoryTypeRegistry as TempDirRegistry
 from pip._internal.utils.temp_dir import global_tempdir_manager, tempdir_registry
@@ -97,11 +93,17 @@ class Command(CommandContextMixIn):
         raise NotImplementedError
 
     def _run_wrapper(self, level_number: int, options: Values, args: list[str]) -> int:
+        # Imported lazily: ``utils.logging`` pulls in rich, which is only needed
+        # once a command actually runs rather than at CLI import time.
+        from pip._internal.utils.logging import BrokenStdoutLoggingError
+
         def _inner_run() -> int:
             with self.pip_version_check(options, args):
                 return self.run(options, args)
 
         if options.debug_mode:
+            from pip._vendor.rich import traceback as rich_traceback
+
             rich_traceback.install(show_locals=True)
             return _inner_run()
 
@@ -195,6 +197,12 @@ class Command(CommandContextMixIn):
 
         if hasattr(options, "progress_bar") and options.progress_bar == "auto":
             options.progress_bar = "on" if self.verbosity >= 0 else "off"
+
+        # Imported lazily: rich and ``utils.logging`` are only needed once a
+        # command runs, not when the CLI is first imported.
+        from pip._vendor.rich import reconfigure
+
+        from pip._internal.utils.logging import setup_logging
 
         reconfigure(no_color=options.no_color)
         level_number = setup_logging(
