@@ -139,6 +139,16 @@ class Candidate:
         raise NotImplementedError("Override in subclass")
 
     @property
+    def base_candidate(self) -> Candidate:
+        """The underlying installation candidate.
+
+        For a plain candidate this is itself; an ``ExtrasCandidate`` overrides
+        this to return the candidate it wraps. Two candidates that share a base
+        install the same thing and differ only in requested extras.
+        """
+        return self
+
+    @property
     def version(self) -> Version:
         raise NotImplementedError("Override in subclass")
 

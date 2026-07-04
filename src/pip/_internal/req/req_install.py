@@ -48,7 +48,10 @@ from pip._internal.utils.misc import (
     redact_auth_from_requirement,
     redact_auth_from_url,
 )
-from pip._internal.utils.packaging import get_requirement
+from pip._internal.utils.packaging import (
+    evaluate_marker_with_extras,
+    get_requirement,
+)
 from pip._internal.utils.subprocess import runner_with_spinner_message
 from pip._internal.utils.temp_dir import TempDirectory, tempdir_kinds
 from pip._internal.utils.unpacking import unpack_file
@@ -266,16 +269,13 @@ class InstallRequirement:
         return len(specifiers) == 1 and next(iter(specifiers)).operator in {"==", "==="}
 
     def match_markers(self, extras_requested: Iterable[str] | None = None) -> bool:
-        if not extras_requested:
-            # Provide an extra to safely evaluate the markers
-            # without matching any extra
-            extras_requested = ("",)
-        if self.markers is not None:
-            return any(
-                self.markers.evaluate({"extra": extra}) for extra in extras_requested
-            )
-        else:
+        if self.markers is None:
             return True
+        # Evaluate the markers against the *whole* set of requested extras, so
+        # that ``extra != "x"`` (and other non-equality operators) behave as
+        # set membership rather than being unioned over one extra at a time.
+        extras = set(extras_requested) if extras_requested else set()
+        return evaluate_marker_with_extras(self.markers, extras)
 
     @property
     def has_hash_options(self) -> bool:

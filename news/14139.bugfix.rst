@@ -1,0 +1,5 @@
+Evaluate ``extra`` environment markers on a dependency against the full set of
+extras requested for the package, so ``extra != "name"`` behaves as ``"name"
+not in extras``. Previously such a marker was always treated as active, so a
+dependency guarded by (for example) ``extra != "gpu"`` was installed even when
+the ``gpu`` extra was requested.

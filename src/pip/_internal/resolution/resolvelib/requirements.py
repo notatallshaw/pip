@@ -46,7 +46,15 @@ class ExplicitRequirement(Requirement):
         return self.candidate, None
 
     def is_satisfied_by(self, candidate: Candidate) -> bool:
-        return candidate == self.candidate
+        if candidate == self.candidate:
+            return True
+        # Extras are modelled as an attribute of the candidate, so a candidate
+        # that wraps the required one with additional extras also satisfies this
+        # requirement (extras only add dependencies). Compare the underlying base
+        # candidate and require the extras to cover what was originally asked.
+        if candidate.base_candidate != self.candidate.base_candidate:
+            return False
+        return self.candidate.extras <= candidate.extras
 
 
 class SpecifierRequirement(Requirement):
@@ -109,10 +117,15 @@ class SpecifierRequirement(Requirement):
         return None, self._ireq
 
     def is_satisfied_by(self, candidate: Candidate) -> bool:
-        assert candidate.name == self.name, (
+        assert candidate.project_name == self.project_name, (
             f"Internal issue: Candidate is not for this requirement "
-            f"{candidate.name} vs {self.name}"
+            f"{candidate.project_name} vs {self.project_name}"
         )
+        # Extras are modelled as an attribute of the candidate, so the candidate
+        # must provide every extra this requirement asks for. Extras are
+        # additive, so a candidate carrying more extras still satisfies.
+        if not self._extras <= candidate.extras:
+            return False
         # We can safely always allow prereleases here since PackageFinder
         # already implements the prerelease logic, and would have filtered out
         # prerelease candidates if the user does not expect them.

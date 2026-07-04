@@ -63,7 +63,7 @@ def build_explicit_req_info(
             {"pinned-package": [build_req_info("pinned-package==1.0")]},
             [],
             {},
-            (True, True, False, True, math.inf, False, "pinned-package"),
+            (True, True, False, True, False, math.inf, False, "pinned-package"),
         ),
         # Star-specified package, i.e. with "*"
         (
@@ -71,7 +71,7 @@ def build_explicit_req_info(
             {"star-specified-package": [build_req_info("star-specified-package==1.*")]},
             [],
             {},
-            (True, True, True, False, math.inf, False, "star-specified-package"),
+            (True, True, True, False, False, math.inf, False, "star-specified-package"),
         ),
         # Package that caused backtracking
         (
@@ -79,7 +79,7 @@ def build_explicit_req_info(
             {"backtrack-package": [build_req_info("backtrack-package")]},
             [build_req_info("backtrack-package")],
             {},
-            (True, True, True, True, math.inf, True, "backtrack-package"),
+            (True, True, True, True, False, math.inf, True, "backtrack-package"),
         ),
         # Root package requested by user
         (
@@ -87,7 +87,7 @@ def build_explicit_req_info(
             {"root-package": [build_req_info("root-package")]},
             [],
             {"root-package": 1},
-            (True, True, True, True, 1, True, "root-package"),
+            (True, True, True, True, False, 1, True, "root-package"),
         ),
         # Unfree package (with specifier operator)
         (
@@ -95,7 +95,7 @@ def build_explicit_req_info(
             {"unfree-package": [build_req_info("unfree-package!=1")]},
             [],
             {},
-            (True, True, True, True, math.inf, False, "unfree-package"),
+            (True, True, True, True, False, math.inf, False, "unfree-package"),
         ),
         # Free package (no operator)
         (
@@ -103,7 +103,7 @@ def build_explicit_req_info(
             {"free-package": [build_req_info("free-package")]},
             [],
             {},
-            (True, True, True, True, math.inf, True, "free-package"),
+            (True, True, True, True, False, math.inf, True, "free-package"),
         ),
         # Test case for "direct" preference (explicit URL)
         (
@@ -111,7 +111,7 @@ def build_explicit_req_info(
             {"direct-package": [build_explicit_req_info("direct-package")]},
             [],
             {},
-            (True, False, True, True, math.inf, True, "direct-package"),
+            (True, False, True, True, False, math.inf, True, "direct-package"),
         ),
         # Upper bounded with <= operator
         (
@@ -123,7 +123,16 @@ def build_explicit_req_info(
             },
             [],
             {},
-            (True, True, True, False, math.inf, False, "upper-bound-lte-package"),
+            (
+                True,
+                True,
+                True,
+                False,
+                False,
+                math.inf,
+                False,
+                "upper-bound-lte-package",
+            ),
         ),
         # Upper bounded with < operator
         (
@@ -131,7 +140,7 @@ def build_explicit_req_info(
             {"upper-bound-lt-package": [build_req_info("upper-bound-lt-package<2.0")]},
             [],
             {},
-            (True, True, True, False, math.inf, False, "upper-bound-lt-package"),
+            (True, True, True, False, False, math.inf, False, "upper-bound-lt-package"),
         ),
         # Upper bounded with ~= operator
         (
@@ -148,6 +157,7 @@ def build_explicit_req_info(
                 True,
                 True,
                 False,
+                False,
                 math.inf,
                 False,
                 "upper-bound-compatible-package",
@@ -159,7 +169,7 @@ def build_explicit_req_info(
             {"lower-bound-package": [build_req_info("lower-bound-package>=1.0")]},
             [],
             {},
-            (True, True, True, True, math.inf, False, "lower-bound-package"),
+            (True, True, True, True, False, math.inf, False, "lower-bound-package"),
         ),
     ],
 )
@@ -184,6 +194,26 @@ def test_get_preference(
     )
 
     assert preference == expected, f"Expected {expected}, got {preference}"
+
+
+def test_get_preference_defers_extra_removable(factory: Factory) -> None:
+    """A package with a dependency an extra can remove is deprioritized, so a
+    transitively-requested extra is discovered before the package is decided."""
+    factory._extra_removable_packages["defer-package"] = True
+    provider = PipProvider(
+        factory=factory,
+        constraints={},
+        ignore_dependencies=False,
+        upgrade_strategy="to-satisfy-only",
+        user_requested={},
+    )
+
+    information = {"defer-package": [build_req_info("defer-package")]}
+    preference = provider.get_preference("defer-package", {}, {}, information, [])
+
+    # The defer_for_extras element (index 4) is True; it is False for a package
+    # without extra-removable dependencies.
+    assert preference[4] is True
 
 
 @pytest.mark.parametrize(

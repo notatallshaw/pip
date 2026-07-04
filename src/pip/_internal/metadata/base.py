@@ -30,6 +30,7 @@ from pip._internal.models.direct_url import (
 )
 from pip._internal.utils.egg_link import egg_link_path_from_sys_path
 from pip._internal.utils.misc import is_local, normalize_path
+from pip._internal.utils.packaging import evaluate_marker_with_extras, get_requirement
 from pip._internal.utils.urls import url_to_path
 
 from ._json import msg_to_json
@@ -441,12 +442,20 @@ class BaseDistribution(Protocol):
         return spec
 
     def iter_dependencies(self, extras: Collection[str] = ()) -> Iterable[Requirement]:
-        """Dependencies of this distribution.
+        """Dependencies of this distribution active for the given extras.
 
         For modern .dist-info distributions, this is the collection of
-        "Requires-Dist:" entries in distribution metadata.
+        "Requires-Dist:" entries in distribution metadata. Each entry's marker
+        is evaluated against ``extras`` as a whole set, so ``extra != "x"`` (and
+        other non-equality operators) behave as set membership rather than being
+        unioned over one extra at a time.
         """
-        raise NotImplementedError()
+        for req_string in self.iter_raw_dependencies():
+            # strip() because email.message.Message.get_all() may return a leading \n
+            # in case a long header was wrapped.
+            req = get_requirement(req_string.strip())
+            if req.marker is None or evaluate_marker_with_extras(req.marker, extras):
+                yield req
 
     def iter_raw_dependencies(self) -> Iterable[str]:
         """Raw Requires-Dist metadata."""

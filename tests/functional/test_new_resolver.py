@@ -264,6 +264,131 @@ def test_new_resolver_installs_extras_warn_missing(script: PipTestEnvironment) -
     script.assert_installed(base="0.1.0", dep="0.1.0")
 
 
+@pytest.mark.parametrize(
+    "to_install, expected, absent",
+    [
+        ("pkg", {"pkg": "1.0", "default_dep": "1.0"}, "gpu_dep"),
+        ("pkg[gpu]", {"pkg": "1.0", "gpu_dep": "1.0"}, "default_dep"),
+    ],
+)
+def test_new_resolver_extra_not_equal_marker(
+    script: PipTestEnvironment,
+    to_install: str,
+    expected: dict[str, str],
+    absent: str,
+) -> None:
+    """A dependency guarded by ``extra != "x"`` is installed unless the ``x``
+    extra is requested, and is dropped when it is (pypa/pip#14139)."""
+    create_basic_wheel_for_package(
+        script,
+        "pkg",
+        "1.0",
+        depends=['default_dep; extra != "gpu"'],
+        extras={"gpu": ["gpu_dep"]},
+    )
+    create_basic_wheel_for_package(script, "default_dep", "1.0")
+    create_basic_wheel_for_package(script, "gpu_dep", "1.0")
+
+    script.pip(
+        "install",
+        "--no-cache-dir",
+        "--no-index",
+        "--find-links",
+        script.scratch_path,
+        to_install,
+    )
+    script.assert_installed(**expected)
+    script.assert_not_installed(absent)
+
+
+def test_new_resolver_extra_not_equal_marker_merges_extras(
+    script: PipTestEnvironment,
+) -> None:
+    """When a project is requested both plainly and with an extra, the extras
+    are merged, so an ``extra != "x"`` dependency is dropped when any request
+    activates ``x`` (pypa/pip#14139)."""
+    create_basic_wheel_for_package(
+        script,
+        "pkg",
+        "1.0",
+        depends=['default_dep; extra != "gpu"'],
+        extras={"gpu": ["gpu_dep"]},
+    )
+    create_basic_wheel_for_package(script, "default_dep", "1.0")
+    create_basic_wheel_for_package(script, "gpu_dep", "1.0")
+
+    script.pip(
+        "install",
+        "--no-cache-dir",
+        "--no-index",
+        "--find-links",
+        script.scratch_path,
+        "pkg",
+        "pkg[gpu]",
+    )
+    script.assert_installed(pkg="1.0", gpu_dep="1.0")
+    script.assert_not_installed("default_dep")
+
+
+def test_new_resolver_extra_not_equal_marker_transitive_request(
+    script: PipTestEnvironment,
+) -> None:
+    """A default-only dependency gated on ``extra != "gpu"`` (here unsatisfiable)
+    does not fail resolution when ``gpu`` is requested only transitively: the
+    resolver prefers the extra-requester so ``pkg``'s merged extras are known
+    before it is decided (pypa/pip#14139)."""
+    create_basic_wheel_for_package(
+        script,
+        "pkg",
+        "1.0",
+        depends=['unsatisfiable>=2; extra != "gpu"'],
+        extras={"gpu": ["gpu_dep"]},
+    )
+    # Only 1.0 exists, so the default-only dependency cannot be satisfied.
+    create_basic_wheel_for_package(script, "unsatisfiable", "1.0")
+    create_basic_wheel_for_package(script, "gpu_dep", "1.0")
+    create_basic_wheel_for_package(script, "wants_gpu", "1.0", depends=["pkg[gpu]"])
+
+    script.pip(
+        "install",
+        "--no-cache-dir",
+        "--no-index",
+        "--find-links",
+        script.scratch_path,
+        "pkg",
+        "wants_gpu",
+    )
+    script.assert_installed(pkg="1.0", gpu_dep="1.0", wants_gpu="1.0")
+    script.assert_not_installed("unsatisfiable")
+
+
+def test_new_resolver_upgrade_requested_with_extra(
+    script: PipTestEnvironment,
+) -> None:
+    """``pip install --upgrade foo[extra]`` upgrades foo. The request carries an
+    extra, but the resolver keys user-requested packages by their bare name."""
+    create_basic_wheel_for_package(script, "pkg", "1.0", extras={"ext": []})
+    script.pip(
+        "install",
+        "--no-cache-dir",
+        "--no-index",
+        "--find-links",
+        script.scratch_path,
+        "pkg[ext]==1.0",
+    )
+    create_basic_wheel_for_package(script, "pkg", "2.0", extras={"ext": []})
+    script.pip(
+        "install",
+        "--no-cache-dir",
+        "--no-index",
+        "--find-links",
+        script.scratch_path,
+        "--upgrade",
+        "pkg[ext]",
+    )
+    script.assert_installed(pkg="2.0")
+
+
 def test_new_resolver_installed_message(script: PipTestEnvironment) -> None:
     create_basic_wheel_for_package(script, "A", "1.0")
     result = script.pip(
@@ -2476,6 +2601,31 @@ def test_new_resolver_constraint_on_link_with_extra(
     script.assert_installed(pkg="1.0")
 
 
+def test_new_resolver_url_constraint_with_extra_request(
+    script: PipTestEnvironment,
+) -> None:
+    """A URL constraint provides the base candidate for a package requested with
+    an extra, so that candidate must be offered carrying the extra."""
+    wheel: pathlib.Path = create_basic_wheel_for_package(
+        script, "pkg", "1.0", extras={"ext": ["ext_dep"]}
+    )
+    create_basic_wheel_for_package(script, "ext_dep", "1.0")
+    constraints = script.scratch_path / "constraints.txt"
+    constraints.write_text(f"pkg @ {wheel.as_uri()}\n")
+
+    script.pip(
+        "install",
+        "--no-cache-dir",
+        "--no-index",
+        "--find-links",
+        script.scratch_path,
+        "-c",
+        str(constraints),
+        "pkg[ext]",
+    )
+    script.assert_installed(pkg="1.0", ext_dep="1.0")
+
+
 def test_new_resolver_constraint_on_link_with_extra_indirect(
     script: PipTestEnvironment,
 ) -> None:
@@ -2567,4 +2717,29 @@ def test_new_resolver_comes_from_with_extra(
     )
     assert "(from pkg[ext])" in result.stdout
     assert "(from pkg)" not in result.stdout
+    script.assert_installed(pkg="1.0", dep="1.0")
+
+
+def test_new_resolver_comes_from_with_extra_and_version(
+    script: PipTestEnvironment,
+) -> None:
+    """The provenance chain names the extra exactly once, even with a version
+    specifier: it must not duplicate the pkg[ext]==x hop."""
+    create_basic_wheel_for_package(script, "dep", "1.0")
+    create_basic_wheel_for_package(script, "pkg", "1.0", extras={"ext": ["dep"]})
+    req_path = script.scratch_path / "reqs.txt"
+    req_path.write_text("pkg[ext]==1.0")
+
+    result = script.pip(
+        "install",
+        "--no-cache-dir",
+        "--no-index",
+        "--find-links",
+        script.scratch_path,
+        "-r",
+        str(req_path),
+    )
+
+    assert "(from pkg[ext]==1.0->pkg[ext]==1.0" not in result.stdout, result.stdout
+    assert "(from pkg[ext]==1.0->-r" in result.stdout
     script.assert_installed(pkg="1.0", dep="1.0")

@@ -6,7 +6,6 @@ from collections.abc import Iterable, Iterator, Mapping, Sequence
 from functools import cache
 from typing import (
     TYPE_CHECKING,
-    TypeVar,
 )
 
 from pip._vendor.resolvelib.providers import AbstractProvider
@@ -49,35 +48,6 @@ _CONFLICT_PRIORITY_THRESHOLD = 5
 # services to those objects (access to pip's finder and preparer).
 
 
-D = TypeVar("D")
-V = TypeVar("V")
-
-
-def _get_with_identifier(
-    mapping: Mapping[str, V],
-    identifier: str,
-    default: D,
-) -> D | V:
-    """Get item from a package name lookup mapping with a resolver identifier.
-
-    This extra logic is needed when the target mapping is keyed by package
-    name, which cannot be directly looked up with an identifier (which may
-    contain requested extras). Additional logic is added to also look up a value
-    by "cleaning up" the extras from the identifier.
-    """
-    if identifier in mapping:
-        return mapping[identifier]
-    # HACK: Theoretically we should check whether this identifier is a valid
-    # "NAME[EXTRAS]" format, and parse out the name part with packaging or
-    # some regular expression. But since pip's resolver only spits out three
-    # kinds of identifiers: normalized PEP 503 names, normalized names plus
-    # extras, and Requires-Python, we can cheat a bit here.
-    name, open_bracket, _ = identifier.partition("[")
-    if open_bracket and name in mapping:
-        return mapping[name]
-    return default
-
-
 class PipProvider(_ProviderBase):
     """Pip's provider implementation for resolvelib.
 
@@ -115,7 +85,12 @@ class PipProvider(_ProviderBase):
         return self._constraints
 
     def identify(self, requirement_or_candidate: Requirement | Candidate) -> str:
-        return requirement_or_candidate.name
+        # Extras are modelled as an attribute of the candidate rather than as a
+        # separate resolver node, so ``foo`` and ``foo[extra]`` share a single
+        # identity. This lets a package be resolved once against the merged set
+        # of requested extras, which is required for ``extra != "x"`` markers to
+        # behave correctly (see the ExtrasCandidate docstring).
+        return requirement_or_candidate.project_name
 
     def narrow_requirement_selection(
         self,
@@ -139,11 +114,13 @@ class PipProvider(_ProviderBase):
               get promoted so they are resolved earlier. This lets their
               constraints take effect before other packages pick a version.
         """
+        # Key on project_name, matching identify(): extras are folded into the
+        # base node, so a foo[extra] requirement/parent must count against foo.
         backtrack_identifiers = set()
         for info in backtrack_causes:
-            names = [info.requirement.name]
+            names = [info.requirement.project_name]
             if info.parent is not None:
-                names.append(info.parent.name)
+                names.append(info.parent.project_name)
             for name in names:
                 backtrack_identifiers.add(name)
                 if name not in resolutions:
@@ -243,11 +220,19 @@ class PipProvider(_ProviderBase):
 
         conflict_promoted = identifier in self._conflict_promoted
 
+        # Best-effort: resolve a package whose dependencies an extra can remove
+        # after other packages, so a later, transitively-requested extra (which
+        # would drop such a dependency) is discovered before this package is
+        # decided. This is only a nudge; it cannot always avoid deciding the
+        # package before such an extra becomes known.
+        defer_for_extras = self._factory.has_removable_extra_dependency(identifier)
+
         return (
             not conflict_promoted,
             not direct,
             not pinned,
             not upper_bounded,
+            defer_for_extras,
             requested_order,
             not unfree,
             identifier,
@@ -273,18 +258,12 @@ class PipProvider(_ProviderBase):
             if self._upgrade_strategy == "eager":
                 return True
             elif self._upgrade_strategy == "only-if-needed":
-                user_order = _get_with_identifier(
-                    self._user_requested,
-                    identifier,
-                    default=None,
-                )
-                return user_order is not None
+                return identifier in self._user_requested
             return False
 
-        constraint = _get_with_identifier(
-            self._constraints,
+        constraint = self._constraints.get(
             identifier,
-            default=Constraint.empty(),
+            Constraint.empty(),
         )
         return self._factory.find_candidates(
             identifier=identifier,

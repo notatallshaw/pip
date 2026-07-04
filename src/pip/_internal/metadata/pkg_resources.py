@@ -236,6 +236,10 @@ class Distribution(BaseDistribution):
         return feed_parser.close()
 
     def iter_dependencies(self, extras: Collection[str] = ()) -> Iterable[Requirement]:
+        # This backend reads dependencies via pkg_resources (which covers legacy
+        # egg-info distributions whose deps live in requires.txt, not
+        # Requires-Dist), so it keeps its own implementation rather than the
+        # shared, Requires-Dist-based one in BaseDistribution.
         if extras:
             relevant_extras = set(self._extra_mapping) & set(
                 map(canonicalize_name, extras)

@@ -20,6 +20,10 @@ from pip._internal.distributions import make_distribution_for_install_requiremen
 from pip._internal.metadata import get_default_environment
 from pip._internal.metadata.base import BaseDistribution
 from pip._internal.req.req_install import InstallRequirement
+from pip._internal.utils.packaging import (
+    evaluate_marker_with_extras,
+    marker_references_extra,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +31,10 @@ logger = logging.getLogger(__name__)
 class PackageDetails(NamedTuple):
     version: Version
     dependencies: list[Requirement]
+    # The extras the package was installed with, when known. ``None`` means the
+    # package was already installed and pip does not record its requested
+    # extras, so extra-conditional dependencies cannot be verified.
+    requested_extras: frozenset[NormalizedName] | None = None
 
 
 # Shorthands
@@ -84,7 +92,18 @@ def check_package_set(
             if name not in package_set:
                 missed = True
                 if req.marker is not None:
-                    missed = req.marker.evaluate({"extra": ""})
+                    extras = package_detail.requested_extras
+                    if extras is None and marker_references_extra(req.marker):
+                        # Already-installed package: whether this dependency
+                        # applies depends on which extras it was installed with,
+                        # which pip does not record. Skip it to avoid false "not
+                        # installed" reports for deps gated on (e.g.)
+                        # ``extra != "x"``.
+                        missed = False
+                    else:
+                        missed = evaluate_marker_with_extras(
+                            req.marker, extras or frozenset()
+                        )
                 if missed:
                     missing_deps.add((name, req))
                 continue
@@ -150,7 +169,15 @@ def _simulate_installation_of(
         abstract_dist = make_distribution_for_install_requirement(inst_req)
         dist = abstract_dist.get_metadata_distribution()
         name = dist.canonical_name
-        package_set[name] = PackageDetails(dist.version, list(dist.iter_dependencies()))
+        # We know exactly which extras this package is being installed with, so
+        # evaluate its dependencies against them (this makes extra-conditional
+        # deps, e.g. ``extra != "x"``, resolve correctly for the new install).
+        requested_extras = frozenset(canonicalize_name(e) for e in inst_req.extras)
+        package_set[name] = PackageDetails(
+            dist.version,
+            list(dist.iter_dependencies(requested_extras)),
+            requested_extras,
+        )
 
         installed.add(name)
 
