@@ -44,6 +44,7 @@ def install_given_reqs(
     use_user_site: bool,
     pycompile: bool,
     progress_bar: BarType,
+    script_interpreter: str | None = None,
 ) -> list[InstallationResult]:
     """
     Install everything in the given list.
@@ -88,6 +89,7 @@ def install_given_reqs(
                     warn_script_location=warn_script_location,
                     use_user_site=use_user_site,
                     pycompile=pycompile,
+                    script_interpreter=script_interpreter,
                 )
             except Exception:
                 # if install did not succeed, rollback previous uninstall

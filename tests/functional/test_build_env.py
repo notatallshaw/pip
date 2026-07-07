@@ -411,13 +411,7 @@ def test_build_env_can_still_access_python_tools_on_system_path(
     )
 
 
-@pytest.mark.parametrize(
-    "installer_method",
-    [
-        pytest.param("subprocess"),
-        pytest.param("inprocess", marks=pytest.mark.xfail(reason="not yet supported")),
-    ],
-)
+@pytest.mark.parametrize("installer_method", ["subprocess", "inprocess"])
 def test_build_env_console_scripts_use_venv_python(
     script: PipTestEnvironment, installer_method: Literal["subprocess", "inprocess"]
 ) -> None:
