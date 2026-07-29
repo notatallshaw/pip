@@ -574,6 +574,15 @@ class TestMessageAboutScriptsNotOnPATH:
         )
         assert retval is None
 
+    @pytest.mark.skipif(WINDOWS, reason="requires symlink support")
+    def test_PATH_check_symlinked_entry(self, tmp_path: Path) -> None:
+        scripts_dir = tmp_path / "bin"
+        scripts_dir.mkdir()
+        shim = tmp_path / "shim"
+        shim.symlink_to(scripts_dir)
+        retval = self._template(paths=[str(shim)], scripts=[str(scripts_dir / "foo")])
+        assert retval is None
+
     def test_missing_PATH_env_treated_as_empty_PATH_env(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
