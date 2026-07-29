@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
+import shutil
 import ssl
+import subprocess
 import sys
 import time
 from collections.abc import Callable, Iterator
@@ -17,6 +20,7 @@ from urllib.request import getproxies
 import pytest
 
 from pip._vendor import requests
+from pip._vendor.distro import distro as distro_impl
 from pip._vendor.requests.utils import select_proxy
 from pip._vendor.urllib3.connection import DummyConnection
 from pip._vendor.urllib3.connectionpool import HTTPSConnectionPool
@@ -33,6 +37,7 @@ from pip._internal.exceptions import (
     SSLVerificationError,
 )
 from pip._internal.models.link import Link
+from pip._internal.network import session as network_session
 from pip._internal.network.session import (
     HTTPAdapter,
     PipSession,
@@ -154,6 +159,79 @@ def test_user_agent__ci(
 def test_user_agent_user_data(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PIP_USER_AGENT_USER_DATA", "some_string")
     assert "some_string" in get_user_agent()
+
+
+def _fresh_distro(os_release: dict[str, str]) -> distro_impl.LinuxDistribution:
+    dist = distro_impl.LinuxDistribution.__new__(distro_impl.LinuxDistribution)
+    dist.root_dir = None
+    dist.etc_dir = distro_impl._UNIXCONFDIR
+    dist.usr_lib_dir = distro_impl._UNIXUSRLIBDIR
+    dist.os_release_file = ""
+    dist.distro_release_file = ""
+    dist.include_lsb = True
+    dist.include_uname = True
+    dist.include_oslevel = True
+    # Pre-seed the cached property so os-release data comes from the dict,
+    # not the filesystem.
+    dist.__dict__["_os_release_info"] = dict(os_release)
+    return dist
+
+
+def _ua_distro_data(
+    monkeypatch: pytest.MonkeyPatch, dist: distro_impl.LinuxDistribution
+) -> dict[str, Any]:
+    monkeypatch.setattr(sys, "platform", "linux")
+    # Keep libc detection out: probing it off-Linux can crash once the
+    # platform is faked, and on Linux it would vary the asserted dict.
+    monkeypatch.setattr(network_session, "libc_ver", lambda: ("", ""))
+    monkeypatch.setattr(distro_impl, "_distro", dist)
+    user_agent.cache_clear()
+    try:
+        ua = user_agent()
+    finally:
+        user_agent.cache_clear()
+    return cast("dict[str, Any]", json.loads(ua.split(" ", 1)[1])["distro"])
+
+
+def test_user_agent_distro_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Distinct values in every slot so any slot swap is caught.
+    dist = _fresh_distro(
+        {
+            "name": "TestOS",
+            "id": "testos",
+            "version": "99.9 (Ninetynine)",
+            "version_id": "1.2",
+            "codename": "testcode",
+        }
+    )
+    distro_info = _ua_distro_data(monkeypatch, dist)
+    assert distro_info == {"name": "TestOS", "version": "1.2", "id": "testcode"}
+
+
+def test_user_agent_distro_version_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Without VERSION_ID in os-release the full distro.version() chain runs.
+    def fake_version(pretty: bool = False, best: bool = False) -> str:
+        return "7.7"
+
+    dist = _fresh_distro({"name": "TestOS", "id": "testos", "codename": "testcode"})
+    monkeypatch.setattr(dist, "version", fake_version)
+    distro_info = _ua_distro_data(monkeypatch, dist)
+    assert distro_info["version"] == "7.7"
+
+
+def test_user_agent_no_subprocess_for_distro(monkeypatch: pytest.MonkeyPatch) -> None:
+    # With a complete os-release, computing the user agent must not shell out.
+    def forbidden(*args: object, **kwargs: object) -> bytes:
+        raise AssertionError(f"subprocess spawned: {args!r}")
+
+    # Keep the rustc probe out of the picture; it has its own subprocess call.
+    monkeypatch.setattr(shutil, "which", lambda cmd: None)
+    monkeypatch.setattr(subprocess, "check_output", forbidden)
+    dist = _fresh_distro(
+        {"name": "TestOS", "id": "testos", "version_id": "1.2", "codename": "testcode"}
+    )
+    distro_info = _ua_distro_data(monkeypatch, dist)
+    assert distro_info["version"] == "1.2"
 
 
 class TestPipSession:

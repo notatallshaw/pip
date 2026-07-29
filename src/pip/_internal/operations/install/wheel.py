@@ -438,6 +438,58 @@ class PipScriptMaker(ScriptMaker):
         return super().make(specification, options)
 
 
+_PARALLEL_COMPILE_MIN_FILES = 50
+
+
+def _compile_source_file(path: str) -> tuple[str, bool, str]:
+    with contextlib.redirect_stdout(StreamWrapper.from_stream(sys.stdout)) as stdout:
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore")
+            success = compileall.compile_file(path, force=True, quiet=True)
+    return path, bool(success), stdout.getvalue()
+
+
+def _compile_source_files(paths: list[str]) -> list[tuple[str, bool, str]]:
+    # Compiling is CPU-bound, so large wheels go to a pool of forked workers.
+    # Only fork is cheap enough (spawn and forkserver re-import pip in every
+    # worker), and forking is only reliably safe on Linux. 3.10.4 is the
+    # first version whose executor forks all workers before starting its
+    # internal threads (python/cpython#90622).
+    if (
+        sys.platform == "linux"
+        and sys.version_info >= (3, 10, 4)
+        and len(paths) >= _PARALLEL_COMPILE_MIN_FILES
+        and (os.cpu_count() or 1) > 1
+    ):
+        try:
+            import multiprocessing
+            from concurrent.futures import ProcessPoolExecutor
+            from concurrent.futures.process import BrokenProcessPool
+
+            workers = min(8, os.cpu_count() or 1)
+            with ProcessPoolExecutor(
+                max_workers=workers,
+                mp_context=multiprocessing.get_context("fork"),
+            ) as pool:
+                return list(
+                    pool.map(
+                        _compile_source_file,
+                        paths,
+                        chunksize=max(1, len(paths) // (4 * workers)),
+                    )
+                )
+        except (ImportError, NotImplementedError, OSError, DeprecationWarning):
+            # Platforms without working multiprocessing primitives (sem_open,
+            # /dev/shm) fail pool setup with one of the first three; fork's
+            # multi-threaded DeprecationWarning raises under -W error.
+            pass
+        except BrokenProcessPool:
+            # A worker died (e.g. killed by the OOM killer). force=True
+            # makes serially recompiling everything harmless.
+            pass
+    return [_compile_source_file(path) for path in paths]
+
+
 def _install_wheel(  # noqa: C901, PLR0915 function is too long
     name: str,
     wheel_zip: ZipFile,
@@ -630,21 +682,18 @@ def _install_wheel(  # noqa: C901, PLR0915 function is too long
 
     # Compile all of the pyc files for the installed files
     if pycompile:
-        with contextlib.redirect_stdout(
-            StreamWrapper.from_stream(sys.stdout)
-        ) as stdout:
-            with warnings.catch_warnings():
-                warnings.filterwarnings("ignore")
-                for path in pyc_source_file_paths():
-                    success = compileall.compile_file(path, force=True, quiet=True)
-                    if success:
-                        pyc_path = pyc_output_path(path)
-                        assert os.path.exists(pyc_path)
-                        pyc_record_path = cast(
-                            "RecordPath", pyc_path.replace(os.path.sep, "/")
-                        )
-                        record_installed(pyc_record_path, pyc_path)
-        logger.debug(stdout.getvalue())
+        output_chunks = []
+        for path, success, output in _compile_source_files(
+            list(pyc_source_file_paths())
+        ):
+            if output:
+                output_chunks.append(output)
+            if success:
+                pyc_path = pyc_output_path(path)
+                assert os.path.exists(pyc_path)
+                pyc_record_path = cast("RecordPath", pyc_path.replace(os.path.sep, "/"))
+                record_installed(pyc_record_path, pyc_path)
+        logger.debug("".join(output_chunks))
 
     maker = PipScriptMaker(None, scheme.scripts)
 

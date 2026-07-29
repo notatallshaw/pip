@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import logging
 import os
 import pathlib
 import sys
@@ -740,3 +741,122 @@ def test_raise_for_invalid_entrypoint_rejects_other_drive() -> None:
     # check must not raise on mismatched drives.
     with pytest.raises(InstallationError, match="outside the scripts directory"):
         wheel._raise_for_invalid_entrypoint("D:\\outside = simple:main", "C:\\env\\bin")
+
+
+_real_compile_source_file = wheel._compile_source_file
+
+
+def _spy_compile_source_file(path: str) -> tuple[str, bool, str]:
+    with open(os.environ["SPY_PID_FILE"], "a") as f:
+        f.write(f"{os.getpid()}\n")
+    return _real_compile_source_file(path)
+
+
+class TestParallelByteCompile:
+    n_files = 6
+
+    @pytest.fixture
+    def spy_pids(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        pid_file = tmp_path / "pids.txt"
+        monkeypatch.setenv("SPY_PID_FILE", str(pid_file))
+        monkeypatch.setattr(wheel, "_compile_source_file", _spy_compile_source_file)
+        monkeypatch.setattr(wheel, "_PARALLEL_COMPILE_MIN_FILES", 2)
+        return pid_file
+
+    def _install(self, tmp_path: Path, bad_file: bool = False) -> None:
+        files: dict[str, str | bytes] = {
+            f"pkg/mod{i}.py": f"x = {i}\n" for i in range(self.n_files - 1)
+        }
+        files["pkg/__init__.py"] = ""
+        if bad_file:
+            files["pkg/bad.py"] = "def broken(:\n"
+        wheel_path = make_wheel("pkg", "1.0", extra_files=files).save_to_dir(
+            str(tmp_path)
+        )
+        scheme = Scheme(
+            purelib=str(tmp_path / "lib"),
+            platlib=str(tmp_path / "lib"),
+            headers=str(tmp_path / "headers"),
+            scripts=str(tmp_path / "bin"),
+            data=str(tmp_path / "data"),
+        )
+        wheel.install_wheel("pkg", wheel_path, scheme=scheme, req_description="pkg")
+
+    def _recorded_pycs(self, tmp_path: Path) -> list[str]:
+        record = tmp_path / "lib" / "pkg-1.0.dist-info" / "RECORD"
+        with open(record) as f:
+            pycs = sorted(r[0] for r in csv.reader(f) if r and r[0].endswith(".pyc"))
+        for rel in pycs:
+            assert (tmp_path / "lib" / rel).exists(), rel
+        return pycs
+
+    def _pids(self, pid_file: Path) -> set[int]:
+        return {int(line) for line in pid_file.read_text().splitlines()}
+
+    @pytest.mark.skipif(
+        sys.platform != "linux" or (os.cpu_count() or 1) < 2,
+        reason="parallel compilation requires Linux and >1 CPU",
+    )
+    def test_parallel_path_records_pycs(self, tmp_path: Path, spy_pids: Path) -> None:
+        self._install(tmp_path)
+        assert len(self._recorded_pycs(tmp_path)) == self.n_files
+        pids = self._pids(spy_pids)
+        assert pids
+        assert os.getpid() not in pids
+
+    def test_serial_off_linux(
+        self, tmp_path: Path, spy_pids: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(sys, "platform", "win32")
+        self._install(tmp_path)
+        assert len(self._recorded_pycs(tmp_path)) == self.n_files
+        assert self._pids(spy_pids) == {os.getpid()}
+
+    @pytest.mark.skipif(
+        sys.platform != "linux" or (os.cpu_count() or 1) < 2,
+        reason="parallel compilation requires Linux and >1 CPU",
+    )
+    def test_serial_fallback_on_broken_pool(
+        self, tmp_path: Path, spy_pids: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import concurrent.futures
+        from concurrent.futures.process import BrokenProcessPool
+
+        class BrokenPoolExecutor:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                pass
+
+            def __enter__(self) -> BrokenPoolExecutor:
+                return self
+
+            def __exit__(self, *exc: object) -> None:
+                pass
+
+            def map(self, *args: object, **kwargs: object) -> None:
+                raise BrokenProcessPool
+
+        monkeypatch.setattr(
+            concurrent.futures, "ProcessPoolExecutor", BrokenPoolExecutor
+        )
+        self._install(tmp_path)
+        assert len(self._recorded_pycs(tmp_path)) == self.n_files
+        assert self._pids(spy_pids) == {os.getpid()}
+
+    @pytest.mark.skipif(
+        sys.platform != "linux" or (os.cpu_count() or 1) < 2,
+        reason="parallel compilation requires Linux and >1 CPU",
+    )
+    def test_parallel_syntax_error_not_recorded(
+        self, tmp_path: Path, spy_pids: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level(logging.DEBUG):
+            self._install(tmp_path, bad_file=True)
+        pycs = self._recorded_pycs(tmp_path)
+        assert len(pycs) == self.n_files
+        assert not any("bad" in p for p in pycs)
+        debug_output = "".join(
+            rec.message
+            for rec in caplog.records
+            if rec.name == "pip._internal.operations.install.wheel"
+        )
+        assert "SyntaxError" in debug_output
