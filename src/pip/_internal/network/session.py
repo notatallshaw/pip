@@ -112,7 +112,11 @@ def user_agent() -> str:
     if sys.platform.startswith("linux"):
         from pip._vendor import distro
 
-        linux_distribution = distro.name(), distro.version(), distro.codename()
+        # version_id is distro.version()'s first-priority source; reading it
+        # directly avoids the lsb_release and uname subprocesses that
+        # version() spawns unconditionally.
+        distro_version = distro.os_release_attr("version_id") or distro.version()
+        linux_distribution = distro.name(), distro_version, distro.codename()
         distro_infos: dict[str, Any] = dict(
             filter(
                 lambda x: x[1],
