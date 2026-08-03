@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sys
@@ -24,6 +25,7 @@ from pip._internal.build_env.base import Prefix
 from pip._internal.build_env.virtual import get_system_sitepackages
 from pip._internal.cache import WheelCache
 from pip._internal.index.package_finder import PackageFinder
+from pip._internal.network.auth import BUILD_ENV_CREDENTIALS_ENV_VAR
 from pip._internal.network.session import PipSession
 from pip._internal.operations.build.build_tracker import get_build_tracker
 
@@ -589,3 +591,67 @@ class TestChildEnvironment:
 
         extra_environ = mock_call_subprocess.call_args.kwargs["extra_environ"]
         assert extra_environ["PYTHONPATH"] == ""
+
+
+class TestCredentialPassthrough:
+    """A build dependency can come from an index needing authentication, so the
+    pip subprocess is handed the credentials the parent has resolved."""
+
+    INDEX_URL = "https://private.example.com/simple"
+
+    def install(self, session: PipSession, prefix: Prefix) -> dict[str, str]:
+        installer = SubprocessBuildEnvironmentInstaller(
+            make_test_finder(index_urls=[self.INDEX_URL], session=session)
+        )
+        with mock.patch(
+            "pip._internal.build_env.installer.call_subprocess"
+        ) as call_subprocess:
+            installer.install(
+                requirements=["setuptools"],
+                prefix=prefix,
+                kind="build dependencies",
+                for_req=None,
+            )
+        environ: dict[str, str] = call_subprocess.call_args.kwargs["extra_environ"]
+        return environ
+
+    def test_install_forwards_known_credentials(self, tmp_path: Path) -> None:
+        session = PipSession()
+        session.auth.passwords["private.example.com"] = ("user", "hunter2")
+
+        environ = self.install(session, Prefix(str(tmp_path)))
+
+        assert json.loads(environ[BUILD_ENV_CREDENTIALS_ENV_VAR]) == {
+            "private.example.com": ["user", "hunter2"]
+        }
+
+    def test_install_omits_credentials_when_none_are_known(
+        self, tmp_path: Path
+    ) -> None:
+        environ = self.install(PipSession(), Prefix(str(tmp_path)))
+
+        assert BUILD_ENV_CREDENTIALS_ENV_VAR not in environ
+
+    def test_install_omits_credentials_for_other_hosts(self, tmp_path: Path) -> None:
+        session = PipSession()
+        session.auth.passwords["unrelated.example.com"] = ("user", "hunter2")
+
+        environ = self.install(session, Prefix(str(tmp_path)))
+
+        assert BUILD_ENV_CREDENTIALS_ENV_VAR not in environ
+
+    @pytest.mark.parametrize(
+        "venv_executable, allow_keyring", [(None, False), (sys.executable, True)]
+    )
+    def test_install_asks_keyring_only_for_an_unreachable_interpreter(
+        self, tmp_path: Path, venv_executable: str | None, allow_keyring: bool
+    ) -> None:
+        session = PipSession()
+        prefix = Prefix(str(tmp_path), venv_executable=venv_executable)
+
+        with mock.patch.object(
+            session.auth, "credentials_for", return_value={}
+        ) as credentials_for:
+            self.install(session, prefix)
+
+        assert credentials_for.call_args.kwargs["allow_keyring"] is allow_keyring
