@@ -525,3 +525,67 @@ class TestProxyPassthrough:
 
         args = mock_call_subprocess.call_args.args[0]
         assert "--proxy" not in args
+
+
+class TestChildEnvironment:
+    """The build environment isolates the build backend, and pip is not the
+    backend, so the pip subprocess keeps the environment pip was invoked with."""
+
+    @mock.patch("pip._internal.build_env.installer.call_subprocess")
+    def test_virtual_isolation_keeps_invoking_paths(
+        self,
+        mock_call_subprocess: mock.Mock,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        monkeypatch.setenv("PYTHONPATH", os.fspath(tmp_path))
+        monkeypatch.delenv("PYTHONNOUSERSITE", raising=False)
+        installer = SubprocessBuildEnvironmentInstaller(make_test_finder())
+        build_env = VirtualBuildEnvironment(installer)
+
+        with build_env:
+            assert os.environ["PYTHONPATH"] != os.fspath(tmp_path)
+            assert os.environ["PYTHONNOUSERSITE"] == "1"
+            build_env.install_requirements(
+                ["setuptools"], "normal", kind="build dependencies"
+            )
+
+        extra_environ = mock_call_subprocess.call_args.kwargs["extra_environ"]
+        assert extra_environ["PYTHONPATH"] == os.fspath(tmp_path)
+        assert extra_environ["PYTHONNOUSERSITE"] == ""
+
+    @mock.patch("pip._internal.build_env.installer.call_subprocess")
+    def test_virtual_isolation_keeps_paths_unset(
+        self, mock_call_subprocess: mock.Mock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("PYTHONPATH", raising=False)
+        monkeypatch.delenv("PYTHONNOUSERSITE", raising=False)
+        installer = SubprocessBuildEnvironmentInstaller(make_test_finder())
+        build_env = VirtualBuildEnvironment(installer)
+
+        with build_env:
+            build_env.install_requirements(
+                ["setuptools"], "normal", kind="build dependencies"
+            )
+
+        extra_environ = mock_call_subprocess.call_args.kwargs["extra_environ"]
+        assert extra_environ["PYTHONPATH"] == ""
+        assert extra_environ["PYTHONNOUSERSITE"] == ""
+
+    @mock.patch("pip._internal.build_env.installer.call_subprocess")
+    def test_venv_isolation_drops_invoking_pythonpath(
+        self,
+        mock_call_subprocess: mock.Mock,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        monkeypatch.setenv("PYTHONPATH", os.fspath(tmp_path))
+        installer = SubprocessBuildEnvironmentInstaller(make_test_finder())
+        build_env = VenvBuildEnvironment(installer)
+
+        build_env.install_requirements(
+            ["setuptools"], "normal", kind="build dependencies"
+        )
+
+        extra_environ = mock_call_subprocess.call_args.kwargs["extra_environ"]
+        assert extra_environ["PYTHONPATH"] == ""

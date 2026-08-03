@@ -140,6 +140,11 @@ class SubprocessBuildEnvironmentInstaller:
         args.append("--")
         args.extend(requirements)
 
+        extra_environ = {
+            "_PIP_IN_BUILD_IGNORE_CONSTRAINTS": "1",
+            **prefix.child_environ,
+        }
+
         identify_requirement = (
             f" for {for_req.name}" if for_req and for_req.name else ""
         )
@@ -148,7 +153,7 @@ class SubprocessBuildEnvironmentInstaller:
                 args,
                 command_desc=f"installing {kind}{identify_requirement}",
                 spinner=spinner,
-                extra_environ={"_PIP_IN_BUILD_IGNORE_CONSTRAINTS": "1"},
+                extra_environ=extra_environ,
             )
 
 

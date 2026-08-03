@@ -1,0 +1,2 @@
+Restore the use of ``keyring`` credentials when installing build dependencies
+from an authenticated index.

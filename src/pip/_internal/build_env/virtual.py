@@ -37,6 +37,7 @@ class VirtualBuildEnvironment(BuildEnvironment):
     def __init__(self, installer: BuildEnvironmentInstaller) -> None:
         self.python_executable = sys.executable
         self.installer = installer
+        self._child_environ: dict[str, str] = {}
         temp_dir = TempDirectory(kind=tempdir_kinds.BUILD_ENV, globally_managed=True)
 
         self._prefixes = OrderedDict(
@@ -111,12 +112,22 @@ class VirtualBuildEnvironment(BuildEnvironment):
             }
         )
 
+        # Only the build backend is meant to run under that isolation. pip installs
+        # into an explicit prefix with --ignore-installed, so it keeps the invoking
+        # interpreter's paths, and with them anything it needs to import, such as
+        # the user's keyring backend. An empty value reads as unset.
+        self._child_environ = {
+            name: self._save_env[name] or ""
+            for name in ("PYTHONPATH", "PYTHONNOUSERSITE")
+        }
+
     def __exit__(
         self,
         exc_type: type[BaseException] | None,
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> None:
+        self._child_environ = {}
         for varname, old_value in self._save_env.items():
             if old_value is None:
                 os.environ.pop(varname, None)
@@ -136,4 +147,5 @@ class VirtualBuildEnvironment(BuildEnvironment):
         prefix.setup = True
         if not requirements:
             return
+        prefix.child_environ = self._child_environ
         self.installer.install(requirements, prefix, kind=kind, for_req=for_req)

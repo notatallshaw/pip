@@ -142,4 +142,8 @@ class VenvBuildEnvironment(BuildEnvironment):
         # TODO: when better support for installing to arbitrary Python environments
         # is added, replace this prefix hack with that.
         prefix = Prefix(self._env_path, venv_executable=self.python_executable)
+        # This install gets no --ignore-installed, so a distribution reachable
+        # through an inherited PYTHONPATH would pass as an installed build
+        # dependency. An empty value reads as unset.
+        prefix.child_environ = {"PYTHONPATH": ""}
         self._installer.install(requirements, prefix, kind=kind, for_req=for_req)
