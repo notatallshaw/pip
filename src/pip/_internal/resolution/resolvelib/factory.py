@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import contextlib
 import copy
 import functools
 import logging
@@ -13,7 +12,6 @@ from typing import (
     cast,
 )
 
-from pip._vendor.packaging.requirements import InvalidRequirement
 from pip._vendor.packaging.specifiers import SpecifierSet
 from pip._vendor.packaging.utils import NormalizedName, canonicalize_name
 from pip._vendor.packaging.version import InvalidVersion, Version
@@ -46,10 +44,9 @@ from pip._internal.req.req_install import (
 from pip._internal.resolution.base import InstallRequirementProvider
 from pip._internal.utils.compatibility_tags import get_supported
 from pip._internal.utils.hashes import Hashes
-from pip._internal.utils.packaging import get_requirement
 from pip._internal.utils.virtualenv import running_under_virtualenv
 
-from .base import Candidate, Constraint, Requirement
+from .base import Candidate, Constraint, Requirement, split_name
 from .candidates import (
     AlreadyInstalledCandidate,
     BaseCandidate,
@@ -388,13 +385,7 @@ class Factory:
         This creates "fake" InstallRequirement objects that are basically clones
         of what "should" be the template, but with original_link set to link.
         """
-        extras: frozenset[str] = frozenset()
-        base_identifier = identifier
-        with contextlib.suppress(InvalidRequirement):
-            parsed_requirement = get_requirement(identifier)
-            if parsed_requirement.name != identifier:
-                base_identifier = canonicalize_name(parsed_requirement.name)
-                extras = frozenset(parsed_requirement.extras)
+        base_identifier, extras = split_name(identifier)
 
         for link in constraint.links:
             self._fail_if_link_is_unsupported_wheel(link)
@@ -432,19 +423,16 @@ class Factory:
 
         # If the current identifier contains extras, add requires and explicit
         # candidates from entries from extra-less identifier.
-        with contextlib.suppress(InvalidRequirement):
-            parsed_requirement = get_requirement(identifier)
-            if parsed_requirement.name != identifier:
-                explicit_candidates.update(
-                    self._iter_explicit_candidates_from_base(
-                        requirements.get(parsed_requirement.name, ()),
-                        frozenset(parsed_requirement.extras),
-                    ),
-                )
-                for req in requirements.get(parsed_requirement.name, []):
-                    _, ireq = req.get_candidate_lookup()
-                    if ireq is not None:
-                        ireqs.append(ireq)
+        base_name, extras = split_name(identifier)
+        if extras:
+            base_requirements = list(requirements.get(base_name, ()))
+            explicit_candidates.update(
+                self._iter_explicit_candidates_from_base(base_requirements, extras),
+            )
+            for req in base_requirements:
+                _, ireq = req.get_candidate_lookup()
+                if ireq is not None:
+                    ireqs.append(ireq)
 
         # Add explicit candidates from constraints. We only do this if there are
         # known ireqs, which represent requirements not already explicit. If

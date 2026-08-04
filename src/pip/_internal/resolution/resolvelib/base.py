@@ -22,6 +22,19 @@ def format_name(project: NormalizedName, extras: frozenset[NormalizedName]) -> s
     return f"{project}[{extras_expr}]"
 
 
+def split_name(identifier: str) -> tuple[str, frozenset[str]]:
+    """Split a resolver identifier back into a project name and extras.
+
+    The inverse of format_name. pip's resolver only produces normalized PEP 503
+    names, normalized names plus extras, and the Requires-Python identifier, so
+    anything without a bracket is a bare name and comes back with no extras.
+    """
+    project, open_bracket, extras = identifier.partition("[")
+    if not open_bracket:
+        return identifier, frozenset()
+    return project, frozenset(e for e in extras.rstrip("]").split(",") if e)
+
+
 @dataclass(frozen=True)
 class Constraint:
     specifier: SpecifierSet
