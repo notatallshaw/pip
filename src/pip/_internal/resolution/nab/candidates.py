@@ -1,0 +1,390 @@
+"""The candidate universe pip hands the nab resolver.
+
+Under this arm pip owns the whole index layer and nab owns only the search,
+so the adapter supplies a universe of versions rather than letting nab list
+anything. Three properties have to hold and each one is load-bearing:
+
+1. It contains every version that could be selected. nab's widening records
+   one set of dependencies for a whole range of versions, and that is only
+   sound when no selectable version inside the range is missing from the
+   universe. pip's ``find_all_candidates`` qualifies because
+   ``RequirementCommand._build_package_finder`` sets ``allow_yanked=True``
+   unconditionally, so ``LinkEvaluator`` never removes a yanked file and
+   everything else it removes is genuinely unselectable.
+
+2. It is ordered by version. ``CandidateEvaluator._sort_key`` leads with
+   ``has_allowed_hash`` and ``yank_value``, so pip's own ranking is not
+   version-monotonic and cannot be used as an ordering over versions. The
+   ranking is still what decides which *file* represents a version, so the
+   universe is built by ranking first and then grouping by version.
+
+3. Yanked versions are carried, flagged, never dropped here. PEP 592 makes a
+   yanked version selectable exactly when the requirement pins it, and
+   whether it is pinned is not known until the requirements have been merged.
+   Dropping a yanked version at supply time turns ``pip install foo==1.0``
+   into a resolution failure when 1.0 is yanked, which pip resolves today.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+from pip._vendor.packaging.utils import canonicalize_name
+from pip._vendor.packaging.version import InvalidVersion
+
+from pip._internal.exceptions import (
+    InvalidInstalledPackage,
+    MetadataInconsistent,
+    MetadataInvalid,
+)
+from pip._internal.utils.hashes import Hashes
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
+
+    from pip._vendor.packaging.specifiers import SpecifierSet
+    from pip._vendor.packaging.utils import NormalizedName
+    from pip._vendor.packaging.version import Version
+
+    from pip._internal.index.package_finder import PackageFinder
+    from pip._internal.metadata import BaseDistribution
+    from pip._internal.models.candidate import InstallationCandidate
+    from pip._internal.req.req_install import InstallRequirement
+    from pip._internal.resolution.base import InstallRequirementProvider
+    from pip._internal.resolution.nab.inputs import ResolveInputs
+    from pip._internal.resolution.resolvelib.base import Candidate
+    from pip._internal.resolution.resolvelib.factory import Factory
+
+logger = logging.getLogger(__name__)
+
+
+class CandidateUnavailable(Exception):
+    """This version exists but its metadata cannot be used.
+
+    Raised by :meth:`PipHostIndex.metadata`. The engine seam turns it into
+    the rejection nab already understands, which drops the version and keeps
+    searching rather than failing the resolve.
+    """
+
+    def __init__(self, project_name: str, version: Version, reason: str) -> None:
+        super().__init__(f"{project_name} {version}: {reason}")
+        self.project_name = project_name
+        self.version = version
+        self.reason = reason
+
+
+@dataclass(frozen=True)
+class HostCandidate:
+    """One selectable version of one project, as pip sees it."""
+
+    project_name: NormalizedName
+    version: Version
+    yanked: bool
+    # Exactly one of these is set. An installed distribution has no artifact,
+    # so it can never route through a download.
+    index_candidate: InstallationCandidate | None = None
+    installed_dist: BaseDistribution | None = None
+
+    @property
+    def is_installed(self) -> bool:
+        return self.installed_dist is not None
+
+
+@dataclass(frozen=True)
+class CandidateMetadata:
+    """The metadata a resolver needs about one version.
+
+    ``raw_dependencies`` are unevaluated PEP 508 strings, including the
+    ``; extra == "x"`` lines. ``BaseDistribution.iter_dependencies`` cannot be
+    used to produce them: it evaluates every marker against the live
+    environment with ``extra`` bound to the empty string, which drops every
+    extra-gated line and pre-consumes every environment marker.
+    """
+
+    project_name: NormalizedName
+    version: Version
+    requires_python: SpecifierSet | None
+    raw_dependencies: tuple[str, ...]
+    provided_extras: frozenset[NormalizedName]
+
+
+class PipHostIndex:
+    """Answers "which versions exist" and "what does this version need".
+
+    Both answers come from pip's own machinery, so format control, wheel tag
+    compatibility, Requires-Python, ``--platform``, ``--prefer-binary``,
+    ``--uploaded-prior-to``, hash intersection, the built wheel cache,
+    build isolation, direct URLs, VCS and ``--find-links`` all keep working
+    without the adapter knowing they exist.
+    """
+
+    def __init__(
+        self,
+        *,
+        factory: Factory,
+        finder: PackageFinder,
+        inputs: ResolveInputs,
+        upgrade_strategy: str,
+        make_install_req: InstallRequirementProvider,
+    ) -> None:
+        self._factory = factory
+        self._finder = finder
+        self._inputs = inputs
+        self._upgrade_strategy = upgrade_strategy
+        self._make_install_req = make_install_req
+        self._universe: dict[NormalizedName, Sequence[HostCandidate]] = {}
+        self._templates: dict[NormalizedName, InstallRequirement] = {}
+        self._pip_candidates: dict[
+            tuple[NormalizedName, Version, frozenset[NormalizedName]], Candidate
+        ] = {}
+
+    def candidates(self, project_name: NormalizedName) -> Sequence[HostCandidate]:
+        """Every selectable version of ``project_name``, oldest first.
+
+        One entry per version. Any ``InstallationError`` raised out of the
+        finder propagates: ``--uploaded-prior-to`` against an index that
+        publishes no upload times is an abort, not an empty result, and
+        swallowing it here would silently turn it into "no such package".
+        """
+        cached = self._universe.get(project_name)
+        if cached is not None:
+            return cached
+        universe = self._build_universe(project_name)
+        self._universe[project_name] = universe
+        return universe
+
+    def preferred_version(self, project_name: NormalizedName) -> Version | None:
+        """The installed version, when this package must not be upgraded.
+
+        pip expresses "prefer what is installed" by ordering candidates
+        (``_iter_built_with_prepended``). Under this arm the universe is
+        ordered by version, so the preference is passed to the engine
+        separately instead.
+        """
+        if self._eligible_for_upgrade(project_name):
+            return None
+        dist = self._installed_dist(project_name)
+        if dist is None:
+            return None
+        return self._installed_version(dist)
+
+    def metadata(self, candidate: HostCandidate) -> CandidateMetadata:
+        """Prepare ``candidate`` and read its metadata.
+
+        This is where pip downloads, builds and validates, exactly as it does
+        for the resolvelib variant, so a candidate probe under this arm costs
+        what a candidate probe costs pip today.
+        """
+        pip_candidate = self.pip_candidate(candidate, frozenset())
+        dist = pip_candidate.dist  # type: ignore[attr-defined]
+        return CandidateMetadata(
+            project_name=canonicalize_name(dist.raw_name),
+            version=dist.version,
+            requires_python=dist.requires_python or None,
+            raw_dependencies=tuple(dist.iter_raw_dependencies()),
+            provided_extras=frozenset(dist.iter_provided_extras()),
+        )
+
+    def pip_candidate(
+        self, candidate: HostCandidate, extras: frozenset[NormalizedName]
+    ) -> Candidate:
+        """The pip ``Candidate`` for a chosen version, built at most once.
+
+        The result adapter needs this object: it carries
+        ``get_install_requirement()``, ``source_link``, ``is_editable`` and
+        ``download_info``, which is how ``--report`` and ``pip lock`` are
+        answered without a second fetch.
+        """
+        key = (candidate.project_name, candidate.version, extras)
+        cached = self._pip_candidates.get(key)
+        if cached is not None:
+            return cached
+
+        template = self._template_for(candidate.project_name)
+        built: Candidate | None
+        try:
+            if candidate.installed_dist is not None:
+                built = self._factory._make_candidate_from_dist(
+                    dist=candidate.installed_dist,
+                    extras=frozenset(extras),
+                    template=template,
+                )
+            else:
+                assert candidate.index_candidate is not None
+                built = self._factory._make_candidate_from_link(
+                    link=candidate.index_candidate.link,
+                    extras=frozenset(extras),
+                    template=template,
+                    name=candidate.project_name,
+                    version=candidate.version,
+                )
+        except (MetadataInconsistent, MetadataInvalid) as exc:
+            raise CandidateUnavailable(
+                candidate.project_name, candidate.version, str(exc)
+            ) from exc
+        if built is None:
+            raise CandidateUnavailable(
+                candidate.project_name,
+                candidate.version,
+                "the distribution could not be prepared",
+            )
+        self._pip_candidates[key] = built
+        return built
+
+    def hashes_for(self, project_name: NormalizedName) -> Hashes:
+        """The hash allowlist the command line puts on ``project_name``."""
+        hashes = Hashes()
+        for requirement in self._inputs.requirements:
+            if requirement.project_name == project_name:
+                hashes &= requirement.ireq.hashes(trust_internet=False)
+        constraint = self._inputs.constraints.get(project_name)
+        if constraint is not None:
+            hashes &= constraint.hashes
+        return hashes
+
+    def _build_universe(self, project_name: NormalizedName) -> Sequence[HostCandidate]:
+        explicit = self._inputs.explicit.get(project_name)
+        if explicit is not None:
+            return self._explicit_universe(project_name, explicit)
+
+        evaluator = self._finder.make_candidate_evaluator(
+            project_name=project_name,
+            hashes=self.hashes_for(project_name),
+        )
+        ranked = evaluator.rank_candidates(
+            self._finder.find_all_candidates(project_name)
+        )
+
+        # ``ranked`` is ascending by pip's preference, so the last entry for a
+        # version is the file pip would pick for that version. Grouping this
+        # way keeps pip's file choice while making the result version-ordered.
+        best_by_version: dict[Version, InstallationCandidate] = {}
+        for index_candidate in ranked:
+            best_by_version[index_candidate.version] = index_candidate
+
+        universe = [
+            HostCandidate(
+                project_name=project_name,
+                version=version,
+                yanked=index_candidate.link.is_yanked,
+                index_candidate=index_candidate,
+            )
+            for version, index_candidate in best_by_version.items()
+        ]
+
+        installed = self._installed_candidate(project_name)
+        if installed is not None:
+            # An installed version replaces the index entry for the same
+            # version: pip's merge iterators yield the installed candidate
+            # instead of building the index one.
+            universe = [
+                entry for entry in universe if entry.version != installed.version
+            ]
+            universe.append(installed)
+
+        universe.sort(key=lambda entry: entry.version)
+        return tuple(universe)
+
+    def _explicit_universe(
+        self, project_name: NormalizedName, ireq: InstallRequirement
+    ) -> Sequence[HostCandidate]:
+        """A universe of one, for a URL, VCS, path or editable requirement.
+
+        pip already behaves this way: the moment any explicit candidate
+        exists, ``Factory.find_candidates`` skips the finder entirely and
+        returns only the explicit set.
+        """
+        assert ireq.link is not None
+        self._factory._fail_if_link_is_unsupported_wheel(ireq.link)
+        self._templates.setdefault(project_name, ireq)
+        candidate = self._factory._make_base_candidate_from_link(
+            ireq.link,
+            template=ireq,
+            name=project_name,
+            version=None,
+        )
+        if candidate is None:
+            # An unnamed URL fails eagerly; a named one becomes unsatisfiable
+            # so the search can back out of it. Root requirements are named by
+            # the time they get here, so this is the second case.
+            return ()
+        return (
+            HostCandidate(
+                project_name=project_name,
+                version=candidate.version,
+                yanked=False,
+                index_candidate=None,
+            ),
+        )
+
+    def _installed_candidate(
+        self, project_name: NormalizedName
+    ) -> HostCandidate | None:
+        dist = self._installed_dist(project_name)
+        if dist is None:
+            return None
+        return HostCandidate(
+            project_name=project_name,
+            version=self._installed_version(dist),
+            yanked=False,
+            installed_dist=dist,
+        )
+
+    def _installed_dist(self, project_name: NormalizedName) -> BaseDistribution | None:
+        # --force-reinstall means take the index version, so pretend nothing
+        # is installed.
+        if self._factory.force_reinstall:
+            return None
+        return self._factory._installed_dists.get(project_name)
+
+    @staticmethod
+    def _installed_version(dist: BaseDistribution) -> Version:
+        try:
+            return dist.version
+        except InvalidVersion as exc:
+            raise InvalidInstalledPackage(dist=dist, invalid_exc=exc) from exc
+
+    def _eligible_for_upgrade(self, project_name: NormalizedName) -> bool:
+        """Are upgrades allowed for this project?
+
+        Same rule as ``PipProvider.find_matches``: eager upgrades everything,
+        only-if-needed upgrades what the user named, to-satisfy-only upgrades
+        nothing.
+        """
+        if self._upgrade_strategy == "eager":
+            return True
+        if self._upgrade_strategy == "only-if-needed":
+            return any(
+                canonicalize_name(key.partition("[")[0]) == project_name
+                for key in self._inputs.user_requested
+            )
+        return False
+
+    def _template_for(self, project_name: NormalizedName) -> InstallRequirement:
+        """The ireq pip's candidate machinery uses as a template.
+
+        pip takes the first requirement that mentions the project. A package
+        reached only transitively has no root ireq, so one is synthesized the
+        way ``Factory.make_requirements_from_spec`` does.
+        """
+        cached = self._templates.get(project_name)
+        if cached is not None:
+            return cached
+        for requirement in self._inputs.requirements:
+            if requirement.project_name == project_name:
+                self._templates[project_name] = requirement.ireq
+                return requirement.ireq
+        template = self._make_install_req(project_name, None)
+        self._templates[project_name] = template
+        return template
+
+    def preferences(self) -> Mapping[str, Version]:
+        """Versions the engine should try first, keyed by project name."""
+        preferences: dict[str, Version] = {}
+        for project_name in self._universe:
+            version = self.preferred_version(project_name)
+            if version is not None:
+                preferences[project_name] = version
+        return preferences

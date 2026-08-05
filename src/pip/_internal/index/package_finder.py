@@ -513,6 +513,41 @@ class CandidateEvaluator:
 
         return sorted(filtered_applicable_candidates, key=self._sort_key)
 
+    def rank_candidates(
+        self,
+        candidates: list[InstallationCandidate],
+    ) -> list[InstallationCandidate]:
+        """Rank candidates without applying a version specifier.
+
+        Same steps as :meth:`get_applicable_candidates` except that no
+        specifier is applied, so PEP 440's "an empty specifier hides
+        prereleases" default cannot fire. Release control is consulted here
+        directly instead of riding on the specifier: ``allows_prereleases``
+        returning False drops prereleases, and True or None keeps everything,
+        because None means "infer from the specifier" and the caller owns the
+        specifier.
+
+        This exists for a resolver that does its own version selection and so
+        must never let a specifier reach pip's candidate path.
+        """
+        if self._release_control is not None:
+            allow_prereleases = self._release_control.allows_prereleases(
+                canonicalize_name(self._project_name)
+            )
+        else:
+            allow_prereleases = None
+
+        if allow_prereleases is False:
+            candidates = [c for c in candidates if not c.version.is_prerelease]
+
+        filtered_candidates = filter_unallowed_hashes(
+            candidates=candidates,
+            hashes=self._hashes,
+            project_name=self._project_name,
+        )
+
+        return sorted(filtered_candidates, key=self._sort_key)
+
     def _sort_key(self, candidate: InstallationCandidate) -> CandidateSortingKey:
         """
         Function to pass as the `key` argument to a call to sorted() to sort

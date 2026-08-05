@@ -1,8 +1,9 @@
 """End to end checks that --use-feature=nab-resolver selects the nab variant.
 
-The nab variant is plumbing only for now, so a run that reaches it stops with
-a NotImplementedError. These tests assert that it is reached when the flag is
-passed and that the same command without the flag is untouched.
+The pip side of the nab variant is built, but nab itself is not vendored, so
+a run that reaches the engine seam stops with a NotImplementedError. These
+tests assert that the seam is reached when the flag is passed and that the
+same command without the flag is untouched.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ import pytest
 
 from tests.lib import PipTestEnvironment, TestData
 
-NOT_IMPLEMENTED = "The nab resolver is not implemented yet"
+NOT_IMPLEMENTED = "nab is not vendored into pip"
 
 
 @pytest.mark.parametrize("command", ["download", "wheel", "install"])
