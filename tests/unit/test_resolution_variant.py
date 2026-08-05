@@ -139,7 +139,7 @@ class TestMakeResolver:
         assert isinstance(resolver, pip._internal.resolution.nab.resolver.Resolver)
 
 
-class TestNabResolverIsAPlaceholder:
+class TestNabResolverStopsAtTheEngineSeam:
     def make_resolver(self) -> pip._internal.resolution.nab.resolver.Resolver:
         return pip._internal.resolution.nab.resolver.Resolver(
             preparer=cast(Any, mock.Mock()),
@@ -156,11 +156,11 @@ class TestNabResolverIsAPlaceholder:
         )
 
     def test_resolve_names_what_is_missing(self) -> None:
-        with pytest.raises(NotImplementedError, match="not implemented yet"):
+        with pytest.raises(NotImplementedError, match="nab is not vendored into pip"):
             self.make_resolver().resolve([], check_supported_wheels=True)
 
-    def test_installation_order_names_what_is_missing(self) -> None:
-        with pytest.raises(NotImplementedError, match="not implemented yet"):
+    def test_installation_order_requires_a_solve_first(self) -> None:
+        with pytest.raises(AssertionError, match="must call resolve"):
             self.make_resolver().get_installation_order(cast(Any, mock.Mock()))
 
 
