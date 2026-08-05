@@ -149,8 +149,17 @@ class RequirementCommand(IndexGroupCommand):
     @staticmethod
     def determine_resolver_variant(options: Values) -> str:
         """Determines which resolver should be used, based on the given options."""
-        if "legacy-resolver" in options.deprecated_features_enabled:
+        legacy = "legacy-resolver" in options.deprecated_features_enabled
+        nab = "nab-resolver" in options.features_enabled
+        if legacy and nab:
+            raise CommandError(
+                "Cannot use '--use-deprecated legacy-resolver' together with "
+                "'--use-feature nab-resolver'; they select different resolvers."
+            )
+        if legacy:
             return "legacy"
+        if nab:
+            return "nab"
 
         return "resolvelib"
 
@@ -176,7 +185,14 @@ class RequirementCommand(IndexGroupCommand):
         legacy_resolver = False
 
         resolver_variant = cls.determine_resolver_variant(options)
-        if resolver_variant == "resolvelib":
+        if resolver_variant == "legacy":
+            legacy_resolver = True
+            lazy_wheel = False
+            if "fast-deps" in options.features_enabled:
+                logger.warning(
+                    "fast-deps has no effect when used with the legacy resolver."
+                )
+        else:
             lazy_wheel = "fast-deps" in options.features_enabled
             if lazy_wheel:
                 logger.warning(
@@ -185,13 +201,6 @@ class RequirementCommand(IndexGroupCommand):
                     "This experimental feature is enabled through "
                     "--use-feature=fast-deps and it is not ready for "
                     "production."
-                )
-        else:
-            legacy_resolver = True
-            lazy_wheel = False
-            if "fast-deps" in options.features_enabled:
-                logger.warning(
-                    "fast-deps has no effect when used with the legacy resolver."
                 )
 
         # Handle build constraints
@@ -208,11 +217,13 @@ class RequirementCommand(IndexGroupCommand):
                 build_constraints=build_constraint_reqs,
                 verbosity=verbosity,
                 wheel_cache=WheelCache(options.cache_dir),
+                resolver_variant=resolver_variant,
             )
         else:
             env_installer = SubprocessBuildEnvironmentInstaller(
                 finder,
                 build_constraints=build_constraints,
+                resolver_variant=resolver_variant,
             )
 
         if not options.build_isolation:
@@ -272,6 +283,23 @@ class RequirementCommand(IndexGroupCommand):
         # The long import name and duplicated invocation is needed to convince
         # Mypy into correctly typechecking. Otherwise it would complain the
         # "Resolver" class being redefined.
+        if resolver_variant == "nab":
+            import pip._internal.resolution.nab.resolver
+
+            return pip._internal.resolution.nab.resolver.Resolver(
+                preparer=preparer,
+                finder=finder,
+                wheel_cache=wheel_cache,
+                make_install_req=make_install_req,
+                use_user_site=use_user_site,
+                ignore_dependencies=options.ignore_dependencies,
+                only_dependencies=options.only_dependencies,
+                ignore_installed=ignore_installed,
+                ignore_requires_python=ignore_requires_python,
+                force_reinstall=force_reinstall,
+                upgrade_strategy=upgrade_strategy,
+                py_version_info=py_version_info,
+            )
         if resolver_variant == "resolvelib":
             import pip._internal.resolution.resolvelib.resolver
 
