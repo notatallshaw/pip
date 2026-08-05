@@ -43,9 +43,12 @@ class SubprocessBuildEnvironmentInstaller:
         self,
         finder: PackageFinder,
         build_constraints: list[str] | None = None,
+        *,
+        resolver_variant: str = "resolvelib",
     ) -> None:
         self.finder = finder
         self._build_constraints = build_constraints or []
+        self._resolver_variant = resolver_variant
 
     def install(
         self,
@@ -137,6 +140,12 @@ class SubprocessBuildEnvironmentInstaller:
 
         if finder.uploaded_prior_to:
             args.extend(["--uploaded-prior-to", finder.uploaded_prior_to.isoformat()])
+
+        # The child pip resolves the build dependencies, so it needs to be told
+        # which resolver the parent was asked for.
+        if self._resolver_variant == "nab":
+            args.extend(["--use-feature", "nab-resolver"])
+
         args.append("--")
         args.extend(requirements)
 
@@ -178,12 +187,14 @@ class InprocessBuildEnvironmentInstaller:
         wheel_cache: WheelCache,
         build_constraints: Sequence[InstallRequirement] = (),
         verbosity: int = 0,
+        resolver_variant: str = "resolvelib",
     ) -> None:
         from pip._internal.operations.prepare import RequirementPreparer
 
         self._finder = finder
         self._build_constraints = build_constraints
         self._wheel_cache = wheel_cache
+        self._resolver_variant = resolver_variant
         self._level = 0
 
         build_dir = TempDirectory(kind="build-env-install", globally_managed=True)
@@ -311,11 +322,37 @@ class InprocessBuildEnvironmentInstaller:
     def _make_resolver(self) -> BaseResolver:
         """Create a new resolver for one time use."""
         # Legacy installer never used the legacy resolver so create a
-        # resolvelib resolver directly. Yuck.
+        # resolvelib resolver directly. Yuck. The nab resolver is opt-in and
+        # is honoured here so build dependencies are resolved by the same
+        # resolver as the requirements that pulled them in.
         from pip._internal.req.constructors import install_req_from_req_string
-        from pip._internal.resolution.resolvelib.resolver import Resolver
 
-        return Resolver(
+        # The long import name and duplicated invocation is needed to convince
+        # Mypy into correctly typechecking. Otherwise it would complain the
+        # "Resolver" class being redefined.
+        if self._resolver_variant == "nab":
+            import pip._internal.resolution.nab.resolver
+
+            return pip._internal.resolution.nab.resolver.Resolver(
+                make_install_req=install_req_from_req_string,
+                # Inherited state.
+                preparer=self._preparer,
+                finder=self._finder,
+                wheel_cache=self._wheel_cache,
+                # Hard-coded options (that should NOT be inherited).
+                ignore_requires_python=False,
+                use_user_site=False,
+                ignore_dependencies=False,
+                only_dependencies=False,
+                ignore_installed=True,
+                force_reinstall=False,
+                upgrade_strategy="to-satisfy-only",
+                py_version_info=None,
+            )
+
+        import pip._internal.resolution.resolvelib.resolver
+
+        return pip._internal.resolution.resolvelib.resolver.Resolver(
             make_install_req=install_req_from_req_string,
             # Inherited state.
             preparer=self._preparer,
