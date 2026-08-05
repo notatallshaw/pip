@@ -41,7 +41,7 @@ from tests.lib.filesystem import create_file
 from tests.lib.venv import VirtualEnvironment
 from tests.lib.wheel import make_wheel
 
-ResolverVariant = Literal["resolvelib", "legacy"]
+ResolverVariant = Literal["resolvelib", "legacy", "nab"]
 
 DATA_DIR = pathlib.Path(__file__).parent.parent.joinpath("data").resolve()
 SRC_DIR = pathlib.Path(__file__).resolve().parent.parent.parent
