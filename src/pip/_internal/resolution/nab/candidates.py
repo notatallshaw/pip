@@ -38,7 +38,9 @@ from pip._internal.exceptions import (
     InvalidInstalledPackage,
     MetadataInconsistent,
     MetadataInvalid,
+    UnsupportedWheel,
 )
+from pip._internal.req.constructors import install_req_from_link_and_ireq
 from pip._internal.utils.hashes import Hashes
 
 if TYPE_CHECKING:
@@ -51,6 +53,7 @@ if TYPE_CHECKING:
     from pip._internal.index.package_finder import PackageFinder
     from pip._internal.metadata import BaseDistribution
     from pip._internal.models.candidate import InstallationCandidate
+    from pip._internal.models.link import Link
     from pip._internal.req.req_install import InstallRequirement
     from pip._internal.resolution.base import InstallRequirementProvider
     from pip._internal.resolution.nab.inputs import ResolveInputs
@@ -77,15 +80,19 @@ class CandidateUnavailable(Exception):
 
 @dataclass(frozen=True)
 class HostCandidate:
-    """One selectable version of one project, as pip sees it."""
+    """One selectable version of one project, as pip sees it.
+
+    Exactly one of the three sources is set. An installed distribution has
+    no artifact, so it can never route through a download, and an explicit
+    link replaces the listing rather than joining it.
+    """
 
     project_name: NormalizedName
     version: Version
     yanked: bool
-    # Exactly one of these is set. An installed distribution has no artifact,
-    # so it can never route through a download.
     index_candidate: InstallationCandidate | None = None
     installed_dist: BaseDistribution | None = None
+    explicit_link: Link | None = None
 
     @property
     def is_installed(self) -> bool:
@@ -212,13 +219,22 @@ class PipHostIndex:
                     template=template,
                 )
             else:
-                assert candidate.index_candidate is not None
+                link = (
+                    candidate.explicit_link
+                    if candidate.explicit_link is not None
+                    else candidate.index_candidate.link
+                    if candidate.index_candidate is not None
+                    else None
+                )
+                assert link is not None, "a candidate must carry a source"
                 built = self._factory._make_candidate_from_link(
-                    link=candidate.index_candidate.link,
+                    link=link,
                     extras=frozenset(extras),
                     template=template,
                     name=candidate.project_name,
-                    version=candidate.version,
+                    version=candidate.version
+                    if candidate.explicit_link is None
+                    else None,
                 )
         except (MetadataInconsistent, MetadataInvalid) as exc:
             raise CandidateUnavailable(
@@ -245,9 +261,9 @@ class PipHostIndex:
         return hashes
 
     def _build_universe(self, project_name: NormalizedName) -> Sequence[HostCandidate]:
-        explicit = self._inputs.explicit.get(project_name)
+        explicit = self._explicit_universe(project_name)
         if explicit is not None:
-            return self._explicit_universe(project_name, explicit)
+            return explicit
 
         evaluator = self._finder.make_candidate_evaluator(
             project_name=project_name,
@@ -288,35 +304,75 @@ class PipHostIndex:
         return tuple(universe)
 
     def _explicit_universe(
-        self, project_name: NormalizedName, ireq: InstallRequirement
-    ) -> Sequence[HostCandidate]:
-        """A universe of one, for a URL, VCS, path or editable requirement.
+        self, project_name: NormalizedName
+    ) -> Sequence[HostCandidate] | None:
+        """The universe for a package pinned to a URL, path, VCS ref or editable.
 
         pip already behaves this way: the moment any explicit candidate
         exists, ``Factory.find_candidates`` skips the finder entirely and
-        returns only the explicit set.
+        returns only the explicit set. Returns None when the package has no
+        explicit source and the finder should answer instead.
+
+        Two sources of explicit candidates, and pip does not merge them. A
+        requirement naming a link wins outright, and the URL constraints then
+        act as a filter over it. Only when no requirement names a link do the
+        URL constraints themselves become the candidates.
         """
-        assert ireq.link is not None
-        self._factory._fail_if_link_is_unsupported_wheel(ireq.link)
-        self._templates.setdefault(project_name, ireq)
-        candidate = self._factory._make_base_candidate_from_link(
-            ireq.link,
-            template=ireq,
+        constraint = self._inputs.constraints.get(project_name)
+        ireq = self._inputs.explicit.get(project_name)
+
+        if ireq is not None:
+            assert ireq.link is not None
+            self._templates.setdefault(project_name, ireq)
+            candidate = self._build_explicit(project_name, ireq.link, ireq)
+            if candidate is None:
+                # An unnamed URL fails eagerly while it is being named; a
+                # named one becomes unsatisfiable so the search can back out.
+                return ()
+            if constraint is not None and not constraint.is_satisfied_by(candidate):
+                return ()
+            return (self._explicit_record(project_name, candidate, ireq.link),)
+
+        if constraint is None or not constraint.links:
+            return None
+
+        template = self._template_for(project_name)
+        records: list[HostCandidate] = []
+        for link in constraint.links:
+            candidate = self._build_explicit(
+                project_name, link, install_req_from_link_and_ireq(link, template)
+            )
+            if candidate is None:
+                continue
+            records.append(self._explicit_record(project_name, candidate, link))
+        records.sort(key=lambda record: record.version)
+        return tuple(records)
+
+    def _build_explicit(
+        self, project_name: NormalizedName, link: Link, template: InstallRequirement
+    ) -> Candidate | None:
+        try:
+            self._factory._fail_if_link_is_unsupported_wheel(link)
+        except UnsupportedWheel:
+            # Constrained to a wheel this platform cannot use, so no candidate
+            # will ever be valid.
+            return None
+        return self._factory._make_base_candidate_from_link(
+            link,
+            template=template,
             name=project_name,
             version=None,
         )
-        if candidate is None:
-            # An unnamed URL fails eagerly; a named one becomes unsatisfiable
-            # so the search can back out of it. Root requirements are named by
-            # the time they get here, so this is the second case.
-            return ()
-        return (
-            HostCandidate(
-                project_name=project_name,
-                version=candidate.version,
-                yanked=False,
-                index_candidate=None,
-            ),
+
+    @staticmethod
+    def _explicit_record(
+        project_name: NormalizedName, candidate: Candidate, link: Link
+    ) -> HostCandidate:
+        return HostCandidate(
+            project_name=project_name,
+            version=candidate.version,
+            yanked=link.is_yanked,
+            explicit_link=link,
         )
 
     def _installed_candidate(
