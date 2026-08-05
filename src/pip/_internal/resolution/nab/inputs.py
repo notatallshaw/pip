@@ -23,7 +23,7 @@ from pip._internal.resolution.resolvelib.base import Constraint, format_name
 from pip._internal.utils.packaging import get_requirement
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Callable, Iterable, Sequence
 
     from pip._vendor.packaging.utils import NormalizedName
 
@@ -118,12 +118,18 @@ def collect_inputs(
     root_ireqs: Sequence[InstallRequirement],
     *,
     ignore_dependencies: bool,
+    name_link: Callable[[InstallRequirement], NormalizedName] | None = None,
 ) -> ResolveInputs:
     """Split pip's root ireqs into requirements, constraints and explicit links.
 
     Mirrors ``Factory.collect_root_requirements``: constraint lines are
     ANDed per project, a requirement whose markers do not apply is dropped
     with the same log line, and ``user_requested`` records command line order.
+
+    :param name_link: names an unnamed URL, path or VCS requirement by
+        preparing it. ``pip install ./some/path`` gives no name until the
+        distribution has been built, so the caller supplies the one piece of
+        machinery that can do it.
     """
     inputs = ResolveInputs(ignore_dependencies=ignore_dependencies)
 
@@ -142,13 +148,13 @@ def collect_inputs(
                 inputs.constraints[name] = Constraint.from_ireq(ireq)
             continue
 
-        requirements = list(_root_requirements_from_ireq(ireq))
+        requirements = list(_root_requirements_from_ireq(ireq, name_link))
         if not requirements:
             continue
         if ireq.user_supplied and requirements[0].key not in inputs.user_requested:
             inputs.user_requested[requirements[0].key] = index
-        if ireq.link is not None and ireq.name:
-            inputs.explicit[canonicalize_name(ireq.name)] = ireq
+        if ireq.link is not None:
+            inputs.explicit[requirements[0].project_name] = ireq
         inputs.requirements.extend(requirements)
 
     # Put requirements with extras at the end, matching
@@ -159,6 +165,7 @@ def collect_inputs(
 
 def _root_requirements_from_ireq(
     ireq: InstallRequirement,
+    name_link: Callable[[InstallRequirement], NormalizedName] | None,
 ) -> Iterable[RootRequirement]:
     """Zero, one or two root requirements from one ireq.
 
@@ -175,17 +182,17 @@ def _root_requirements_from_ireq(
         )
         return
 
-    if ireq.link is not None and not ireq.name:
-        raise NotImplementedError(
-            "The nab resolver cannot resolve an unnamed URL requirement yet: "
-            f"{ireq}. pip names it by preparing the distribution, which needs "
-            "the metadata path this adapter has not been given yet."
-        )
-
-    assert ireq.name, "root requirement must be named by here"
-    project_name = canonicalize_name(ireq.name)
+    if ireq.name:
+        project_name = canonicalize_name(ireq.name)
+    else:
+        assert ireq.link is not None, "an unnamed requirement must carry a link"
+        assert name_link is not None, "no way to name an unnamed URL requirement"
+        project_name = name_link(ireq)
     extras = frozenset(canonicalize_name(extra) for extra in ireq.extras)
-    specifier = ireq.specifier
+    # An unnamed URL requirement carries no parsed PEP 508 requirement at all,
+    # so there is nothing to constrain the version with: the link is the
+    # candidate.
+    specifier = ireq.specifier if ireq.req is not None else SpecifierSet()
 
     if extras and specifier:
         yield RootRequirement(

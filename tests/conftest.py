@@ -73,7 +73,7 @@ def pytest_addoption(parser: Parser) -> None:
         "--resolver",
         action="store",
         default="resolvelib",
-        choices=["resolvelib", "legacy"],
+        choices=["resolvelib", "legacy", "nab"],
         help="use given resolver in tests",
     )
     parser.addoption(
@@ -213,6 +213,15 @@ def resolver_variant(request: pytest.FixtureRequest) -> Iterator[str]:
         deprecated_features.add("legacy-resolver")
     else:
         deprecated_features.discard("legacy-resolver")
+
+    # --resolver is authoritative in both directions. Without the discard an
+    # inherited PIP_USE_FEATURE=nab-resolver would keep running the nab
+    # variant while this fixture reported "resolvelib" to every test that
+    # branches on it.
+    if resolver == "nab":
+        features.add("nab-resolver")
+    else:
+        features.discard("nab-resolver")
 
     env = {
         "PIP_USE_FEATURE": " ".join(features),
