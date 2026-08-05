@@ -98,6 +98,7 @@ class Resolver(BaseResolver):
         inputs = collect_inputs(
             root_reqs,
             ignore_dependencies=self.ignore_dependencies,
+            name_link=self._name_link_requirement,
         )
         index = self._index = PipHostIndex(
             factory=self.factory,
@@ -143,6 +144,26 @@ class Resolver(BaseResolver):
 
         graph = MutableGraph.from_edges(self._solution.edges)
         return installation_order(req_set, graph)
+
+    def _name_link_requirement(self, ireq: InstallRequirement) -> NormalizedName:
+        """Name a URL, path or VCS requirement by preparing it.
+
+        ``pip install ./some/path`` has no name until the distribution has
+        been built. pip resolves that by building the candidate and reading
+        the name off it, and an unnamed URL that fails to build is a hard
+        error rather than something the search can back out of, because the
+        user typed it.
+        """
+        assert ireq.link is not None
+        candidate = self.factory._make_base_candidate_from_link(
+            ireq.link,
+            template=ireq,
+            name=None,
+            version=None,
+        )
+        if candidate is None:
+            raise self.factory._build_failures[ireq.link]
+        return candidate.project_name
 
     @staticmethod
     def _host_candidate(
