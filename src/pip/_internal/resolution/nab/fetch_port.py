@@ -229,9 +229,7 @@ class PipFetchPort:
         self._listed.add(package)
         if self.index.get_listing(package) is not None:
             return
-        files = [
-            _dist_file(candidate) for candidate in self._host.candidates(package)
-        ]
+        files = [_dist_file(candidate) for candidate in self._host.candidates(package)]
         self.index.store_listing(package, files)
         self.index.store_listing_index(package, _SERVING_INDEX)
 
@@ -272,18 +270,17 @@ class PipFetchPort:
                 f"{str(refusal)!r}",
             )
             return
+        requires = self._host.adopt_dependencies(candidate, dist)
         if self._ignore_dependencies:
             # ``--no-deps``. nab's provider has no switch for it, because the
             # dependency expansion is also how an extras proxy learns which
             # versions provide its extra, so the requirements are dropped at
             # the source instead. pip does the same thing one level up, in
             # ``Candidate.iter_dependencies(with_requires=False)``.
-            self.index.store_metadata(
-                package, version, _metadata_text(dist, with_requires=False), slot_url
-            )
-            return
-        self._host.note_dependency_spellings(candidate, dist)
-        self.index.store_metadata(package, version, _metadata_text(dist), slot_url)
+            requires = []
+        self.index.store_metadata(
+            package, version, _metadata_text(dist, requires), slot_url
+        )
 
     def _refuse(
         self, package: str, version: str, slot_url: str | None, reason: str
@@ -352,7 +349,7 @@ def _dist_file(candidate: HostCandidate) -> WheelFile | SdistFile:
     )
 
 
-def _metadata_text(dist: BaseDistribution, *, with_requires: bool = True) -> str:
+def _metadata_text(dist: BaseDistribution, requires: Sequence[str]) -> str:
     """The METADATA nab parses, rebuilt from what pip prepared.
 
     Only the six fields nab's parser reads are emitted. Re-serialising
@@ -369,10 +366,5 @@ def _metadata_text(dist: BaseDistribution, *, with_requires: bool = True) -> str
     if requires_python:
         lines.append(f"Requires-Python: {requires_python}")
     lines.extend(f"Provides-Extra: {extra}" for extra in dist.iter_provided_extras())
-    if with_requires:
-        lines.extend(
-            f"Requires-Dist: {line}"
-            for line in dist.iter_raw_dependencies()
-            if line.strip()
-        )
+    lines.extend(f"Requires-Dist: {line}" for line in requires)
     return "\n".join(lines) + "\n\n"

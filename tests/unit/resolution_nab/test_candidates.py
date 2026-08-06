@@ -7,19 +7,26 @@ carried and flagged rather than dropped.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import pytest
 
 from pip._vendor.packaging.specifiers import SpecifierSet
 from pip._vendor.packaging.utils import canonicalize_name
+from pip._vendor.packaging.version import Version
 
 from pip._internal.index.package_finder import CandidateEvaluator
 from pip._internal.models.candidate import InstallationCandidate
 from pip._internal.models.link import Link
 from pip._internal.models.release_control import ReleaseControl
+from pip._internal.resolution.nab.candidates import HostCandidate
 from pip._internal.resolution.nab.engine import YankPolicy
 from pip._internal.resolution.nab.inputs import is_pinned, split_key
 
 from tests.lib.index import make_mock_candidate
+
+if TYPE_CHECKING:
+    from pip._vendor.packaging.utils import NormalizedName
 
 
 def _evaluator(release_control: ReleaseControl | None = None) -> CandidateEvaluator:
@@ -159,26 +166,51 @@ def test_is_pinned_matches_pips_rule(specifier: str, expected: bool) -> None:
     assert is_pinned(SpecifierSet(specifier)) is expected
 
 
-def test_yank_policy_refuses_yanked_unless_everything_is_yanked() -> None:
-    policy = YankPolicy(frozenset({canonicalize_name("mypackage")}))
+def test_yank_policy_reports_facts_and_leaves_the_rule_to_nab() -> None:
+    """pip answers "is it yanked" and "is it pinned"; nab combines them."""
+    universe = {
+        canonicalize_name("mypackage"): [
+            _record("1.0", yanked=False),
+            _record("2.0", yanked=True),
+        ]
+    }
+    policy = YankPolicy(
+        _FixedIndex(universe), frozenset({canonicalize_name("mypackage")})
+    )
     name = canonicalize_name("mypackage")
 
+    assert policy.yanked_versions(name) == frozenset({Version("2.0")})
     assert not policy.admits_yanked(name, all_yanked=False)
     assert policy.admits_yanked(name, all_yanked=True)
 
 
-def test_yank_policy_prefers_the_merged_specifier_when_it_has_one() -> None:
-    """The command line pins are only a fallback, and they under-approximate."""
-    policy = YankPolicy(frozenset())
-    name = canonicalize_name("mypackage")
+def test_yank_policy_refuses_a_package_the_command_line_does_not_pin() -> None:
+    """The command line pins under-approximate: a transitive == is missed."""
+    policy = YankPolicy(_FixedIndex({}), frozenset())
 
-    assert not policy.admits_yanked(name, all_yanked=True)
-    assert policy.admits_yanked(
-        name, all_yanked=True, merged_specifier=SpecifierSet("==1.0")
+    assert not policy.admits_yanked(canonicalize_name("mypackage"), all_yanked=True)
+
+
+def _record(version: str, *, yanked: bool) -> HostCandidate:
+    return HostCandidate(
+        project_name=canonicalize_name("mypackage"),
+        version=Version(version),
+        yanked=yanked,
     )
-    assert not policy.admits_yanked(
-        name, all_yanked=True, merged_specifier=SpecifierSet(">=1.0")
-    )
+
+
+class _FixedIndex:
+    """``PipHostIndex.yanked_versions`` over a fixed universe."""
+
+    def __init__(self, universe: dict[NormalizedName, list[HostCandidate]]) -> None:
+        self._universe = universe
+
+    def yanked_versions(self, project_name: NormalizedName) -> frozenset[Version]:
+        return frozenset(
+            candidate.version
+            for candidate in self._universe.get(project_name, [])
+            if candidate.yanked
+        )
 
 
 @pytest.mark.parametrize(

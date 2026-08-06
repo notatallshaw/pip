@@ -49,6 +49,7 @@ if TYPE_CHECKING:
     from pip._internal.resolution.base import InstallRequirementProvider
     from pip._internal.resolution.nab.candidates import HostCandidate
     from pip._internal.resolution.nab.engine import Solution
+    from pip._internal.resolution.resolvelib.base import Candidate
 
 logger = logging.getLogger(__name__)
 
@@ -126,20 +127,44 @@ class Resolver(BaseResolver):
                 exc.causes, factory=self.factory, index=index, inputs=inputs
             ) from exc
 
+        candidates = [
+            index.pip_candidate(
+                self._host_candidate(index, pin.project_name, pin.version),
+                pin.extras,
+            )
+            for pin in solution.pins
+        ]
+        self._warn_missing_extras(candidates)
         return build_requirement_set(
-            [
-                index.pip_candidate(
-                    self._host_candidate(index, pin.project_name, pin.version),
-                    pin.extras,
-                )
-                for pin in solution.pins
-            ],
+            candidates,
             check_supported_wheels=check_supported_wheels,
             get_dist_to_uninstall=self.factory.get_dist_to_uninstall,
             force_reinstall=self.factory.force_reinstall,
             only_dependencies=self.only_dependencies,
             user_requested=inputs.user_requested,
         )
+
+    def _warn_missing_extras(self, candidates: list[Candidate]) -> None:
+        """Let pip say what an extras candidate does not provide.
+
+        ``ExtrasCandidate.iter_dependencies`` carries the sentence, and it is
+        the only copy of it in the resolvelib variant. Draining it on the
+        chosen candidates is what makes the two variants word this the same
+        way. nab warns about the same thing in its own words at the same
+        time, so the line appears twice; re-wording nab's is a nab-side hook
+        that does not exist.
+
+        ``with_requires`` follows ``--no-deps``, because that is the flag
+        pip's own copy reads: under it, pip never looks at the extras and
+        never warns.
+        """
+        for candidate in candidates:
+            if candidate.name == candidate.project_name:
+                continue
+            for _requirement in candidate.iter_dependencies(
+                not self.ignore_dependencies
+            ):
+                pass
 
     def get_installation_order(
         self, req_set: RequirementSet
