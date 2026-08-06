@@ -194,6 +194,10 @@ class PipProvider:
         self.dep_texts: dict[str, dict[Version, dict[str, str]]] = {}
         self._widened: dict[tuple[str, Version], VersionRange] = {}
         self._positive_ranges: Mapping[str, RangeProtocol[Version]] = {}
+        # prioritize's candidate count, per project, per range. Nested rather
+        # than keyed on a (project, range) tuple so the hot path allocates
+        # nothing; this is the shape nab's own provider uses.
+        self._matching: dict[NormalizedName, dict[RangeProtocol[Version], int]] = {}
         # has_satisfying_version must leave no trace: it runs the real scan.
         self._probing = False
 
@@ -419,12 +423,46 @@ class PipProvider:
         affected = conflict_counts.get(project_name, 0)
         culprit = 0 if culprit_counts is None else culprit_counts.get(project_name, 0)
         tier = self._tier(project_name, affected, culprit, culprit_counts)
+        return (tier, self._matching_count(project_name, version_range), not extras)
+
+    def _matching_count(
+        self, project_name: NormalizedName, version_range: RangeProtocol[Version]
+    ) -> int:
+        """How many of ``project_name``'s versions fall inside ``version_range``.
+
+        Memoised, because it is a pure function of the two arguments and the
+        search asks for it hundreds of thousands of times. Both halves of
+        that claim are load-bearing:
+
+        The universe is write-once. ``PipHostIndex.candidates`` builds it on
+        first ask and stores it, and nothing ever replaces or extends a
+        stored entry, so the set being counted cannot change under a live
+        memo. An explicit URL arriving late is refused rather than merged
+        for exactly this reason.
+
+        Range equality decides membership. ``VersionRange.__eq__`` compares
+        bounds, ``===`` literals and pre-release region, and equal ranges
+        therefore agree on ``contains`` for every version. Two ranges that
+        cover the same versions but compare unequal simply miss the memo and
+        are counted again, which costs time and never correctness.
+
+        The universe build stays where it was: a memo hit implies an earlier
+        miss on the same project, and that miss went through ``_versions``.
+        """
+        per_project = self._matching.get(project_name)
+        if per_project is None:
+            per_project = self._matching[project_name] = {}
+        else:
+            cached = per_project.get(version_range)
+            if cached is not None:
+                return cached
         matching = sum(
             1
             for candidate in self._versions(project_name)
             if candidate.version in version_range
         )
-        return (tier, matching, not extras)
+        per_project[version_range] = matching
+        return matching
 
     @staticmethod
     def _tier(
