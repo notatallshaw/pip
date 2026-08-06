@@ -30,7 +30,8 @@ from pip._internal.resolution._order import MutableGraph, installation_order
 from pip._internal.resolution._reqset import build_requirement_set
 from pip._internal.resolution.base import BaseResolver
 from pip._internal.resolution.nab.candidates import PipHostIndex
-from pip._internal.resolution.nab.engine import YankPolicy, solve
+from pip._internal.resolution.nab.engine import EngineFailure, YankPolicy, solve
+from pip._internal.resolution.nab.errors import to_installation_error
 from pip._internal.resolution.nab.inputs import collect_inputs
 from pip._internal.resolution.nab.observer import NabReporter
 from pip._internal.resolution.resolvelib.factory import Factory
@@ -109,12 +110,20 @@ class Resolver(BaseResolver):
         )
         reporter = NabReporter(constraints=inputs.constraints)
 
-        solution = self._solution = solve(
-            inputs=inputs,
-            index=index,
-            reporter=reporter,
-            yank_policy=YankPolicy(inputs.pinned_packages()),
-        )
+        try:
+            solution = self._solution = solve(
+                inputs=inputs,
+                index=index,
+                reporter=reporter,
+                yank_policy=YankPolicy(inputs.pinned_packages()),
+                python_version=self.factory._python_candidate.version,
+                ignore_requires_python=self.factory._ignore_requires_python,
+            )
+        except EngineFailure as exc:
+            logger.debug("nab could not resolve:\n%s", exc)
+            raise to_installation_error(
+                exc.causes, factory=self.factory, index=index, inputs=inputs
+            ) from exc
 
         return build_requirement_set(
             [

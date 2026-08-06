@@ -14,15 +14,16 @@ only piece left, and it is the only piece that has to know nab's shapes.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from pip._vendor.resolvelib import ResolutionImpossible
 from pip._vendor.resolvelib.structs import RequirementInformation
 
+from pip._internal.resolution.nab.candidates import CandidateUnavailable
 from pip._internal.resolution.nab.inputs import split_key
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     from pip._vendor.packaging.specifiers import SpecifierSet
     from pip._vendor.packaging.utils import NormalizedName
@@ -33,14 +34,6 @@ if TYPE_CHECKING:
     from pip._internal.resolution.nab.inputs import ResolveInputs
     from pip._internal.resolution.resolvelib.base import Candidate, Requirement
     from pip._internal.resolution.resolvelib.factory import Factory
-
-
-DERIVATION_MISSING = (
-    "The nab resolver cannot explain this failure yet: turning nab's "
-    "derivation tree into pip's (requirement, parent) causes needs nab "
-    "vendored. What is missing is the walk from the terminal incompatibility "
-    "down to the root causes; everything after that walk is written."
-)
 
 
 @dataclass(frozen=True)
@@ -62,12 +55,185 @@ class FailureCause:
     requires_python: SpecifierSet | None = None
 
 
-def causes_from_derivation(derivation: object) -> Sequence[FailureCause]:
+def causes_from_derivation(
+    derivation: object,
+    *,
+    root_sentinel: object,
+    requirement_text: Callable[[str | None, str], str | None],
+    parent_version: Callable[[str, object], Version | None],
+    requires_python: Callable[[str], SpecifierSet | None],
+) -> Sequence[FailureCause]:
     """Flatten the engine's derivation tree into pip's causes.
 
-    This is the one piece of the error path that has to know nab's shapes.
+    PubGrub explains a failure as a proof: a terminal incompatibility whose
+    two causes are themselves incompatibilities, down to external clauses
+    that came from a root requirement, a dependency, or a package having no
+    version in a range. pip explains it as a flat list of requirements that
+    cannot all hold, each with the candidate that wanted it.
+
+    So the walk collects the external clauses and keeps the ones that name a
+    requirement:
+
+    - a ``ROOT`` clause is "the user requested X", with no parent;
+    - a ``DEPENDENCY`` clause is "P at V depends on X";
+    - a ``NO_VERSIONS`` or ``CONSTRAINT`` clause names no requirement at all.
+      It says which package ran out, and pip recomputes that half itself
+      (it lists the versions it found and why it skipped them). So those
+      clauses select which requirements are reported rather than becoming
+      reported causes.
+
+    The tree is walked with an explicit stack. It gains a level per conflict,
+    so a deeply backtracked resolve overflows Python's recursion limit on a
+    recursive walk, and the failure would then be a ``RecursionError`` raised
+    while building the error message.
+
+    Nothing here imports nab: an incompatibility is read through ``cause``,
+    ``terms``, ``cause_left`` and ``cause_right``, so the walk is testable
+    with plain stand-ins.
     """
-    raise NotImplementedError(DERIVATION_MISSING)
+    if derivation is None:
+        return ()
+
+    external = _external_clauses(derivation)
+    blamed = {
+        _positive_package(clause)
+        for clause in external
+        if clause.cause.name in {"NO_VERSIONS", "CONSTRAINT"}
+    }
+    blamed.discard(None)
+
+    requested = [
+        pair
+        for clause in external
+        if clause.cause.name in {"ROOT", "DEPENDENCY"}
+        for pair in [_requested_pair(clause, root_sentinel)]
+        if pair is not None
+    ]
+    selected = [pair for pair in requested if pair[1] in blamed] or requested
+
+    causes: list[FailureCause] = []
+    seen: set[tuple[str | None, str]] = set()
+    for parent_key, dep_key, parent_range in selected:
+        if (parent_key, dep_key) in seen:
+            continue
+        seen.add((parent_key, dep_key))
+        text = requirement_text(parent_key, dep_key) or dep_key
+        causes.append(
+            _cause(text, parent_key, parent_range, parent_version=parent_version)
+        )
+
+    causes.extend(
+        _requires_python_causes(blamed, requires_python, parent_version=parent_version)
+    )
+    return causes
+
+
+def _cause(
+    text: str,
+    parent_key: str | None,
+    parent_range: object,
+    *,
+    parent_version: Callable[[str, object], Version | None],
+) -> FailureCause:
+    if parent_key is None:
+        return FailureCause(requirement=text)
+    project_name, _ = split_key(parent_key)
+    return FailureCause(
+        requirement=text,
+        parent_key=parent_key,
+        parent_project_name=project_name,
+        parent_version=parent_version(parent_key, parent_range),
+    )
+
+
+def _requires_python_causes(
+    blamed: set[str | None],
+    requires_python: Callable[[str], SpecifierSet | None],
+    *,
+    parent_version: Callable[[str, object], Version | None],
+) -> list[FailureCause]:
+    """One cause per package whose candidates all wanted another Python.
+
+    pip reports this case first and with its own sentence, and it reports it
+    as a property of the package that declared the constraint, so the
+    package is its own cause's parent.
+    """
+    causes: list[FailureCause] = []
+    for package in sorted(name for name in blamed if name is not None):
+        specifier = requires_python(package)
+        if specifier is None:
+            continue
+        project_name, _ = split_key(package)
+        causes.append(
+            FailureCause(
+                requirement=package,
+                parent_key=package,
+                parent_project_name=project_name,
+                parent_version=parent_version(package, _EVERY_VERSION),
+                requires_python=specifier,
+            )
+        )
+    return causes
+
+
+class _EveryVersion:
+    """Stands in for a range when any recorded version will do."""
+
+    def __contains__(self, version: object) -> bool:
+        return True
+
+
+_EVERY_VERSION = _EveryVersion()
+
+
+def _external_clauses(derivation: object) -> list[Any]:
+    """Every non-derived clause reachable from ``derivation``, once each."""
+    stack: list[Any] = [derivation]
+    seen: set[int] = set()
+    external: list[Any] = []
+    while stack:
+        node = stack.pop()
+        if node is None or id(node) in seen:
+            continue
+        seen.add(id(node))
+        if node.cause.name == "DERIVED":
+            stack.append(node.cause_left)
+            stack.append(node.cause_right)
+            continue
+        external.append(node)
+    return external
+
+
+def _positive_package(clause: Any) -> str | None:
+    """The package a single-term clause rules out entirely."""
+    positive = [term for term in clause.terms if term.is_positive()]
+    if len(positive) != 1:
+        return None
+    package = positive[0].package
+    return package if isinstance(package, str) else None
+
+
+def _requested_pair(
+    clause: Any, root_sentinel: object
+) -> tuple[str | None, str, object] | None:
+    """``(parent_key, required_key, parent_range)`` for a requirement clause.
+
+    A requirement clause is two terms: the requiring side positive, the
+    required side negative, which is PubGrub's way of writing "if the parent
+    is in this range then the dependency must be in that one". A one-term
+    clause is a self dependency and names no new requirement.
+    """
+    positive = [term for term in clause.terms if term.is_positive()]
+    negative = [term for term in clause.terms if not term.is_positive()]
+    if len(positive) != 1 or len(negative) != 1:
+        return None
+    required = negative[0].package
+    if not isinstance(required, str):
+        return None
+    parent = positive[0].package
+    if parent is root_sentinel or not isinstance(parent, str):
+        return None, required, None
+    return parent, required, positive[0].constraint
 
 
 def to_installation_error(
@@ -79,7 +245,14 @@ def to_installation_error(
 ) -> InstallationError:
     """Build the error pip would have raised for the same conflict."""
     assert causes, "Installation error reported with no cause"
-    pip_causes = [_cause_pair(cause, factory=factory, index=index) for cause in causes]
+    pip_causes = [
+        pair
+        for pair in (
+            _cause_pair(cause, factory=factory, index=index) for cause in causes
+        )
+        if pair is not None
+    ]
+    assert pip_causes, "Installation error reported with no rebuildable cause"
     impossible: ResolutionImpossible[Requirement, Candidate] = ResolutionImpossible(
         pip_causes
     )
@@ -94,13 +267,15 @@ def _cause_pair(
     *,
     factory: Factory,
     index: PipHostIndex,
-) -> RequirementInformation[Requirement, Candidate]:
+) -> RequirementInformation[Requirement, Candidate] | None:
     parent = _parent_candidate(cause, index=index)
     if cause.requires_python is not None:
         requirement = factory.make_requires_python_requirement(cause.requires_python)
-        assert requirement is not None, (
-            "Requires-Python cause reported under --ignore-requires-python"
-        )
+        if requirement is None or parent is None:
+            # No requirement under --ignore-requires-python, and pip's
+            # Requires-Python sentence names the parent, so a cause with no
+            # rebuildable parent has nothing to say.
+            return None
         return RequirementInformation(requirement, parent)
 
     requirements = list(
@@ -118,9 +293,16 @@ def _cause_pair(
 def _parent_candidate(cause: FailureCause, *, index: PipHostIndex) -> Candidate | None:
     if cause.parent_key is None or cause.parent_project_name is None:
         return None
-    assert cause.parent_version is not None, "a parent cause must carry a version"
+    if cause.parent_version is None:
+        return None
     _, extras = split_key(cause.parent_key)
     for host_candidate in index.candidates(cause.parent_project_name):
         if host_candidate.version == cause.parent_version:
-            return index.pip_candidate(host_candidate, extras)
+            try:
+                return index.pip_candidate(host_candidate, extras)
+            except CandidateUnavailable:
+                # The parent is only named to say who wanted the thing that
+                # failed. If it cannot be rebuilt, report the requirement
+                # without it rather than losing the whole message.
+                return None
     return None
