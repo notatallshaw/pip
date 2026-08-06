@@ -302,12 +302,28 @@ class PipProvider:
     def choose_version(
         self, package: str, version_range: RangeProtocol[Version]
     ) -> Version | None:
-        """Pick the best usable version of ``package`` inside ``version_range``."""
+        """Pick the best usable version of ``package`` inside ``version_range``.
+
+        The base range steers which version an extras node picks and never
+        whether it picks one. It describes the current partial solution, so
+        answering None on its strength would have the resolver record a
+        ``NO_VERSIONS`` clause over ``version_range`` that outlives the
+        decisions the range came from, and rule out versions that are still
+        selectable once those decisions are undone.
+        """
         project_name, extras = split_key(package)
         if extras:
             base = self._positive_ranges.get(project_name)
             if base is not None:
-                version_range = version_range & base
+                alongside = self._first_usable(project_name, version_range & base)
+                if alongside is not None:
+                    return alongside
+        return self._first_usable(project_name, version_range)
+
+    def _first_usable(
+        self, project_name: NormalizedName, version_range: RangeProtocol[Version]
+    ) -> Version | None:
+        """The best version in ``version_range`` whose metadata reads."""
         for candidate in self._ordered(project_name, version_range):
             if self._metadata_for(project_name, candidate) is not None:
                 return candidate.version

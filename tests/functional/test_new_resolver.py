@@ -1090,6 +1090,44 @@ def test_new_resolver_build_directory_error_zazo_19(script: PipTestEnvironment) 
     script.assert_installed(pkg_a="3.0.0", pkg_b="1.0.0")
 
 
+def test_new_resolver_extra_after_base_is_chosen(script: PipTestEnvironment) -> None:
+    """An extra must stay solvable after its own package has been chosen.
+
+    ``base`` is reached both through ``dep``'s plain ``base>=1`` and through
+    the ``base[x]`` requested twice, and the plain requirement admits fewer
+    versions, so ``base`` is chosen before ``base[x]``. ``base[x]`` then has
+    to move below that choice, which is only possible by revisiting ``base``.
+    A resolver that treats "no version of ``base[x]`` fits alongside the
+    current ``base``" as "no version of ``base[x]`` fits at all" reports a
+    conflict where ``base 2.0`` resolves everything.
+    """
+    for version in ("0.1", "0.2", "0.3", "0.4", "0.5", "1.0", "2.0"):
+        create_basic_wheel_for_package(
+            script, "base", version, extras={"x": ["helper>=1,<2"]}
+        )
+    create_basic_wheel_for_package(script, "base", "3.0", extras={"x": ["helper>=3"]})
+    create_basic_wheel_for_package(
+        script,
+        "dep",
+        "1.0",
+        depends=["base>=1"],
+        extras={"x": ["helper>=1,<2", "base[x]"]},
+    )
+    create_basic_wheel_for_package(script, "helper", "1.0")
+    create_basic_wheel_for_package(script, "helper", "3.0")
+
+    script.pip(
+        "install",
+        "--no-cache-dir",
+        "--no-index",
+        "--find-links",
+        script.scratch_path,
+        "base[x]",
+        "dep[x]==1.0",
+    )
+    script.assert_installed(base="2.0", dep="1.0", helper="1.0")
+
+
 def test_new_resolver_upgrade_same_version(script: PipTestEnvironment) -> None:
     create_basic_wheel_for_package(script, "pkg", "2")
     create_basic_wheel_for_package(script, "pkg", "1")
