@@ -571,35 +571,46 @@ class PipProvider:
         return None
 
     def _root_text(self, dep_key: str) -> str | None:
+        """The root requirement as the user typed it.
+
+        Not rebuilt from the key: pip's message for ``pip install
+        requirements.txt`` keys on the requirement reading exactly
+        ``requirements.txt``, and the key is the canonical name.
+        """
         for requirement in self._inputs.requirements:
-            if requirement.key == dep_key:
-                return f"{dep_key}{requirement.specifier}"
+            if requirement.key != dep_key:
+                continue
+            if requirement.ireq.req is not None:
+                return str(requirement.ireq.req)
+            return f"{dep_key}{requirement.specifier}"
         return None
 
-    def parent_version(
+    def parent_versions(
         self, parent_key: str, parent_range: RangeProtocol[Version]
-    ) -> Version | None:
-        """A version of ``parent_key`` the clause could have come from.
+    ) -> Sequence[Version]:
+        """Every version of ``parent_key`` a clause over ``parent_range`` covers.
 
-        Widening makes a dependency clause name a range rather than one
-        version, and every version in that range was recorded with the same
-        dependency map, so any recorded version inside it names the same
-        clause.
+        A widened dependency clause names a range rather than one version,
+        and the resolver merges clauses that declare the same dependency, so
+        one clause can stand for several versions that were each tried. pip
+        names each of them, so the versions are recovered here from what was
+        actually asked about; a version nothing was recorded for was never
+        tried and has nothing to say.
         """
-        recorded = [
+        recorded = sorted(
             version
             for version in self.deps_cache.get(parent_key, {})
             if version in parent_range
-        ]
+        )
         if recorded:
-            return max(recorded)
+            return recorded
         project_name, _ = split_key(parent_key)
         listed = [
             candidate.version
             for candidate in self._versions(project_name)
             if candidate.version in parent_range
         ]
-        return max(listed) if listed else None
+        return listed[-1:]
 
     def requires_python_refusal(self, package: str) -> SpecifierSet | None:
         """The Requires-Python that removed every candidate of ``package``."""
@@ -704,7 +715,7 @@ def _failure(exc: ResolutionError, provider: PipProvider) -> EngineFailure:
         exc.incompatibility,
         root_sentinel=ROOT,
         requirement_text=provider.requirement_text,
-        parent_version=provider.parent_version,
+        parent_versions=provider.parent_versions,
         requires_python=provider.requires_python_refusal,
     )
     if not causes:
