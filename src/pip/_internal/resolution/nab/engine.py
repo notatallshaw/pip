@@ -544,7 +544,7 @@ class PipProvider:
     ) -> None:
         name = canonicalize_name(requirement.name)
         extras = frozenset(canonicalize_name(extra) for extra in requirement.extras)
-        self._index.note_requested_by(name, comes_from)
+        self._index.note_requested_by(name, requirement.name, comes_from)
         if requirement.url is not None:
             # PEP 508 forbids a specifier alongside a URL, so the link is the
             # whole universe and the range is unbounded.
