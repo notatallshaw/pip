@@ -263,6 +263,7 @@ class PipProvider:
         ]
         if not in_range:
             return []
+        in_range = self._apply_prerelease_default(project_name, in_range)
         allowed = [candidate for candidate in in_range if not candidate.yanked]
         if not allowed and self._yank_policy.admits_yanked(
             project_name, all_yanked=True
@@ -273,6 +274,28 @@ class PipProvider:
         if preferred is not None:
             allowed.sort(key=lambda candidate: candidate.version != preferred)
         return allowed
+
+    def _apply_prerelease_default(
+        self, project_name: NormalizedName, in_range: list[HostCandidate]
+    ) -> list[HostCandidate]:
+        """PEP 440's rule: a prerelease is taken only if nothing else fits.
+
+        This has to be applied here and cannot be applied to the universe.
+        ``rank_candidates`` deliberately does not run the specifier (that is
+        the prerelease trap: an empty ``SpecifierSet`` would strip the very
+        prereleases a ``>=1.0b1`` dependency asks for), so it consults
+        release control alone and keeps prereleases whenever release control
+        has no opinion. Release control having no opinion means "infer from
+        the requirement", and the requirement is a range that only the
+        search knows. ``SpecifierSet.filter`` states the inference: yield
+        prereleases only when no final version matched.
+        """
+        if self._index.allows_prereleases(project_name) is True:
+            return in_range
+        final = [
+            candidate for candidate in in_range if not candidate.version.is_prerelease
+        ]
+        return final or in_range
 
     # ------------------------------------------------- ResolverProvider
 
