@@ -60,6 +60,7 @@ def _provider(index: CountingIndex) -> PipProvider:
     return PipProvider(
         index=index,  # type: ignore[arg-type]
         inputs=ResolveInputs(),
+        constraints={},
         reporter=None,  # type: ignore[arg-type]
         yank_policy=YankPolicy(frozenset()),
         python_version=Version("3.12"),

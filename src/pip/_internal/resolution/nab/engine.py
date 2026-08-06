@@ -169,6 +169,7 @@ class PipProvider:
         *,
         index: PipHostIndex,
         inputs: ResolveInputs,
+        constraints: Mapping[str, VersionRange],
         reporter: NabReporter,
         yank_policy: YankPolicy,
         python_version: Version,
@@ -177,6 +178,7 @@ class PipProvider:
     ) -> None:
         self._index = index
         self._inputs = inputs
+        self._constraints = constraints
         self._reporter = reporter
         self._yank_policy = yank_policy
         self._python_version = python_version
@@ -252,6 +254,7 @@ class PipProvider:
         self,
         project_name: NormalizedName,
         version_range: RangeProtocol[Version],
+        requirement: RangeProtocol[Version] | None,
     ) -> list[HostCandidate]:
         """Candidates to try, best first, with the yank rule applied.
 
@@ -260,7 +263,7 @@ class PipProvider:
         not knowable before the search. So the filter is here, where the
         range in play is known.
         """
-        in_range = self._admitted(project_name, version_range)
+        in_range = self._admitted(project_name, version_range, requirement)
         if not in_range:
             return []
         allowed = [candidate for candidate in in_range if not candidate.yanked]
@@ -278,15 +281,30 @@ class PipProvider:
         self,
         project_name: NormalizedName,
         version_range: RangeProtocol[Version],
+        requirement: RangeProtocol[Version] | None,
     ) -> list[HostCandidate]:
         """The candidates in ``version_range``, prereleases per PEP 440.
 
-        The range already carries the answer, so this asks it rather than
-        recomputing from candidate shape. ``SpecifierSet.to_range`` records
-        the prerelease opt-in a requirement grants as the range's pre-region,
-        and ``VersionRange.filter`` reads it: ``<6.0dev,>=5.26.1`` opts its
-        whole span in and admits ``5.29.0rc1`` alongside ``5.28.2``, while a
-        plain ``>=5.26.1`` buffers the release candidate out. That is what
+        Two ranges, two jobs. ``requirement`` is what the merged requirement
+        asks for and it decides the prerelease question; ``version_range`` is
+        what the search has left and it decides membership. Filtering with the
+        first and testing membership in the second is the order pip resolves
+        in: ``_iter_found_candidates`` runs ``SpecifierSet.filter`` over the
+        whole listing, and only afterwards drops what the search ruled out.
+
+        Keeping them apart is the whole point. PEP 440 admits a prerelease
+        when no final satisfies *the version specifier*, and an exclusion the
+        conflict machinery learned is not part of any specifier. Filter the
+        narrowed range instead and backtracking manufactures the admission:
+        strip every final of ``numba<=0.60,>0.1`` by learned clause and the
+        buffering clause fires on what is left, offering eight release
+        candidates for a requirement whose ``prereleases`` flag is ``None``.
+
+        The requirement range still carries the real opt-in.
+        ``SpecifierSet.to_range`` records it as the range's pre-region, and
+        ``VersionRange.filter`` reads it: ``<6.0dev,>=5.26.1`` opts its whole
+        span in and admits ``5.29.0rc1`` alongside ``5.28.2``, while a plain
+        ``>=5.26.1`` buffers the release candidate out. That is what
         ``SpecifierSet.filter`` does with the same requirement, and it is
         what nab's own provider delegates to.
 
@@ -312,12 +330,14 @@ class PipProvider:
         ``2.0rc1`` survives a plain ``pkg`` and falls to a ``pkg<2``.
         """
         assert isinstance(version_range, VersionRange)
+        if requirement is None:
+            requirement = version_range
         prereleases = (
             True if self._index.allows_prereleases(project_name) is True else None
         )
         candidates = self._versions(project_name)
         admitted = set(
-            version_range.filter(
+            requirement.filter(
                 (candidate.version for candidate in candidates),
                 prereleases=prereleases,
             )
@@ -325,7 +345,7 @@ class PipProvider:
         return [
             candidate
             for candidate in candidates
-            if candidate.version in admitted
+            if (candidate.version in admitted and candidate.version in version_range)
             or (candidate.is_installed and candidate.version in version_range)
         ]
 
@@ -343,20 +363,54 @@ class PipProvider:
         decisions the range came from, and rule out versions that are still
         selectable once those decisions are undone.
         """
+        return self._pick(package, version_range, self._requirement_range(package))
+
+    def _pick(
+        self,
+        package: str,
+        version_range: RangeProtocol[Version],
+        requirement: RangeProtocol[Version] | None,
+    ) -> Version | None:
+        """``choose_version`` over an explicit requirement range."""
         project_name, extras = split_key(package)
         if extras:
             base = self._positive_ranges.get(project_name)
             if base is not None:
-                alongside = self._first_usable(project_name, version_range & base)
+                alongside = self._first_usable(
+                    project_name,
+                    version_range & base,
+                    None if requirement is None else requirement & base,
+                )
                 if alongside is not None:
                     return alongside
-        return self._first_usable(project_name, version_range)
+        return self._first_usable(project_name, version_range, requirement)
+
+    def _requirement_range(self, package: str) -> RangeProtocol[Version] | None:
+        """What the merged requirement asks for, before the search narrowed it.
+
+        pip filters with ``constraint.specifier`` merged with every
+        ``InstallRequirement`` specifier for the identifier. Those two are
+        exactly the constraint range and the accumulated positive range, which
+        ``receive_partial_solution_hint`` hands over fresh each turn. None
+        means the search has no positive term to speak for, and then the range
+        it passes is the only requirement there is.
+        """
+        positive = self._positive_ranges.get(package)
+        if positive is None:
+            return None
+        constraint = self._constraints.get(package)
+        if constraint is None:
+            return positive
+        return positive & constraint
 
     def _first_usable(
-        self, project_name: NormalizedName, version_range: RangeProtocol[Version]
+        self,
+        project_name: NormalizedName,
+        version_range: RangeProtocol[Version],
+        requirement: RangeProtocol[Version] | None,
     ) -> Version | None:
         """The best version in ``version_range`` whose metadata reads."""
-        for candidate in self._ordered(project_name, version_range):
+        for candidate in self._ordered(project_name, version_range, requirement):
             if self._metadata_for(project_name, candidate) is not None:
                 return candidate.version
         return None
@@ -364,11 +418,19 @@ class PipProvider:
     def has_satisfying_version(
         self, package: str, version_range: RangeProtocol[Version]
     ) -> bool:
-        """Would ``choose_version`` answer, with nothing recorded?"""
+        """Would ``choose_version`` answer, with nothing recorded?
+
+        The caller lifts the user constraint off ``version_range`` to ask
+        whether the constraint is what hid the version, so the requirement
+        range is taken unconstrained too. Leaving the constraint on it would
+        make this answer echo the constrained call, and no failure would ever
+        be blamed on a constraint.
+        """
         was_probing = self._probing
         self._probing = True
         try:
-            return self.choose_version(package, version_range) is not None
+            positive = self._positive_ranges.get(package)
+            return self._pick(package, version_range, positive) is not None
         finally:
             self._probing = was_probing
 
@@ -745,9 +807,11 @@ def solve(
     :raises EngineFailure: no solution exists. The exception carries the
         causes pip's own error renderer wants.
     """
+    constraints = _constraint_ranges(inputs)
     provider = PipProvider(
         index=index,
         inputs=inputs,
+        constraints=constraints,
         reporter=reporter,
         yank_policy=yank_policy,
         python_version=python_version,
@@ -755,7 +819,6 @@ def solve(
         widening=widening,
     )
     requirements = _root_ranges(inputs)
-    constraints = _constraint_ranges(inputs)
     resolver: NabResolver[str, Version] = NabResolver(
         provider,
         observer=_Observer(reporter),
