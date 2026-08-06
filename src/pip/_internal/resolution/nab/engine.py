@@ -240,7 +240,7 @@ class PipProvider:
     ) -> None:
         self._unusable[project_name, version] = reason
         if not self._probing:
-            self._reporter.rejecting_version(project_name, f"{version}: {reason}")
+            logger.debug("skipping %s %s: %s", project_name, version, reason)
 
     def _ordered(
         self,
@@ -695,13 +695,24 @@ class _Observer:
 
     ``PIP_RESOLVER_DEBUG`` is decided once here rather than per event, so a
     run without it builds no argument tuples.
+
+    The 1st, 8th and 13th backtracking messages are driven from the conflict
+    loop, not from a version being unusable. pip prints them from
+    ``rejecting_candidate``, which fires when a candidate that was already
+    pinned is discarded because of a conflict. The PubGrub event with that
+    meaning is a conflict step whose satisfier is a decision: that decision
+    is about to be undone. A candidate skipped because its metadata could
+    not be read is not that event, and pip does not count one either.
     """
 
     def __init__(self, reporter: NabReporter) -> None:
         self._reporter = reporter
         self._debug = reporter.event_enabled()
+        self._decided: dict[str, Version] = {}
+        self._counted: dict[str, Version] = {}
 
     def on_decision(self, package: str, version: Version, level: int) -> None:
+        self._decided[package] = version
         if self._debug:
             self._reporter.event("adding_requirement", package, version, level)
 
@@ -726,7 +737,9 @@ class _Observer:
     def on_no_versions(
         self, package: str, version_range: RangeProtocol[Version]
     ) -> None:
-        self._reporter.no_versions(str(package), str(version_range))
+        logger.debug("no version of %s left in %s", package, version_range)
+        if self._debug:
+            self._reporter.event("no_versions", package, str(version_range))
 
     def on_conflict_step(
         self,
@@ -738,5 +751,16 @@ class _Observer:
         previous_level: int,
         can_backjump: bool,
     ) -> None:
+        if satisfier_is_decision:
+            self._count_rejection(satisfier_package)
         if self._debug:
             self._reporter.event("conflict_step", satisfier_package, satisfier_level)
+
+    def _count_rejection(self, package: str) -> None:
+        """One pinned candidate is about to be discarded."""
+        version = self._decided.get(package)
+        if version is None or self._counted.get(package) == version:
+            return
+        self._counted[package] = version
+        project_name, _ = split_key(package)
+        self._reporter.rejecting_version(project_name, f"{package} {version}")

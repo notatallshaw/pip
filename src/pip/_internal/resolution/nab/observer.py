@@ -6,10 +6,13 @@ turns every resolver event into a log line. Both come from resolvelib
 reporter callbacks that PubGrub has no equivalent for: PubGrub does not
 reject candidates one at a time, it derives that a range is impossible.
 
-The counter is therefore driven by version rejections the engine reports:
-a package with no versions left in its range, and versions dropped because
-their metadata could not be used. The wording and the thresholds are pip's,
-unchanged, so the same run produces the same three messages.
+The counter is driven by the one PubGrub event that means what pip's does.
+pip prints from ``rejecting_candidate``, which fires when a candidate that
+was already pinned is discarded because of a conflict; PubGrub's equivalent
+is a conflict step whose satisfier is a decision, because that decision is
+about to be undone. A version skipped because its metadata could not be read
+is not that event, and pip does not count one either. The wording and the
+thresholds are pip's, unchanged.
 """
 
 from __future__ import annotations
