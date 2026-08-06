@@ -71,11 +71,11 @@
       "version": "0.0.13.dev0"
     },
     {
-      "bom-ref": "pkg:pypi/packaging@26.2",
+      "bom-ref": "pkg:pypi/packaging@26.3.dev0",
       "name": "packaging",
-      "purl": "pkg:pypi/packaging@26.2",
+      "purl": "pkg:pypi/packaging@26.3.dev0",
       "type": "library",
-      "version": "26.2"
+      "version": "26.3.dev0"
     },
     {
       "bom-ref": "pkg:pypi/platformdirs@4.10.0",
@@ -167,7 +167,7 @@
         "pkg:pypi/nab-index@0.0.13.dev0",
         "pkg:pypi/nab-python@0.0.13.dev0",
         "pkg:pypi/nab-resolver@0.0.13.dev0",
-        "pkg:pypi/packaging@26.2",
+        "pkg:pypi/packaging@26.3.dev0",
         "pkg:pypi/platformdirs@4.10.0",
         "pkg:pypi/pygments@2.20.0",
         "pkg:pypi/pyproject-hooks@1.2.0",
@@ -210,7 +210,7 @@
       "ref": "pkg:pypi/nab-resolver@0.0.13.dev0"
     },
     {
-      "ref": "pkg:pypi/packaging@26.2"
+      "ref": "pkg:pypi/packaging@26.3.dev0"
     },
     {
       "ref": "pkg:pypi/platformdirs@4.10.0"
