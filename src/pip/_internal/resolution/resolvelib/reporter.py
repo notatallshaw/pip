@@ -8,6 +8,7 @@ from typing import Any
 from pip._vendor.resolvelib.reporters import BaseReporter
 
 from .base import Candidate, Constraint, Requirement
+from .candidates import ExtrasCandidate
 
 logger = getLogger(__name__)
 
@@ -42,12 +43,17 @@ class PipReporter(BaseReporter[Requirement, Candidate, str]):
         Logs both the rejection count message (if applicable) and details about
         the requirements and constraints that caused the rejection.
         """
-        self.reject_count_by_package[candidate.name] += 1
+        if isinstance(candidate, ExtrasCandidate):
+            ireq = candidate.base.get_install_requirement()
+        else:
+            ireq = candidate.get_install_requirement()
+        if ireq is None or not ireq.is_direct:
+            self.reject_count_by_package[candidate.name] += 1
 
-        count = self.reject_count_by_package[candidate.name]
-        if count in self._messages_at_reject_count:
-            message = self._messages_at_reject_count[count]
-            logger.info("INFO: %s", message.format(package_name=candidate.name))
+            count = self.reject_count_by_package[candidate.name]
+            if count in self._messages_at_reject_count:
+                message = self._messages_at_reject_count[count]
+                logger.info("INFO: %s", message.format(package_name=candidate.name))
 
         msg = "Will try a different candidate, due to conflict:"
         for req_info in criterion.information:
