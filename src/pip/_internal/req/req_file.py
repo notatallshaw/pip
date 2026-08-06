@@ -578,7 +578,7 @@ def get_file_content(
 
         resp = session.get(url)
         raise_for_status(resp)
-        return resp.url, resp.text
+        return resp.url, _decode_req_file(resp.content, resp.url)
 
     # Assume this is a bare path.
     try:

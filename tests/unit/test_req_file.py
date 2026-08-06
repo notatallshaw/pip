@@ -14,6 +14,8 @@ from unittest import mock
 
 import pytest
 
+from pip._vendor.requests.utils import get_encoding_from_headers
+
 import pip._internal.req.req_file  # this will be monkeypatched
 from pip._internal.exceptions import InstallationError, RequirementsFileParseError
 from pip._internal.index.package_finder import PackageFinder
@@ -34,6 +36,7 @@ from pip._internal.req.req_file import (
 from pip._internal.req.req_install import InstallRequirement
 
 from tests.lib import TestData, make_test_finder
+from tests.lib.requests_mocks import MockResponse
 
 
 @pytest.fixture
@@ -991,6 +994,46 @@ class TestParseRequirements:
         assert len(reqs) == 1
         assert reqs[0].name == expected_name
         assert reqs[0].specifier == expected_spec
+
+    @pytest.mark.parametrize(
+        "raw_content,expected",
+        [
+            pytest.param(
+                "Django==1.4.2 # café\n".encode(),
+                "Django==1.4.2 # café\n",
+                id="UTF-8",
+            ),
+            pytest.param(
+                "Django==1.4.2\n".encode("utf-16"),
+                "Django==1.4.2\n",
+                id="BOM",
+            ),
+            pytest.param(
+                "# coding=cp1251\nDjango==1.4.2 # кофе\n".encode("cp1251"),
+                "# coding=cp1251\nDjango==1.4.2 # кофе\n",
+                id="PEP-263",
+            ),
+        ],
+    )
+    def test_remote_file_decoding(
+        self,
+        raw_content: bytes,
+        expected: str,
+        session: PipSession,
+    ) -> None:
+        url = "https://example.invalid/requirements.in"
+        response = MockResponse(raw_content)
+        response.url = "https://example.invalid/requirements.txt"
+        response.headers["Content-Type"] = "text/plain"
+        response.encoding = get_encoding_from_headers(response.headers)
+
+        with mock.patch.object(session, "get", return_value=response):
+            location, content = pip._internal.req.req_file.get_file_content(
+                url, session
+            )
+
+        assert location == response.url
+        assert content == expected
 
     @pytest.mark.parametrize(
         "bom,encoding",
