@@ -444,9 +444,9 @@ class PipProvider:
         project_name, extras = split_key(package)
         candidate = self._candidate(project_name, version)
         metadata = self._metadata_for(project_name, candidate)
-        assert metadata is not None, (
-            f"the resolver decided {package} {version}, which has no usable metadata"
-        )
+        assert (
+            metadata is not None
+        ), f"the resolver decided {package} {version}, which has no usable metadata"
 
         ranges: dict[str, VersionRange] = {}
         texts: dict[str, str] = {}
@@ -920,9 +920,7 @@ class _Observer:
         if self._debug:
             self._reporter.event("adding_requirement", package, version, level)
 
-    def on_derivation(
-        self, package: str, *, positive: bool, cause: Any
-    ) -> None:
+    def on_derivation(self, package: str, *, positive: bool, cause: Any) -> None:
         if self._debug:
             self._reporter.event("derivation", package, positive)
 
