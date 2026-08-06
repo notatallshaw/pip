@@ -1,9 +1,9 @@
 """End to end checks that --use-feature=nab-resolver selects the nab variant.
 
-The pip side of the nab variant is built, but nab itself is not vendored, so
-a run that reaches the engine seam stops with a NotImplementedError. These
-tests assert that the seam is reached when the flag is passed and that the
-same command without the flag is untouched.
+Each command has to reach the engine and come back with an answer, and the
+same command without the flag has to be untouched. ``NOT_IMPLEMENTED`` is
+still asserted absent: it is the sentence the seam raised before the engine
+was wired, so a run that prints it has lost the engine rather than the flag.
 """
 
 from __future__ import annotations
@@ -26,14 +26,9 @@ def test_flag_reaches_the_nab_variant(
         args += ["-d", "."]
     elif command == "wheel":
         args += ["-w", "."]
-    result = script.pip(
-        *args,
-        "--use-feature=nab-resolver",
-        "simplewheel",
-        expect_error=True,
-        allow_stderr_error=True,
-    )
-    assert NOT_IMPLEMENTED in result.stderr, str(result)
+    result = script.pip(*args, "--use-feature=nab-resolver", "simplewheel")
+    assert NOT_IMPLEMENTED not in result.stderr, str(result)
+    assert "simplewheel" in result.stdout, str(result)
 
 
 def test_lock_reaches_the_nab_variant(
@@ -48,10 +43,10 @@ def test_lock_reaches_the_nab_variant(
         "pylock.toml",
         "--use-feature=nab-resolver",
         "simplewheel",
-        expect_error=True,
-        allow_stderr_error=True,
+        allow_stderr_warning=True,
     )
-    assert NOT_IMPLEMENTED in result.stderr, str(result)
+    assert NOT_IMPLEMENTED not in result.stderr, str(result)
+    result.did_create(Path("scratch") / "pylock.toml")
 
 
 def test_default_is_unchanged(script: PipTestEnvironment, data: TestData) -> None:
@@ -65,6 +60,9 @@ def test_default_is_unchanged(script: PipTestEnvironment, data: TestData) -> Non
 def test_legacy_resolver_is_unchanged(
     script: PipTestEnvironment, data: TestData
 ) -> None:
+    # The legacy resolver and the nab variant are mutually exclusive, so the
+    # session-wide variant has to come off before the deprecated flag goes on.
+    script.environ.pop("PIP_USE_FEATURE", None)
     result = script.pip(
         "download",
         "--no-index",
