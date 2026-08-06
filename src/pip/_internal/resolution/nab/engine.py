@@ -33,9 +33,13 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from pip._vendor.nab_python._extra_keys import join_extra, split_extra
 from pip._vendor.nab_python.diagnostics import BlockerKind, NoVersionsKind
-from pip._vendor.nab_python.provider import ExtrasMode, MetadataError
+from pip._vendor.nab_python.provider import (
+    ExtrasMode,
+    MetadataError,
+    join_extra,
+    split_extra,
+)
 from pip._vendor.nab_python.provider import Provider as NabProvider
 from pip._vendor.nab_resolver.errors import ResolutionError
 from pip._vendor.nab_resolver.resolver import Resolver as NabResolver
