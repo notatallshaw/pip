@@ -1,0 +1,2 @@
+Close an incomplete download before deleting it, so Windows reports the
+incomplete-download error instead of a ``PermissionError`` traceback.
