@@ -1158,6 +1158,49 @@ def test_new_resolver_prerelease_bound_admits_prerelease(
     script.assert_installed(dep="1.0", opted="2.0rc1", plain="1.0")
 
 
+def test_new_resolver_keeps_installed_prerelease(script: PipTestEnvironment) -> None:
+    """An installed pre-release is kept while the requirement's bounds hold.
+
+    pip admits the installed distribution on bounds alone, with
+    ``prereleases=True``, so a plain ``pip install pkg`` over an installed
+    ``2.0rc1`` is already satisfied and must not walk back to ``1.0``. The
+    pre-release buffering that governs index candidates does not reach the
+    installed one. Bounds that exclude it still do.
+    """
+    create_basic_wheel_for_package(script, "pkg", "1.0")
+    create_basic_wheel_for_package(script, "pkg", "2.0rc1")
+
+    script.pip(
+        "install",
+        "--no-cache-dir",
+        "--no-index",
+        "--find-links",
+        script.scratch_path,
+        "pkg==2.0rc1",
+    )
+    script.assert_installed(pkg="2.0rc1")
+
+    script.pip(
+        "install",
+        "--no-cache-dir",
+        "--no-index",
+        "--find-links",
+        script.scratch_path,
+        "pkg",
+    )
+    script.assert_installed(pkg="2.0rc1")
+
+    script.pip(
+        "install",
+        "--no-cache-dir",
+        "--no-index",
+        "--find-links",
+        script.scratch_path,
+        "pkg<2",
+    )
+    script.assert_installed(pkg="1.0")
+
+
 def test_new_resolver_upgrade_same_version(script: PipTestEnvironment) -> None:
     create_basic_wheel_for_package(script, "pkg", "2")
     create_basic_wheel_for_package(script, "pkg", "1")
