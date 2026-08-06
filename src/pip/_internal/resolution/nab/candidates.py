@@ -225,9 +225,11 @@ class PipHostIndex:
                 link = (
                     candidate.explicit_link
                     if candidate.explicit_link is not None
-                    else candidate.index_candidate.link
-                    if candidate.index_candidate is not None
-                    else None
+                    else (
+                        candidate.index_candidate.link
+                        if candidate.index_candidate is not None
+                        else None
+                    )
                 )
                 assert link is not None, "a candidate must carry a source"
                 built = self._factory._make_candidate_from_link(
@@ -235,9 +237,9 @@ class PipHostIndex:
                     extras=frozenset(extras),
                     template=template,
                     name=candidate.project_name,
-                    version=candidate.version
-                    if candidate.explicit_link is None
-                    else None,
+                    version=(
+                        candidate.version if candidate.explicit_link is None else None
+                    ),
                 )
         except (MetadataInconsistent, MetadataInvalid) as exc:
             raise CandidateUnavailable(
