@@ -259,9 +259,9 @@ class PipFetchPort:
             return
         refusal = self._requires_python_refusal(dist)
         if refusal is not None:
-            self.requires_python_refused.setdefault(package, {})[candidate.version] = (
-                refusal
-            )
+            self.requires_python_refused.setdefault(package, {})[
+                candidate.version
+            ] = refusal
             self._refuse(
                 package,
                 version,

@@ -227,9 +227,9 @@ class PipHostIndex:
                     extras=frozenset(extras),
                     template=template,
                     name=candidate.project_name,
-                    version=candidate.version
-                    if candidate.explicit_link is None
-                    else None,
+                    version=(
+                        candidate.version if candidate.explicit_link is None else None
+                    ),
                 )
         except (MetadataInconsistent, MetadataInvalid) as exc:
             raise CandidateUnavailable(
