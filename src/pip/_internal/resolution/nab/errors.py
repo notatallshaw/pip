@@ -60,7 +60,7 @@ def causes_from_derivation(
     *,
     root_sentinel: object,
     requirement_text: Callable[[str | None, str], str | None],
-    parent_version: Callable[[str, object], Version | None],
+    parent_versions: Callable[[str, object], Sequence[Version]],
     requires_python: Callable[[str], SpecifierSet | None],
 ) -> Sequence[FailureCause]:
     """Flatten the engine's derivation tree into pip's causes.
@@ -114,18 +114,26 @@ def causes_from_derivation(
         selected = _most_constrained(requested)
 
     causes: list[FailureCause] = []
-    seen: set[tuple[str | None, str]] = set()
+    seen: set[tuple[str | None, str, object]] = set()
     for parent_key, dep_key, parent_range in selected:
-        if (parent_key, dep_key) in seen:
-            continue
-        seen.add((parent_key, dep_key))
         text = requirement_text(parent_key, dep_key) or dep_key
-        causes.append(
-            _cause(text, parent_key, parent_range, parent_version=parent_version)
-        )
+        for cause in _causes(
+            text, parent_key, parent_range, parent_versions=parent_versions
+        ):
+            # Two versions of one parent declaring the same dependency are
+            # two causes, not one: pip names each version separately. One
+            # widened clause stands for all of them, so the versions are
+            # recovered here rather than counted off the clauses.
+            fingerprint = (parent_key, text, cause.parent_version)
+            if fingerprint in seen:
+                continue
+            seen.add(fingerprint)
+            causes.append(cause)
 
     causes.extend(
-        _requires_python_causes(blamed, requires_python, parent_version=parent_version)
+        _requires_python_causes(
+            blamed, requires_python, parent_versions=parent_versions
+        )
     )
     return causes
 
@@ -155,29 +163,32 @@ def _most_constrained(
     return [pair for pair in requested if pair[1] in contested]
 
 
-def _cause(
+def _causes(
     text: str,
     parent_key: str | None,
     parent_range: object,
     *,
-    parent_version: Callable[[str, object], Version | None],
-) -> FailureCause:
+    parent_versions: Callable[[str, object], Sequence[Version]],
+) -> list[FailureCause]:
     if parent_key is None:
-        return FailureCause(requirement=text)
+        return [FailureCause(requirement=text)]
     project_name, _ = split_key(parent_key)
-    return FailureCause(
-        requirement=text,
-        parent_key=parent_key,
-        parent_project_name=project_name,
-        parent_version=parent_version(parent_key, parent_range),
-    )
+    return [
+        FailureCause(
+            requirement=text,
+            parent_key=parent_key,
+            parent_project_name=project_name,
+            parent_version=version,
+        )
+        for version in parent_versions(parent_key, parent_range)
+    ]
 
 
 def _requires_python_causes(
     blamed: set[str | None],
     requires_python: Callable[[str], SpecifierSet | None],
     *,
-    parent_version: Callable[[str, object], Version | None],
+    parent_versions: Callable[[str, object], Sequence[Version]],
 ) -> list[FailureCause]:
     """One cause per package whose candidates all wanted another Python.
 
@@ -191,15 +202,16 @@ def _requires_python_causes(
         if specifier is None:
             continue
         project_name, _ = split_key(package)
-        causes.append(
-            FailureCause(
-                requirement=package,
-                parent_key=package,
-                parent_project_name=project_name,
-                parent_version=parent_version(package, _EVERY_VERSION),
-                requires_python=specifier,
+        for version in parent_versions(package, _EVERY_VERSION):
+            causes.append(
+                FailureCause(
+                    requirement=package,
+                    parent_key=package,
+                    parent_project_name=project_name,
+                    parent_version=version,
+                    requires_python=specifier,
+                )
             )
-        )
     return causes
 
 
@@ -305,10 +317,18 @@ def _cause_pair(
             return None
         return RequirementInformation(requirement, parent)
 
+    # The extras of the parent node have to travel with the requirement: a
+    # dependency of ``pkg[ext]`` still carries its ``; extra == "ext"``
+    # marker, and pip drops a requirement whose marker does not hold unless
+    # it is told which extras are active.
+    requested_extras = (
+        split_key(cause.parent_key)[1] if cause.parent_key is not None else frozenset()
+    )
     requirements = list(
         factory.make_requirements_from_spec(
             cause.requirement,
             comes_from=parent.get_install_requirement() if parent else None,
+            requested_extras=sorted(requested_extras),
         )
     )
     assert requirements, f"requirement {cause.requirement!r} produced no cause"
