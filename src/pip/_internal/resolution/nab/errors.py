@@ -109,7 +109,9 @@ def causes_from_derivation(
         for pair in [_requested_pair(clause, root_sentinel)]
         if pair is not None
     ]
-    selected = [pair for pair in requested if pair[1] in blamed] or requested
+    selected = [pair for pair in requested if pair[1] in blamed]
+    if not selected:
+        selected = _most_constrained(requested)
 
     causes: list[FailureCause] = []
     seen: set[tuple[str | None, str]] = set()
@@ -126,6 +128,31 @@ def causes_from_derivation(
         _requires_python_causes(blamed, requires_python, parent_version=parent_version)
     )
     return causes
+
+
+def _most_constrained(
+    requested: list[tuple[str | None, str, object]],
+) -> list[tuple[str | None, str, object]]:
+    """The requirements on the one package that two clauses disagree about.
+
+    A conflict with no ``NO_VERSIONS`` clause is two clauses that cannot both
+    hold for the same package: the range they leave it is empty, and the
+    contradiction is found by propagation before anything asks for a version.
+    pip reports such a conflict as the requirements on that package alone, so
+    the package with more than one requirement on it is the one to report.
+    Falling back to everything would name packages that are only in the proof
+    because they are what asked.
+    """
+    counts: dict[str, int] = {}
+    for _, dep_key, _range in requested:
+        counts[dep_key] = counts.get(dep_key, 0) + 1
+    if not counts:
+        return requested
+    most = max(counts.values())
+    if most < 2:
+        return requested
+    contested = {key for key, count in counts.items() if count == most}
+    return [pair for pair in requested if pair[1] in contested]
 
 
 def _cause(
