@@ -256,14 +256,9 @@ class PipProvider:
         not knowable before the search. So the filter is here, where the
         range in play is known.
         """
-        in_range = [
-            candidate
-            for candidate in self._versions(project_name)
-            if candidate.version in version_range
-        ]
+        in_range = self._admitted(project_name, version_range)
         if not in_range:
             return []
-        in_range = self._apply_prerelease_default(project_name, in_range)
         allowed = [candidate for candidate in in_range if not candidate.yanked]
         if not allowed and self._yank_policy.admits_yanked(
             project_name, all_yanked=True
@@ -275,27 +270,48 @@ class PipProvider:
             allowed.sort(key=lambda candidate: candidate.version != preferred)
         return allowed
 
-    def _apply_prerelease_default(
-        self, project_name: NormalizedName, in_range: list[HostCandidate]
+    def _admitted(
+        self,
+        project_name: NormalizedName,
+        version_range: RangeProtocol[Version],
     ) -> list[HostCandidate]:
-        """PEP 440's rule: a prerelease is taken only if nothing else fits.
+        """The candidates in ``version_range``, prereleases per PEP 440.
 
-        This has to be applied here and cannot be applied to the universe.
-        ``rank_candidates`` deliberately does not run the specifier (that is
+        The range already carries the answer, so this asks it rather than
+        recomputing from candidate shape. ``SpecifierSet.to_range`` records
+        the prerelease opt-in a requirement grants as the range's pre-region,
+        and ``VersionRange.filter`` reads it: ``<6.0dev,>=5.26.1`` opts its
+        whole span in and admits ``5.29.0rc1`` alongside ``5.28.2``, while a
+        plain ``>=5.26.1`` buffers the release candidate out. That is what
+        ``SpecifierSet.filter`` does with the same requirement, and it is
+        what nab's own provider delegates to.
+
+        The prerelease decision cannot be applied to the universe instead.
+        ``rank_candidates`` deliberately does not run a specifier (that is
         the prerelease trap: an empty ``SpecifierSet`` would strip the very
-        prereleases a ``>=1.0b1`` dependency asks for), so it consults
-        release control alone and keeps prereleases whenever release control
-        has no opinion. Release control having no opinion means "infer from
-        the requirement", and the requirement is a range that only the
-        search knows. ``SpecifierSet.filter`` states the inference: yield
-        prereleases only when no final version matched.
+        prereleases a ``>=1.0b1`` dependency asks for), so it keeps every
+        prerelease unless release control says otherwise. The requirement is
+        a range that only the search knows.
+
+        Release control is consulted first, because a user who says ``--pre``
+        outranks what the requirement asks for. Only its True side belongs
+        here: ``rank_candidates`` already dropped every prerelease from the
+        universe for False, which is the one place pip applies it, and
+        re-applying it here would also drop a prerelease named by a URL,
+        which pip installs.
         """
-        if self._index.allows_prereleases(project_name) is True:
-            return in_range
-        final = [
-            candidate for candidate in in_range if not candidate.version.is_prerelease
-        ]
-        return final or in_range
+        assert isinstance(version_range, VersionRange)
+        prereleases = (
+            True if self._index.allows_prereleases(project_name) is True else None
+        )
+        candidates = self._versions(project_name)
+        admitted = set(
+            version_range.filter(
+                (candidate.version for candidate in candidates),
+                prereleases=prereleases,
+            )
+        )
+        return [candidate for candidate in candidates if candidate.version in admitted]
 
     # ------------------------------------------------- ResolverProvider
 

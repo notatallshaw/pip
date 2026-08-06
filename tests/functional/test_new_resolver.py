@@ -1128,6 +1128,36 @@ def test_new_resolver_extra_after_base_is_chosen(script: PipTestEnvironment) -> 
     script.assert_installed(base="2.0", dep="1.0", helper="1.0")
 
 
+def test_new_resolver_prerelease_bound_admits_prerelease(
+    script: PipTestEnvironment,
+) -> None:
+    """A pre-release bound opts the whole requirement in, per PEP 440.
+
+    ``opted<3.0dev,>=1.0`` names a pre-release in one of its bounds, so
+    ``SpecifierSet.prereleases`` is True for it and every in-range
+    pre-release is admitted, not just one that nothing else can replace.
+    ``plain>=1.0`` names none, so its pre-release stays buffered behind the
+    final. This is the real shape of ``grpcio-status`` asking for
+    ``protobuf<6.0dev,>=5.26.1``.
+    """
+    for name in ("opted", "plain"):
+        create_basic_wheel_for_package(script, name, "1.0")
+        create_basic_wheel_for_package(script, name, "2.0rc1")
+    create_basic_wheel_for_package(
+        script, "dep", "1.0", depends=["opted<3.0dev,>=1.0", "plain>=1.0"]
+    )
+
+    script.pip(
+        "install",
+        "--no-cache-dir",
+        "--no-index",
+        "--find-links",
+        script.scratch_path,
+        "dep",
+    )
+    script.assert_installed(dep="1.0", opted="2.0rc1", plain="1.0")
+
+
 def test_new_resolver_upgrade_same_version(script: PipTestEnvironment) -> None:
     create_basic_wheel_for_package(script, "pkg", "2")
     create_basic_wheel_for_package(script, "pkg", "1")
