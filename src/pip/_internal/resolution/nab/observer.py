@@ -72,6 +72,14 @@ class NabReporter:
         """No version of ``package_name`` is left in its current range."""
         self.rejecting_version(package_name, detail)
 
+    def event_enabled(self) -> bool:
+        """Is ``PIP_RESOLVER_DEBUG`` set?
+
+        Asked once by the engine seam so a run without it never builds the
+        argument tuple an event would discard.
+        """
+        return self._debug
+
     def event(self, name: str, *args: object) -> None:
         """Log a resolver event under ``PIP_RESOLVER_DEBUG``.
 
