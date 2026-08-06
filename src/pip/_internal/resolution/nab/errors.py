@@ -37,6 +37,26 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True)
+class RejectionBlocker:
+    """One reason nab's look-ahead refused every candidate of a package.
+
+    nab's provider does not put a look-ahead rejection into the PubGrub
+    proof: it refuses the candidate and records a ``NO_VERSIONS`` clause,
+    keeping the reason in its own diagnostic record. That is deliberate,
+    the record is part of nab's host-facing API, and it means the proof
+    alone says "this package ran out" where pip wants "X depends on Y and
+    the user asked for a different Y".
+
+    ``package`` is the dependency that did the blocking. ``against_root``
+    says the disagreement was with a root requirement, which pip reports
+    as a cause of its own.
+    """
+
+    package: str
+    against_root: bool = False
+
+
+@dataclass(frozen=True)
 class FailureCause:
     """One requirement the engine could not satisfy, and who wanted it.
 
@@ -62,6 +82,7 @@ def causes_from_derivation(
     requirement_text: Callable[[str | None, str], str | None],
     parent_versions: Callable[[str, object], Sequence[Version]],
     requires_python: Callable[[str], SpecifierSet | None],
+    blockers: Callable[[str], Sequence[RejectionBlocker]],
 ) -> Sequence[FailureCause]:
     """Flatten the engine's derivation tree into pip's causes.
 
@@ -102,6 +123,20 @@ def causes_from_derivation(
     }
     blamed.discard(None)
 
+    rejected: list[FailureCause] = []
+    explained: set[str | None] = set()
+    for package in sorted(name for name in blamed if name is not None):
+        found = _rejection_causes(
+            package,
+            blockers(package),
+            requirement_text=requirement_text,
+            parent_versions=parent_versions,
+        )
+        if found:
+            rejected.extend(found)
+            explained.add(package)
+    blamed -= explained
+
     requested = [
         pair
         for clause in external
@@ -113,9 +148,9 @@ def causes_from_derivation(
     if not selected:
         selected = _most_constrained(requested)
 
-    causes: list[FailureCause] = []
+    causes: list[FailureCause] = list(rejected)
     seen: set[tuple[str | None, str, object]] = set()
-    for parent_key, dep_key, parent_range in selected:
+    for parent_key, dep_key, parent_range in [] if rejected else selected:
         text = requirement_text(parent_key, dep_key) or dep_key
         for cause in _causes(
             text, parent_key, parent_range, parent_versions=parent_versions
@@ -135,6 +170,46 @@ def causes_from_derivation(
             blamed, requires_python, parent_versions=parent_versions
         )
     )
+    return causes
+
+
+def _rejection_causes(
+    package: str,
+    found: Sequence[RejectionBlocker],
+    *,
+    requirement_text: Callable[[str | None, str], str | None],
+    parent_versions: Callable[[str, object], Sequence[Version]],
+) -> list[FailureCause]:
+    """pip's causes for a package whose candidates look-ahead all refused.
+
+    The blocker names the dependency that did the refusing, so the cause is
+    "``package`` at V depends on that dependency", one per version tried,
+    which is the sentence pip prints. A disagreement with a root requirement
+    also gets the root's own cause, because pip's message names both sides
+    of a conflict and only one of them is a dependency.
+    """
+    causes: list[FailureCause] = []
+    versions = parent_versions(package, _EVERY_VERSION)
+    project_name, _ = split_key(package)
+    for blocker in found:
+        text = requirement_text(package, blocker.package)
+        if text is None:
+            continue
+        # The root side first: pip lists what the user asked for above what a
+        # dependency wanted.
+        if blocker.against_root:
+            root = requirement_text(None, blocker.package)
+            if root is not None:
+                causes.append(FailureCause(requirement=root))
+        causes.extend(
+            FailureCause(
+                requirement=text,
+                parent_key=package,
+                parent_project_name=project_name,
+                parent_version=version,
+            )
+            for version in versions
+        )
     return causes
 
 
