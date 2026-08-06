@@ -40,6 +40,7 @@ from pip._internal.exceptions import (
     MetadataInvalid,
     UnsupportedWheel,
 )
+from pip._internal.models.link import links_equivalent
 from pip._internal.req.constructors import install_req_from_link_and_ireq
 from pip._internal.utils.hashes import Hashes
 
@@ -143,6 +144,7 @@ class PipHostIndex:
         self._make_install_req = make_install_req
         self._universe: dict[NormalizedName, Sequence[HostCandidate]] = {}
         self._templates: dict[NormalizedName, InstallRequirement] = {}
+        self._comes_from: dict[NormalizedName, InstallRequirement] = {}
         self._pip_candidates: dict[
             tuple[NormalizedName, Version, frozenset[NormalizedName]], Candidate
         ] = {}
@@ -248,6 +250,52 @@ class PipHostIndex:
             )
         self._pip_candidates[key] = built
         return built
+
+    def register_explicit(
+        self, spec: str, comes_from: InstallRequirement | None
+    ) -> bool:
+        """Make a direct URL dependency the whole universe for its package.
+
+        pip already behaves this way for a URL named on the command line:
+        once any explicit candidate exists, ``Factory.find_candidates`` skips
+        the finder. A URL that arrives as somebody's dependency is the same
+        thing discovered later, so it is registered the same way.
+
+        Returns False when the package's universe has already been handed to
+        the engine from the index, because replacing it under the search
+        would make an earlier answer unexplainable. That is a hard failure
+        for the caller to report, not something to paper over.
+        """
+        ireq = self._make_install_req(spec, comes_from)
+        assert ireq.name is not None, "a dependency always carries a name"
+        project_name = canonicalize_name(ireq.name)
+        existing = self._inputs.explicit.get(project_name)
+        if existing is not None:
+            # Two spellings of one URL are one requirement: pip compares them
+            # with links_equivalent, which ignores the ``#egg=`` fragment and
+            # query-parameter order.
+            assert existing.link is not None
+            assert ireq.link is not None
+            return links_equivalent(existing.link, ireq.link)
+        if project_name in self._universe:
+            return False
+        self._inputs.explicit[project_name] = ireq
+        self._templates[project_name] = ireq
+        return True
+
+    def note_requested_by(
+        self, project_name: NormalizedName, comes_from: InstallRequirement | None
+    ) -> None:
+        """Record who first asked for ``project_name``.
+
+        pip annotates a candidate with the requirement it came from, which is
+        what puts ``(from pkg[ext])`` in the download line and in an error.
+        A package reached only transitively has no root ireq to carry that,
+        so the first parent to ask for it supplies one.
+        """
+        if comes_from is None or project_name in self._templates:
+            return
+        self._comes_from.setdefault(project_name, comes_from)
 
     def hashes_for(self, project_name: NormalizedName) -> Hashes:
         """The hash allowlist the command line puts on ``project_name``."""
@@ -432,7 +480,9 @@ class PipHostIndex:
             if requirement.project_name == project_name:
                 self._templates[project_name] = requirement.ireq
                 return requirement.ireq
-        template = self._make_install_req(project_name, None)
+        template = self._make_install_req(
+            project_name, self._comes_from.get(project_name)
+        )
         self._templates[project_name] = template
         return template
 
