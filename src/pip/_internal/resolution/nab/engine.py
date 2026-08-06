@@ -44,6 +44,7 @@ if TYPE_CHECKING:
     from pip._vendor.packaging.utils import NormalizedName
     from pip._vendor.packaging.version import Version
 
+    from pip._internal.req.req_install import InstallRequirement
     from pip._internal.resolution.nab.candidates import (
         CandidateMetadata,
         HostCandidate,
@@ -192,6 +193,7 @@ class PipProvider:
         self.deps_cache: dict[str, dict[Version, dict[str, VersionRange]]] = {}
         self.dep_texts: dict[str, dict[Version, dict[str, str]]] = {}
         self._widened: dict[tuple[str, Version], VersionRange] = {}
+        self._positive_ranges: Mapping[str, RangeProtocol[Version]] = {}
         # has_satisfying_version must leave no trace: it runs the real scan.
         self._probing = False
 
@@ -278,7 +280,11 @@ class PipProvider:
         self, package: str, version_range: RangeProtocol[Version]
     ) -> Version | None:
         """Pick the best usable version of ``package`` inside ``version_range``."""
-        project_name, _ = split_key(package)
+        project_name, extras = split_key(package)
+        if extras:
+            base = self._positive_ranges.get(project_name)
+            if base is not None:
+                version_range = version_range & base
         for candidate in self._ordered(project_name, version_range):
             if self._metadata_for(project_name, candidate) is not None:
                 return candidate.version
@@ -316,8 +322,11 @@ class PipProvider:
             texts[project_name] = f"{project_name}=={version}"
             self._warn_missing_extras(project_name, version, extras, metadata)
         if not self._inputs.ignore_dependencies:
+            comes_from = self._index.pip_candidate(
+                candidate, extras
+            ).get_install_requirement()
             for requirement in self._requirements(metadata, extras):
-                self._add_dependency(requirement, ranges, texts)
+                self._add_dependency(requirement, ranges, texts, comes_from)
 
         self.deps_cache.setdefault(package, {})[version] = ranges
         self.dep_texts.setdefault(package, {})[version] = texts
@@ -378,7 +387,17 @@ class PipProvider:
         positive_ranges: Mapping[str, RangeProtocol[Version]],
         decisions: Mapping[str, Version],
     ) -> None:
-        """Nothing is forward-checked here."""
+        """Keep the base ranges, so an extras node cannot outrun its base.
+
+        An extras node and its base are two packages to the search but one
+        distribution in the answer, and the node's only dependency on the
+        base is ``base == chosen``. Picking a version the base's own range
+        has already ruled out therefore guarantees a conflict on the next
+        propagation. pip does not pay that: the extra rides on a candidate
+        that was picked once. Reading the base's accumulated range here
+        costs nothing and removes the whole class of wasted decision.
+        """
+        self._positive_ranges = positive_ranges
 
     def consume_pending_clauses(self) -> list[Incompatibility[str, Version]]:
         """No clauses are queued: this provider has no look-ahead."""
@@ -498,21 +517,27 @@ class PipProvider:
         requirement: PackagingRequirement,
         ranges: dict[str, VersionRange],
         texts: dict[str, str],
+        comes_from: InstallRequirement | None,
     ) -> None:
-        if requirement.url is not None:
-            raise InstallationError(
-                f"The nab resolver cannot follow the direct URL dependency "
-                f"{requirement}: under this arm pip supplies the candidate "
-                "universe and only a requirement named on the command line "
-                "may carry a URL."
-            )
         name = canonicalize_name(requirement.name)
         extras = frozenset(canonicalize_name(extra) for extra in requirement.extras)
-        term = (
-            requirement.specifier.to_range()
-            if requirement.specifier
-            else VersionRange.full(admit_arbitrary=False)
-        )
+        self._index.note_requested_by(name, comes_from)
+        if requirement.url is not None:
+            # PEP 508 forbids a specifier alongside a URL, so the link is the
+            # whole universe and the range is unbounded.
+            if not self._index.register_explicit(str(requirement), comes_from):
+                raise InstallationError(
+                    f"Cannot install {requirement}: {name} was already "
+                    "resolved from the index before this direct URL "
+                    "requirement was reached."
+                )
+            term = VersionRange.full(admit_arbitrary=False)
+        else:
+            term = (
+                requirement.specifier.to_range()
+                if requirement.specifier
+                else VersionRange.full(admit_arbitrary=False)
+            )
         previous = ranges.get(name)
         ranges[name] = term if previous is None else previous & term
         texts[name] = str(requirement)
