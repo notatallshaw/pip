@@ -297,6 +297,19 @@ class PipHostIndex:
             return
         self._comes_from.setdefault(project_name, comes_from)
 
+    def allows_prereleases(self, project_name: NormalizedName) -> bool | None:
+        """``--pre`` and friends, for one project.
+
+        True means the user asked for prereleases, False means only final
+        versions, and None means "decide from the requirement", which is PEP
+        440's rule and which only the resolver can apply because only it
+        knows the merged range.
+        """
+        release_control = self._finder.release_control
+        if release_control is None:
+            return None
+        return release_control.allows_prereleases(project_name)
+
     def hashes_for(self, project_name: NormalizedName) -> Hashes:
         """The hash allowlist the command line puts on ``project_name``."""
         hashes = Hashes()
