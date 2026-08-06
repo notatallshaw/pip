@@ -145,6 +145,7 @@ class PipHostIndex:
         self._universe: dict[NormalizedName, Sequence[HostCandidate]] = {}
         self._templates: dict[NormalizedName, InstallRequirement] = {}
         self._comes_from: dict[NormalizedName, InstallRequirement] = {}
+        self._requested_as: dict[NormalizedName, str] = {}
         self._pip_candidates: dict[
             tuple[NormalizedName, Version, frozenset[NormalizedName]], Candidate
         ] = {}
@@ -284,18 +285,28 @@ class PipHostIndex:
         return True
 
     def note_requested_by(
-        self, project_name: NormalizedName, comes_from: InstallRequirement | None
+        self,
+        project_name: NormalizedName,
+        raw_name: str,
+        comes_from: InstallRequirement | None,
     ) -> None:
-        """Record who first asked for ``project_name``.
+        """Record who first asked for ``project_name``, and how they spelled it.
 
         pip annotates a candidate with the requirement it came from, which is
         what puts ``(from pkg[ext])`` in the download line and in an error.
         A package reached only transitively has no root ireq to carry that,
         so the first parent to ask for it supplies one.
+
+        The spelling matters too: pip builds the template from the
+        requirement as written, so ``Installing collected packages`` says
+        ``PySocks`` and not ``pysocks``. Synthesizing from the canonical name
+        would quietly rename every transitively reached package.
         """
-        if comes_from is None or project_name in self._templates:
+        if project_name in self._templates:
             return
-        self._comes_from.setdefault(project_name, comes_from)
+        self._requested_as.setdefault(project_name, raw_name)
+        if comes_from is not None:
+            self._comes_from.setdefault(project_name, comes_from)
 
     def allows_prereleases(self, project_name: NormalizedName) -> bool | None:
         """``--pre`` and friends, for one project.
@@ -494,7 +505,8 @@ class PipHostIndex:
                 self._templates[project_name] = requirement.ireq
                 return requirement.ireq
         template = self._make_install_req(
-            project_name, self._comes_from.get(project_name)
+            self._requested_as.get(project_name, project_name),
+            self._comes_from.get(project_name),
         )
         self._templates[project_name] = template
         return template
