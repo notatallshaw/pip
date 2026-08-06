@@ -1158,6 +1158,71 @@ def test_new_resolver_prerelease_bound_admits_prerelease(
     script.assert_installed(dep="1.0", opted="2.0rc1", plain="1.0")
 
 
+def test_new_resolver_backtracking_does_not_admit_prerelease(
+    script: PipTestEnvironment,
+) -> None:
+    """Backtracking must not manufacture a pre-release admission.
+
+    ``base`` is asked for by name alone, so PEP 440 buffers ``2.0rc1``
+    behind the two finals. Both finals then lose to ``pin==2.0`` on their
+    own dependency. That is an exclusion the search learned, not a
+    specifier on ``base``, so it cannot open the buffer: pip filters the
+    listing with the merged specifier, and no learned exclusion is in it.
+
+    The resolve has no answer once the buffer stays shut, which is the
+    point. Only the refusal is asserted, not which refusal: the two
+    resolvers reach it by different routes and word it differently.
+    """
+    create_basic_wheel_for_package(script, "pin", "1.0")
+    create_basic_wheel_for_package(script, "pin", "2.0")
+    create_basic_wheel_for_package(script, "base", "1.0", depends=["pin==1.0"])
+    create_basic_wheel_for_package(script, "base", "1.5", depends=["pin==1.0"])
+    create_basic_wheel_for_package(script, "base", "2.0rc1", depends=["pin==2.0"])
+
+    script.pip(
+        "install",
+        "--no-cache-dir",
+        "--no-index",
+        "--find-links",
+        script.scratch_path,
+        "base",
+        "pin==2.0",
+        expect_error=True,
+        expect_stderr=True,
+    )
+
+    script.assert_not_installed("base")
+
+
+def test_new_resolver_backtracking_keeps_opted_in_prerelease(
+    script: PipTestEnvironment,
+) -> None:
+    """An opted-in pre-release still wins the versions conflict removed.
+
+    ``base<3.0dev,>=1.0rc1`` names a pre-release, so the requirement admits
+    ``1.0rc1`` outright. The two finals are tried first and both lose to
+    ``pin==2.0``; the pre-release is what is left, and it is a version the
+    requirement asked for all along. Narrowing the buffering decision back
+    to the requirement must not cost this.
+    """
+    create_basic_wheel_for_package(script, "pin", "1.0")
+    create_basic_wheel_for_package(script, "pin", "2.0")
+    create_basic_wheel_for_package(script, "base", "1.0rc1", depends=["pin==2.0"])
+    create_basic_wheel_for_package(script, "base", "1.0", depends=["pin==1.0"])
+    create_basic_wheel_for_package(script, "base", "1.5", depends=["pin==1.0"])
+
+    script.pip(
+        "install",
+        "--no-cache-dir",
+        "--no-index",
+        "--find-links",
+        script.scratch_path,
+        "base<3.0dev,>=1.0rc1",
+        "pin==2.0",
+    )
+    script.assert_installed(base="1.0rc1", pin="2.0")
+
+
 def test_new_resolver_keeps_installed_prerelease(script: PipTestEnvironment) -> None:
     """An installed pre-release is kept while the requirement's bounds hold.
 
