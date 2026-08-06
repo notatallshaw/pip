@@ -382,12 +382,24 @@ class _DerivationReader:
         actually asked about; a version nothing was recorded for was never
         tried and has nothing to say.
         """
-        parent_name = canonicalize_name(split_extra(parent_key)[0])
-        return sorted(
+        parent_name = str(canonicalize_name(split_extra(parent_key)[0]))
+        recorded = sorted(
             version
             for (name, version) in self._provider.deps_cache
             if name == parent_name and version in parent_range  # type: ignore[operator]
         )
+        if recorded:
+            return recorded
+        # Nothing was recorded, which is the case where every candidate was
+        # refused before its dependencies were read: an unreadable
+        # distribution, or one whose own Requires-Python excludes the target.
+        # pip still names a version, so the newest listed one answers.
+        listed = [
+            version
+            for version, _dist in self._provider.versions_cache.get(parent_name, ())
+            if version in parent_range  # type: ignore[operator]
+        ]
+        return sorted(listed)[-1:]
 
     def blockers(self, package: str) -> list[RejectionBlocker]:
         """What nab's look-ahead said when it refused every candidate.

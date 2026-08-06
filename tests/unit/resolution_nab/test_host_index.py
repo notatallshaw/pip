@@ -94,7 +94,9 @@ def test_metadata_reads_raw_dependencies(
     universe = index.candidates(canonicalize_name("requires-simple-extra"))
     assert universe
 
-    metadata = index.metadata(universe[-1])
-    assert metadata.project_name == canonicalize_name("requires-simple-extra")
-    assert any("extra ==" in dep for dep in metadata.raw_dependencies)
-    assert metadata.provided_extras == frozenset({canonicalize_name("extra")})
+    dist = index.metadata(universe[-1])
+    assert canonicalize_name(dist.raw_name) == canonicalize_name(
+        "requires-simple-extra"
+    )
+    assert any("extra ==" in dep for dep in dist.iter_raw_dependencies())
+    assert set(dist.iter_provided_extras()) == {canonicalize_name("extra")}

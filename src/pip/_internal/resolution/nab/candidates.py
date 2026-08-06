@@ -42,11 +42,13 @@ from pip._vendor.packaging.utils import canonicalize_name
 from pip._vendor.packaging.version import InvalidVersion
 
 from pip._internal.exceptions import (
+    InstallationError,
     InvalidInstalledPackage,
     MetadataInconsistent,
     MetadataInvalid,
     UnsupportedWheel,
 )
+from pip._internal.models.link import links_equivalent
 from pip._internal.req.constructors import install_req_from_link_and_ireq
 from pip._internal.utils.hashes import Hashes
 from pip._internal.utils.packaging import get_requirement
@@ -54,6 +56,7 @@ from pip._internal.utils.packaging import get_requirement
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from pip._vendor.packaging.requirements import Requirement
     from pip._vendor.packaging.utils import NormalizedName
     from pip._vendor.packaging.version import Version
 
@@ -241,36 +244,91 @@ class PipHostIndex:
         self._pip_candidates[key] = built
         return built
 
-    def note_dependency_spellings(
+    def adopt_dependencies(
         self, candidate: HostCandidate, dist: BaseDistribution
-    ) -> None:
-        """Record who asked for each of ``dist``'s dependencies, and how.
+    ) -> list[str]:
+        """Take over what only pip can own, and hand the rest back as written.
 
-        pip annotates a candidate with the requirement it came from, which is
-        what puts ``(from pkg)`` in the download line and in an error, and it
-        builds the template from the requirement *as written*, so
-        ``Installing collected packages`` says ``PySocks`` and not
-        ``pysocks``. nab's provider parses the dependency lines itself and
-        hands the resolver canonical keys, so neither fact survives the seam
-        and pip recovers both here, from the same lines, before nab has asked
-        about the dependency.
+        Two things happen to every dependency line before nab sees it.
+
+        The spelling and the parent are recorded. pip annotates a candidate
+        with the requirement it came from, which is what puts ``(from pkg)``
+        in the download line and in an error, and it builds the template from
+        the requirement *as written*, so ``Installing collected packages``
+        says ``PySocks`` and not ``pysocks``. nab hands the resolver
+        canonical keys, so neither fact survives the seam and pip keeps them
+        here, before nab has asked about the dependency.
+
+        A direct URL is taken over entirely. nab refuses to resolve one and
+        says so loudly; pip resolves it by making the link the package's
+        whole universe, which is what ``Factory.find_candidates`` already
+        does for a URL on the command line. So the URL is registered and the
+        line handed on without it, and nab sees an ordinary dependency whose
+        universe happens to hold exactly one version.
         """
         comes_from = self.pip_candidate(
             candidate, frozenset()
         ).get_install_requirement()
-        for line in dist.iter_raw_dependencies():
+        lines: list[str] = []
+        for raw in dist.iter_raw_dependencies():
+            line = raw.strip()
+            if not line:
+                continue
             try:
-                requirement = get_requirement(line.strip())
+                requirement = get_requirement(line)
             except InvalidRequirement:
-                # nab rejects the whole distribution for this; leaving the
-                # spelling unrecorded is the smaller of the two effects.
+                # nab rejects the whole distribution for this, in its own
+                # words. Passing the line through keeps that its decision.
+                lines.append(line)
                 continue
             name = canonicalize_name(requirement.name)
-            if name in self._templates:
+            if name not in self._templates:
+                self._requested_as.setdefault(name, requirement.name)
+                if comes_from is not None:
+                    self._comes_from.setdefault(name, comes_from)
+            if requirement.url is None:
+                lines.append(line)
                 continue
-            self._requested_as.setdefault(name, requirement.name)
-            if comes_from is not None:
-                self._comes_from.setdefault(name, comes_from)
+            if not self.register_explicit(line, comes_from):
+                raise InstallationError(
+                    f"Cannot install {line}: {name} was already resolved from "
+                    "the index before this direct URL requirement was reached."
+                )
+            lines.append(_without_url(requirement))
+        return lines
+
+    def register_explicit(
+        self, spec: str, comes_from: InstallRequirement | None
+    ) -> bool:
+        """Make a direct URL dependency the whole universe for its package.
+
+        pip already behaves this way for a URL named on the command line:
+        once any explicit candidate exists, ``Factory.find_candidates`` skips
+        the finder. A URL that arrives as somebody's dependency is the same
+        thing discovered later, so it is registered the same way, and nab
+        then sees an ordinary package whose universe happens to hold one
+        version.
+
+        Returns False when the package's universe has already been handed
+        over from the index, because replacing it under a live search would
+        make an earlier answer unexplainable.
+        """
+        ireq = self._make_install_req(spec, comes_from)
+        assert ireq.name is not None, "a dependency always carries a name"
+        project_name = canonicalize_name(ireq.name)
+        existing = self._inputs.explicit.get(project_name)
+        if existing is not None:
+            # Two spellings of one URL are one requirement: pip compares them
+            # with links_equivalent, which ignores the ``#egg=`` fragment and
+            # query-parameter order.
+            assert existing.link is not None
+            assert ireq.link is not None
+            return links_equivalent(existing.link, ireq.link)
+        if project_name in self._universe:
+            return False
+        self._inputs.explicit[project_name] = ireq
+        self._templates[project_name] = ireq
+        return True
 
     def hashes_for(self, project_name: NormalizedName) -> Hashes:
         """The hash allowlist the command line puts on ``project_name``."""
@@ -488,3 +546,18 @@ class PipHostIndex:
         )
         self._templates[project_name] = template
         return template
+
+
+def _without_url(requirement: Requirement) -> str:
+    """``pkg[extra] ; marker``, with the direct URL taken out.
+
+    PEP 508 forbids a specifier alongside a URL, so nothing is lost but the
+    link, and the link is now pip's. The extras and the marker have to
+    survive: they are what decides whether the dependency applies at all.
+    """
+    text = requirement.name
+    if requirement.extras:
+        text += "[" + ",".join(sorted(requirement.extras)) + "]"
+    if requirement.marker is not None:
+        text += f" ; {requirement.marker}"
+    return text
