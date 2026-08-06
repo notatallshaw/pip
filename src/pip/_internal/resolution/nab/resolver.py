@@ -1,10 +1,10 @@
 """Resolution backed by nab, pip's third resolver variant.
 
 Selected with ``--use-feature=nab-resolver``. pip owns the index layer, the
-installed environment and every install decision; nab owns the search. The
-division is deliberate: because every candidate probe costs exactly what a
-probe costs pip today, a benchmark against the resolvelib variant measures
-search quality and nothing else.
+installed environment and every install decision; nab owns the search and
+the provider that drives it. The division is deliberate: because every
+candidate probe costs exactly what a probe costs pip today, a benchmark
+against the resolvelib variant measures search quality and nothing else.
 
 What lives where:
 
@@ -12,10 +12,11 @@ What lives where:
   explicit link requirements.
 - :mod:`.candidates` supplies the candidate universe and the metadata,
   entirely out of pip's finder, factory and preparer.
+- :mod:`.fetch_port` publishes both in the shapes nab's provider reads.
 - :mod:`.observer` keeps pip's backtracking messages.
 - :mod:`.errors` rebuilds pip's error sentences from the engine's causes.
-- :mod:`.engine` is the only module that will import nab, and it is the only
-  one that still raises ``NotImplementedError``.
+- :mod:`.engine` builds nab's own ``Provider`` over the port and runs the
+  PubGrub solver on it.
 - ``resolution._reqset`` and ``resolution._order`` are shared with the
   resolvelib variant, so reinstall decisions and installation order cannot
   drift between the two.
@@ -115,7 +116,7 @@ class Resolver(BaseResolver):
                 inputs=inputs,
                 index=index,
                 reporter=reporter,
-                yank_policy=YankPolicy(inputs.pinned_packages()),
+                yank_policy=YankPolicy(index, inputs.pinned_packages()),
                 python_version=self.factory._python_candidate.version,
                 ignore_requires_python=self.factory._ignore_requires_python,
             )

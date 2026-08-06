@@ -1,8 +1,13 @@
-"""The candidate universe pip hands the nab resolver.
+"""The candidate universe and the metadata pip hands nab's provider.
 
-Under this arm pip owns the whole index layer and nab owns only the search,
-so the adapter supplies a universe of versions rather than letting nab list
-anything. Three properties have to hold and each one is load-bearing:
+pip owns the index layer: which files exist, which of them this machine can
+install, which one represents a version, and what preparing one costs.
+nab's provider owns everything above that: the ladder that decides where
+metadata comes from, the priority key, the widening, the yank rule and the
+prerelease admission. This module is the pip half, and
+:mod:`.fetch_port` is the adapter that publishes it in nab's shapes.
+
+Three properties have to hold of the universe and each one is load-bearing:
 
 1. It contains every version that could be selected. nab's widening records
    one set of dependencies for a whole range of versions, and that is only
@@ -23,6 +28,7 @@ anything. Three properties have to hold and each one is load-bearing:
    whether it is pinned is not known until the requirements have been merged.
    Dropping a yanked version at supply time turns ``pip install foo==1.0``
    into a resolution failure when 1.0 is yanked, which pip resolves today.
+   nab applies the rule, through the ``YankPolicy`` this module's facts feed.
 """
 
 from __future__ import annotations
@@ -31,6 +37,7 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from pip._vendor.packaging.requirements import InvalidRequirement
 from pip._vendor.packaging.utils import canonicalize_name
 from pip._vendor.packaging.version import InvalidVersion
 
@@ -40,14 +47,13 @@ from pip._internal.exceptions import (
     MetadataInvalid,
     UnsupportedWheel,
 )
-from pip._internal.models.link import links_equivalent
 from pip._internal.req.constructors import install_req_from_link_and_ireq
 from pip._internal.utils.hashes import Hashes
+from pip._internal.utils.packaging import get_requirement
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Sequence
 
-    from pip._vendor.packaging.specifiers import SpecifierSet
     from pip._vendor.packaging.utils import NormalizedName
     from pip._vendor.packaging.version import Version
 
@@ -67,9 +73,9 @@ logger = logging.getLogger(__name__)
 class CandidateUnavailable(Exception):
     """This version exists but its metadata cannot be used.
 
-    Raised by :meth:`PipHostIndex.metadata`. The engine seam turns it into
-    the rejection nab already understands, which drops the version and keeps
-    searching rather than failing the resolve.
+    Raised by :meth:`PipHostIndex.metadata`. The fetch port records it as a
+    metadata error, which is the rejection nab already understands: the
+    version is dropped and the search keeps going.
     """
 
     def __init__(self, project_name: str, version: Version, reason: str) -> None:
@@ -99,23 +105,14 @@ class HostCandidate:
     def is_installed(self) -> bool:
         return self.installed_dist is not None
 
-
-@dataclass(frozen=True)
-class CandidateMetadata:
-    """The metadata a resolver needs about one version.
-
-    ``raw_dependencies`` are unevaluated PEP 508 strings, including the
-    ``; extra == "x"`` lines. ``BaseDistribution.iter_dependencies`` cannot be
-    used to produce them: it evaluates every marker against the live
-    environment with ``extra`` bound to the empty string, which drops every
-    extra-gated line and pre-consumes every environment marker.
-    """
-
-    project_name: NormalizedName
-    version: Version
-    requires_python: SpecifierSet | None
-    raw_dependencies: tuple[str, ...]
-    provided_extras: frozenset[NormalizedName]
+    @property
+    def link(self) -> Link | None:
+        """The artifact this version is served from, or None if installed."""
+        if self.explicit_link is not None:
+            return self.explicit_link
+        if self.index_candidate is not None:
+            return self.index_candidate.link
+        return None
 
 
 class PipHostIndex:
@@ -125,7 +122,7 @@ class PipHostIndex:
     compatibility, Requires-Python, ``--platform``, ``--prefer-binary``,
     ``--uploaded-prior-to``, hash intersection, the built wheel cache,
     build isolation, direct URLs, VCS and ``--find-links`` all keep working
-    without the adapter knowing they exist.
+    without nab knowing they exist.
     """
 
     def __init__(
@@ -165,37 +162,35 @@ class PipHostIndex:
         self._universe[project_name] = universe
         return universe
 
-    def preferred_version(self, project_name: NormalizedName) -> Version | None:
-        """The installed version, when this package must not be upgraded.
+    def find(
+        self, project_name: NormalizedName, version: Version
+    ) -> HostCandidate | None:
+        """The candidate for one version, or None if nothing supplies it."""
+        for candidate in self.candidates(project_name):
+            if candidate.version == version:
+                return candidate
+        return None
 
-        pip expresses "prefer what is installed" by ordering candidates
-        (``_iter_built_with_prepended``). Under this arm the universe is
-        ordered by version, so the preference is passed to the engine
-        separately instead.
+    def yanked_versions(self, project_name: NormalizedName) -> frozenset[Version]:
+        """Which of ``project_name``'s versions the index marks yanked.
+
+        One half of PEP 592. nab asks for it once per selection that has a
+        yanked candidate in range, and applies the rule itself.
         """
-        if self._eligible_for_upgrade(project_name):
-            return None
-        dist = self._installed_dist(project_name)
-        if dist is None:
-            return None
-        return self._installed_version(dist)
+        return frozenset(
+            candidate.version
+            for candidate in self.candidates(project_name)
+            if candidate.yanked
+        )
 
-    def metadata(self, candidate: HostCandidate) -> CandidateMetadata:
-        """Prepare ``candidate`` and read its metadata.
+    def metadata(self, candidate: HostCandidate) -> BaseDistribution:
+        """Prepare ``candidate`` and return pip's distribution for it.
 
         This is where pip downloads, builds and validates, exactly as it does
         for the resolvelib variant, so a candidate probe under this arm costs
         what a candidate probe costs pip today.
         """
-        pip_candidate = self.pip_candidate(candidate, frozenset())
-        dist = pip_candidate.dist  # type: ignore[attr-defined]
-        return CandidateMetadata(
-            project_name=canonicalize_name(dist.raw_name),
-            version=dist.version,
-            requires_python=dist.requires_python or None,
-            raw_dependencies=tuple(dist.iter_raw_dependencies()),
-            provided_extras=frozenset(dist.iter_provided_extras()),
-        )
+        return self.pip_candidate(candidate, frozenset()).dist  # type: ignore[attr-defined]
 
     def pip_candidate(
         self, candidate: HostCandidate, extras: frozenset[NormalizedName]
@@ -222,13 +217,7 @@ class PipHostIndex:
                     template=template,
                 )
             else:
-                link = (
-                    candidate.explicit_link
-                    if candidate.explicit_link is not None
-                    else candidate.index_candidate.link
-                    if candidate.index_candidate is not None
-                    else None
-                )
+                link = candidate.link
                 assert link is not None, "a candidate must carry a source"
                 built = self._factory._make_candidate_from_link(
                     link=link,
@@ -252,74 +241,36 @@ class PipHostIndex:
         self._pip_candidates[key] = built
         return built
 
-    def register_explicit(
-        self, spec: str, comes_from: InstallRequirement | None
-    ) -> bool:
-        """Make a direct URL dependency the whole universe for its package.
-
-        pip already behaves this way for a URL named on the command line:
-        once any explicit candidate exists, ``Factory.find_candidates`` skips
-        the finder. A URL that arrives as somebody's dependency is the same
-        thing discovered later, so it is registered the same way.
-
-        Returns False when the package's universe has already been handed to
-        the engine from the index, because replacing it under the search
-        would make an earlier answer unexplainable. That is a hard failure
-        for the caller to report, not something to paper over.
-        """
-        ireq = self._make_install_req(spec, comes_from)
-        assert ireq.name is not None, "a dependency always carries a name"
-        project_name = canonicalize_name(ireq.name)
-        existing = self._inputs.explicit.get(project_name)
-        if existing is not None:
-            # Two spellings of one URL are one requirement: pip compares them
-            # with links_equivalent, which ignores the ``#egg=`` fragment and
-            # query-parameter order.
-            assert existing.link is not None
-            assert ireq.link is not None
-            return links_equivalent(existing.link, ireq.link)
-        if project_name in self._universe:
-            return False
-        self._inputs.explicit[project_name] = ireq
-        self._templates[project_name] = ireq
-        return True
-
-    def note_requested_by(
-        self,
-        project_name: NormalizedName,
-        raw_name: str,
-        comes_from: InstallRequirement | None,
+    def note_dependency_spellings(
+        self, candidate: HostCandidate, dist: BaseDistribution
     ) -> None:
-        """Record who first asked for ``project_name``, and how they spelled it.
+        """Record who asked for each of ``dist``'s dependencies, and how.
 
         pip annotates a candidate with the requirement it came from, which is
-        what puts ``(from pkg[ext])`` in the download line and in an error.
-        A package reached only transitively has no root ireq to carry that,
-        so the first parent to ask for it supplies one.
-
-        The spelling matters too: pip builds the template from the
-        requirement as written, so ``Installing collected packages`` says
-        ``PySocks`` and not ``pysocks``. Synthesizing from the canonical name
-        would quietly rename every transitively reached package.
+        what puts ``(from pkg)`` in the download line and in an error, and it
+        builds the template from the requirement *as written*, so
+        ``Installing collected packages`` says ``PySocks`` and not
+        ``pysocks``. nab's provider parses the dependency lines itself and
+        hands the resolver canonical keys, so neither fact survives the seam
+        and pip recovers both here, from the same lines, before nab has asked
+        about the dependency.
         """
-        if project_name in self._templates:
-            return
-        self._requested_as.setdefault(project_name, raw_name)
-        if comes_from is not None:
-            self._comes_from.setdefault(project_name, comes_from)
-
-    def allows_prereleases(self, project_name: NormalizedName) -> bool | None:
-        """``--pre`` and friends, for one project.
-
-        True means the user asked for prereleases, False means only final
-        versions, and None means "decide from the requirement", which is PEP
-        440's rule and which only the resolver can apply because only it
-        knows the merged range.
-        """
-        release_control = self._finder.release_control
-        if release_control is None:
-            return None
-        return release_control.allows_prereleases(project_name)
+        comes_from = self.pip_candidate(
+            candidate, frozenset()
+        ).get_install_requirement()
+        for line in dist.iter_raw_dependencies():
+            try:
+                requirement = get_requirement(line.strip())
+            except InvalidRequirement:
+                # nab rejects the whole distribution for this; leaving the
+                # spelling unrecorded is the smaller of the two effects.
+                continue
+            name = canonicalize_name(requirement.name)
+            if name in self._templates:
+                continue
+            self._requested_as.setdefault(name, requirement.name)
+            if comes_from is not None:
+                self._comes_from.setdefault(name, comes_from)
 
     def hashes_for(self, project_name: NormalizedName) -> Hashes:
         """The hash allowlist the command line puts on ``project_name``."""
@@ -331,6 +282,27 @@ class PipHostIndex:
         if constraint is not None:
             hashes &= constraint.hashes
         return hashes
+
+    def preferences(self) -> dict[str, Version]:
+        """Versions nab should try first: what is installed and must not move.
+
+        pip expresses "prefer what is installed" by ordering candidates
+        (``_iter_built_with_prepended``). nab expresses it as a preference
+        map, honoured when the version is in range and usable, so the
+        preference is passed rather than baked into the order.
+
+        Built from every installed distribution up front, because nab reads
+        the map at construction time and a package's eligibility does not
+        depend on anything the search discovers.
+        """
+        if self._factory.force_reinstall:
+            return {}
+        preferences: dict[str, Version] = {}
+        for project_name, dist in self._factory._installed_dists.items():
+            if self._eligible_for_upgrade(project_name):
+                continue
+            preferences[project_name] = self._installed_version(dist)
+        return preferences
 
     def _build_universe(self, project_name: NormalizedName) -> Sequence[HostCandidate]:
         explicit = self._explicit_universe(project_name)
@@ -500,7 +472,8 @@ class PipHostIndex:
 
         pip takes the first requirement that mentions the project. A package
         reached only transitively has no root ireq, so one is synthesized the
-        way ``Factory.make_requirements_from_spec`` does.
+        way ``Factory.make_requirements_from_spec`` does, out of the spelling
+        and the parent :meth:`note_dependency_spellings` recorded.
         """
         cached = self._templates.get(project_name)
         if cached is not None:
@@ -515,12 +488,3 @@ class PipHostIndex:
         )
         self._templates[project_name] = template
         return template
-
-    def preferences(self) -> Mapping[str, Version]:
-        """Versions the engine should try first, keyed by project name."""
-        preferences: dict[str, Version] = {}
-        for project_name in self._universe:
-            version = self.preferred_version(project_name)
-            if version is not None:
-                preferences[project_name] = version
-        return preferences
