@@ -416,6 +416,11 @@ class PipHostIndex:
             )
             if candidate is None:
                 continue
+            # Every URL constraint has to match, not one of them: two
+            # constraint lines naming different URLs for one package leave it
+            # with nothing, which is what pip reports.
+            if not constraint.is_satisfied_by(candidate):
+                continue
             records.append(self._explicit_record(project_name, candidate, link))
         records.sort(key=lambda record: record.version)
         return tuple(records)
