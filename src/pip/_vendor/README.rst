@@ -93,6 +93,11 @@ such as OS packages.
 Modifications
 =============
 
+* ``nab-python``: rewritten to import ``packaging`` from ``pip._vendor``
+  instead of its own ``_vendor`` directory; vendored as the resolve-path
+  subset only.
+* ``nab-resolver``: no modifications.
+* ``nab-index``: vendored as the subset the resolve path imports.
 * ``setuptools`` is completely stripped to only keep ``pkg_resources``.
 * ``pkg_resources`` has been modified to import its dependencies from
   ``pip._vendor``, and to use the vendored copy of ``platformdirs``
