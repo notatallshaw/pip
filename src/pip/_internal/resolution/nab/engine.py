@@ -299,6 +299,13 @@ class PipProvider:
         universe for False, which is the one place pip applies it, and
         re-applying it here would also drop a prerelease named by a URL,
         which pip installs.
+
+        The installed distribution is admitted on bounds alone, which is what
+        ``Factory._iter_found_candidates`` does for it
+        (``specifier.contains(installed_dist.version, prereleases=True)``).
+        Neither the buffering nor release control reaches it: pip asks only
+        whether what is already there still fits, so an installed
+        ``2.0rc1`` survives a plain ``pkg`` and falls to a ``pkg<2``.
         """
         assert isinstance(version_range, VersionRange)
         prereleases = (
@@ -311,7 +318,12 @@ class PipProvider:
                 prereleases=prereleases,
             )
         )
-        return [candidate for candidate in candidates if candidate.version in admitted]
+        return [
+            candidate
+            for candidate in candidates
+            if candidate.version in admitted
+            or (candidate.is_installed and candidate.version in version_range)
+        ]
 
     # ------------------------------------------------- ResolverProvider
 
