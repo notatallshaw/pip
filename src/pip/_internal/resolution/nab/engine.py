@@ -337,6 +337,7 @@ def _failure(
     causes = causes_from_derivation(
         exc.incompatibility,
         root_sentinel=ROOT,
+        root_causes=reader.root_causes,
         requirement_text=reader.requirement_text,
         parent_versions=reader.parent_versions,
         requires_python=reader.requires_python,
@@ -367,10 +368,23 @@ class _DerivationReader:
         self._port = port
         self._inputs = inputs
 
-    def requirement_text(self, parent_key: str | None, dep_key: str) -> str | None:
+    def root_causes(self, dep_key: str) -> list[FailureCause]:
+        """pip's causes for every root requirement on ``dep_key``.
+
+        resolvelib reports a conflict as every requirement recorded against
+        the node, not just the ones the proof used, and pip prints one line
+        per entry. nab's root input is one range per node, so the proof can
+        only name the intersection; the requirements folded into it are read
+        back from what pip collected. A node with no root requirement is a
+        dependency clause's target, which never reaches here.
+        """
+        roots = self._inputs.roots_for(dep_key)
+        if not roots:
+            return [FailureCause(requirement=dep_key)]
+        return [FailureCause(requirement=root.text) for root in roots]
+
+    def requirement_text(self, parent_key: str, dep_key: str) -> str | None:
         """The dependency as written, for the clause naming ``dep_key``."""
-        if parent_key is None:
-            return self._root_text(dep_key)
         parent_name = canonicalize_name(split_extra(parent_key)[0])
         dep_name, dep_extra = split_extra(dep_key)
         dep_name = str(canonicalize_name(dep_name))
@@ -385,25 +399,6 @@ class _DerivationReader:
                 }:
                     continue
                 return str(requirement)
-        return None
-
-    def _root_text(self, dep_key: str) -> str | None:
-        """The root requirement as the user typed it.
-
-        Not rebuilt from the key: pip's message for ``pip install
-        requirements.txt`` keys on the requirement reading exactly
-        ``requirements.txt``, and the key is the canonical name.
-        """
-        base, extra = split_extra(dep_key)
-        project_name = canonicalize_name(base)
-        for requirement in self._inputs.requirements:
-            if requirement.project_name != project_name:
-                continue
-            if extra is not None and canonicalize_name(extra) not in requirement.extras:
-                continue
-            if requirement.ireq.req is not None:
-                return str(requirement.ireq.req)
-            return f"{dep_key}{requirement.specifier}"
         return None
 
     def parent_versions(

@@ -80,7 +80,8 @@ def causes_from_derivation(
     derivation: object,
     *,
     root_sentinel: object,
-    requirement_text: Callable[[str | None, str], str | None],
+    root_causes: Callable[[str], Sequence[FailureCause]],
+    requirement_text: Callable[[str, str], str | None],
     parent_versions: Callable[[str, object], Sequence[Version]],
     requires_python: Callable[[str], SpecifierSet | None],
     blockers: Callable[[str], Sequence[RejectionBlocker]],
@@ -130,6 +131,7 @@ def causes_from_derivation(
         found = _rejection_causes(
             package,
             blockers(package),
+            root_causes=root_causes,
             requirement_text=requirement_text,
             parent_versions=parent_versions,
         )
@@ -152,15 +154,24 @@ def causes_from_derivation(
     causes: list[FailureCause] = list(rejected)
     seen: set[tuple[str | None, str, object]] = set()
     for parent_key, dep_key, parent_range in [] if rejected else selected:
-        text = requirement_text(parent_key, dep_key) or dep_key
-        for cause in _causes(
-            text, parent_key, parent_range, parent_versions=parent_versions
-        ):
+        node_causes: Sequence[FailureCause]
+        if parent_key is None:
+            # A root clause states the intersection of every requirement the
+            # user wrote on this node, so the requirements are recovered from
+            # what pip collected. pip prints one line per requirement, and
+            # the count is what makes it print the conflict report at all.
+            node_causes = root_causes(dep_key)
+        else:
+            text = requirement_text(parent_key, dep_key) or dep_key
+            node_causes = _causes(
+                text, parent_key, parent_range, parent_versions=parent_versions
+            )
+        for cause in node_causes:
             # Two versions of one parent declaring the same dependency are
             # two causes, not one: pip names each version separately. One
             # widened clause stands for all of them, so the versions are
             # recovered here rather than counted off the clauses.
-            fingerprint = (parent_key, text, cause.parent_version)
+            fingerprint = (parent_key, cause.requirement, cause.parent_version)
             if fingerprint in seen:
                 continue
             seen.add(fingerprint)
@@ -178,7 +189,8 @@ def _rejection_causes(
     package: str,
     found: Sequence[RejectionBlocker],
     *,
-    requirement_text: Callable[[str | None, str], str | None],
+    root_causes: Callable[[str], Sequence[FailureCause]],
+    requirement_text: Callable[[str, str], str | None],
     parent_versions: Callable[[str, object], Sequence[Version]],
 ) -> list[FailureCause]:
     """pip's causes for a package whose candidates look-ahead all refused.
@@ -199,9 +211,7 @@ def _rejection_causes(
         # The root side first: pip lists what the user asked for above what a
         # dependency wanted.
         if blocker.against_root:
-            root = requirement_text(None, blocker.package)
-            if root is not None:
-                causes.append(FailureCause(requirement=root))
+            causes.extend(root_causes(blocker.package))
         causes.extend(
             FailureCause(
                 requirement=text,
@@ -241,13 +251,11 @@ def _most_constrained(
 
 def _causes(
     text: str,
-    parent_key: str | None,
+    parent_key: str,
     parent_range: object,
     *,
     parent_versions: Callable[[str, object], Sequence[Version]],
 ) -> list[FailureCause]:
-    if parent_key is None:
-        return [FailureCause(requirement=text)]
     project_name, _ = split_key(parent_key)
     return [
         FailureCause(
