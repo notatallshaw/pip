@@ -178,10 +178,10 @@ class Resolver(BaseResolver):
     def _host_candidate(
         index: PipHostIndex, project_name: NormalizedName, version: Version
     ) -> HostCandidate:
-        for host_candidate in index.candidates(project_name):
-            if host_candidate.version == version:
-                return host_candidate
-        raise AssertionError(
-            f"the engine pinned {project_name} {version}, which is not in the "
-            "candidate universe pip supplied"
-        )
+        host_candidate = index.find(project_name, version)
+        if host_candidate is None:
+            raise AssertionError(
+                f"the engine pinned {project_name} {version}, which is not in the "
+                "candidate universe pip supplied"
+            )
+        return host_candidate

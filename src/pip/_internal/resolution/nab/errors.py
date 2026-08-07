@@ -342,13 +342,13 @@ def _parent_candidate(cause: FailureCause, *, index: PipHostIndex) -> Candidate 
     if cause.parent_version is None:
         return None
     _, extras = split_key(cause.parent_key)
-    for host_candidate in index.candidates(cause.parent_project_name):
-        if host_candidate.version == cause.parent_version:
-            try:
-                return index.pip_candidate(host_candidate, extras)
-            except CandidateUnavailable:
-                # The parent is only named to say who wanted the thing that
-                # failed. If it cannot be rebuilt, report the requirement
-                # without it rather than losing the whole message.
-                return None
-    return None
+    host_candidate = index.find(cause.parent_project_name, cause.parent_version)
+    if host_candidate is None:
+        return None
+    try:
+        return index.pip_candidate(host_candidate, extras)
+    except CandidateUnavailable:
+        # The parent is only named to say who wanted the thing that failed.
+        # If it cannot be rebuilt, report the requirement without it rather
+        # than losing the whole message.
+        return None

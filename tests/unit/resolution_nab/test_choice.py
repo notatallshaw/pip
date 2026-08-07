@@ -17,6 +17,7 @@ from pip._vendor.packaging.specifiers import SpecifierSet
 from pip._vendor.packaging.utils import canonicalize_name
 from pip._vendor.packaging.version import Version
 
+from pip._internal.metadata import get_metadata_distribution
 from pip._internal.resolution.nab.candidates import CandidateMetadata, HostCandidate
 from pip._internal.resolution.nab.engine import PipProvider, YankPolicy
 from pip._internal.resolution.nab.inputs import ResolveInputs
@@ -55,13 +56,34 @@ class FakeIndex:
             for version, is_binary in versions.items()
         )
         self.prefer_binary = prefer_binary
-        self.installed = None if installed is None else Version(installed)
+        self.installed_version = None if installed is None else Version(installed)
+        self.listed: set[NormalizedName] = set()
 
     def candidates(self, project_name: NormalizedName) -> Sequence[HostCandidate]:
+        self.listed.add(project_name)
         return self.universe if project_name == NAME else ()
 
+    def is_listed(self, project_name: NormalizedName) -> bool:
+        return project_name in self.listed
+
+    def installed(self, project_name: NormalizedName) -> HostCandidate | None:
+        if self.installed_version is None or project_name != NAME:
+            return None
+        version = self.installed_version
+        return HostCandidate(
+            project_name=NAME,
+            version=version,
+            yanked=False,
+            is_binary=True,
+            installed_dist=get_metadata_distribution(
+                f"Metadata-Version: 2.1\nName: {NAME}\nVersion: {version}\n".encode(),
+                f"{NAME}-{version}-py3-none-any.whl",
+                NAME,
+            ),
+        )
+
     def preferred_version(self, project_name: NormalizedName) -> Version | None:
-        return self.installed
+        return self.installed_version
 
     def allows_prereleases(self, project_name: NormalizedName) -> bool | None:
         return None

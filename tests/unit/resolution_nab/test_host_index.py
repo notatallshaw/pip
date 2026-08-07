@@ -12,16 +12,21 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from pip._vendor.packaging.ranges import VersionRange
+from pip._vendor.packaging.specifiers import SpecifierSet
 from pip._vendor.packaging.utils import canonicalize_name
+from pip._vendor.packaging.version import Version
 
 from pip._internal.index.collector import LinkCollector
 from pip._internal.index.package_finder import PackageFinder
+from pip._internal.metadata import BaseDistribution, get_metadata_distribution
 from pip._internal.models.search_scope import SearchScope
 from pip._internal.models.selection_prefs import SelectionPreferences
 from pip._internal.network.session import PipSession
 from pip._internal.req.constructors import install_req_from_line
 from pip._internal.resolution.nab.candidates import PipHostIndex
-from pip._internal.resolution.nab.inputs import collect_inputs
+from pip._internal.resolution.nab.engine import PipProvider, YankPolicy
+from pip._internal.resolution.nab.inputs import ResolveInputs, collect_inputs
 
 if TYPE_CHECKING:
     from pip._internal.req.req_install import InstallRequirement
@@ -162,3 +167,168 @@ def test_a_constraints_hash_pins_the_candidates_install_requirement(
     assert str(ireq.req) == "simplewheel==1.0"
     assert ireq.is_pinned
     assert ireq.hash_options == {"sha256": [digest]}
+
+
+def _installed(name: str, version: str) -> BaseDistribution:
+    """A real distribution over real METADATA bytes, not a stand-in.
+
+    ``PipHostIndex`` reads ``.version`` and hands the object to
+    ``Factory._make_candidate_from_dist``, so the parsing is part of what
+    these cases check.
+    """
+    metadata = f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n"
+    return get_metadata_distribution(
+        metadata.encode("utf-8"),
+        f"{name}-{version}-py3-none-any.whl",
+        canonicalize_name(name),
+    )
+
+
+@pytest.fixture
+def blocked_finder(yanking_finder: PackageFinder) -> PackageFinder:
+    """A finder that fails the way pip's test suite fails on a request.
+
+    Sockets are blocked in the pip subprocess the functional tests spawn, so
+    an index request that is merely slow in production is a hard error
+    there. Raising here reproduces that in a unit test.
+    """
+
+    def refuse(project_name: str) -> None:
+        raise AssertionError(f"listed the index for {project_name}")
+
+    yanking_finder.find_all_candidates = refuse  # type: ignore[method-assign]
+    return yanking_finder
+
+
+def _provider(index: PipHostIndex, inputs: ResolveInputs) -> PipProvider:
+    return PipProvider(
+        index=index,
+        inputs=inputs,
+        constraints={},
+        reporter=None,  # type: ignore[arg-type]
+        yank_policy=YankPolicy(frozenset()),
+        python_version=Version("3.12"),
+        ignore_requires_python=False,
+        widening=True,
+    )
+
+
+def test_the_installed_distribution_answers_without_listing(
+    factory: Factory, blocked_finder: PackageFinder
+) -> None:
+    name = canonicalize_name("simple")
+    factory._installed_dists = {name: _installed("simple", "1.0")}
+    index = _index(factory, blocked_finder, ["simple"])
+
+    record = index.installed(name)
+    assert record is not None
+    assert str(record.version) == "1.0"
+    assert record.is_installed
+    assert index.find(name, Version("1.0")) is record
+    assert not index.is_listed(name)
+
+
+def test_a_version_that_is_not_installed_still_reaches_the_index(
+    factory: Factory, blocked_finder: PackageFinder
+) -> None:
+    """The soundness half: the installed record is a prefix, not the universe."""
+    name = canonicalize_name("simple")
+    factory._installed_dists = {name: _installed("simple", "1.0")}
+    index = _index(factory, blocked_finder, ["simple"])
+
+    with pytest.raises(AssertionError, match="listed the index for simple"):
+        index.find(name, Version("2.0"))
+
+
+def test_a_url_requirement_hides_the_installed_distribution(
+    factory: Factory, blocked_finder: PackageFinder, data: TestData
+) -> None:
+    """A package pinned to a link has that link as its whole universe."""
+    name = canonicalize_name("simple")
+    factory._installed_dists = {name: _installed("simple", "1.0")}
+    archive = (data.packages / "simple-1.0.tar.gz").as_uri()
+    index = _index(factory, blocked_finder, [f"simple @ {archive}"])
+
+    assert index.installed(name) is None
+
+
+def test_force_reinstall_sends_the_answer_back_to_the_index(
+    factory: Factory, blocked_finder: PackageFinder
+) -> None:
+    name = canonicalize_name("simple")
+    factory._installed_dists = {name: _installed("simple", "1.0")}
+    factory._force_reinstall = True
+    index = _index(factory, blocked_finder, ["simple"])
+
+    assert index.installed(name) is None
+
+
+def test_an_already_satisfied_requirement_is_decided_without_listing(
+    factory: Factory, blocked_finder: PackageFinder
+) -> None:
+    """The whole of "Requirement already satisfied", with no request.
+
+    ``choose_version`` and ``get_dependencies`` are the two calls the
+    resolver makes for a package it decides in one step, and neither may
+    reach the finder.
+    """
+    name = canonicalize_name("simple")
+    factory._installed_dists = {name: _installed("simple", "1.0")}
+    ireqs = [install_req_from_line("simple")]
+    inputs = collect_inputs(ireqs, ignore_dependencies=False)
+    index = PipHostIndex(
+        factory=factory,
+        finder=blocked_finder,
+        inputs=inputs,
+        upgrade_strategy="to-satisfy-only",
+        make_install_req=install_req_from_line,
+    )
+    provider = _provider(index, inputs)
+
+    chosen = provider.choose_version("simple", VersionRange.full())
+    assert chosen == Version("1.0")
+    assert provider.get_dependencies("simple", chosen) == {}
+    assert provider.widen_decision("simple", chosen) is None
+    assert not index.is_listed(name)
+
+
+def test_a_bound_the_installed_version_misses_still_reaches_the_index(
+    factory: Factory, blocked_finder: PackageFinder
+) -> None:
+    """Without this the first case would also pass a truncated universe."""
+    name = canonicalize_name("simple")
+    factory._installed_dists = {name: _installed("simple", "1.0")}
+    ireqs = [install_req_from_line("simple>=2")]
+    inputs = collect_inputs(ireqs, ignore_dependencies=False)
+    index = PipHostIndex(
+        factory=factory,
+        finder=blocked_finder,
+        inputs=inputs,
+        upgrade_strategy="to-satisfy-only",
+        make_install_req=install_req_from_line,
+    )
+    provider = _provider(index, inputs)
+
+    with pytest.raises(AssertionError, match="listed the index for simple"):
+        provider.choose_version("simple", SpecifierSet(">=2").to_range())
+
+
+def test_an_upgrade_sends_the_answer_back_to_the_index(
+    factory: Factory, blocked_finder: PackageFinder
+) -> None:
+    """``--upgrade`` is what picks pip's other merge iterator."""
+    name = canonicalize_name("simple")
+    factory._installed_dists = {name: _installed("simple", "1.0")}
+    ireqs = [install_req_from_line("simple")]
+    inputs = collect_inputs(ireqs, ignore_dependencies=False)
+    index = PipHostIndex(
+        factory=factory,
+        finder=blocked_finder,
+        inputs=inputs,
+        upgrade_strategy="eager",
+        make_install_req=install_req_from_line,
+    )
+    provider = _provider(index, inputs)
+
+    with pytest.raises(AssertionError, match="listed the index for simple"):
+        provider.choose_version("simple", VersionRange.full())

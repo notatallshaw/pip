@@ -159,6 +159,7 @@ class PipHostIndex:
         self._upgrade_strategy = upgrade_strategy
         self._make_install_req = make_install_req
         self._universe: dict[NormalizedName, Sequence[HostCandidate]] = {}
+        self._installed_records: dict[NormalizedName, HostCandidate | None] = {}
         self._templates: dict[NormalizedName, InstallRequirement] = {}
         self._index_templates: dict[NormalizedName, InstallRequirement] = {}
         self._comes_from: dict[NormalizedName, InstallRequirement] = {}
@@ -191,6 +192,53 @@ class PipHostIndex:
         package to decide which package to look at next.
         """
         return project_name in self._universe
+
+    def installed(self, project_name: NormalizedName) -> HostCandidate | None:
+        """The installed distribution, without listing the index.
+
+        This is the one fact about a package pip is already holding, and it
+        is the first element of the sequence pip's own resolver searches
+        (``found_candidates._iter_built_with_prepended``). Returning it here
+        is what lets a requirement something already satisfies be answered
+        with no index request at all.
+
+        None when nothing is installed, when the index has to answer instead
+        (``--force-reinstall``, ``--ignore-installed``), or when the package
+        is pinned to a URL, path, VCS ref or editable, because then the
+        universe is that link and what is on disk is not in it.
+
+        The explicit test is repeated on every call rather than memoised
+        with the record: ``register_explicit`` can give a package an explicit
+        universe part way through a resolve, and a remembered "no explicit
+        source" would then keep handing out a candidate that is no longer in
+        the universe.
+        """
+        if self._has_explicit_universe(project_name):
+            return None
+        if project_name in self._installed_records:
+            return self._installed_records[project_name]
+        record = self._installed_candidate(project_name)
+        self._installed_records[project_name] = record
+        return record
+
+    def find(
+        self, project_name: NormalizedName, version: Version
+    ) -> HostCandidate | None:
+        """The record for one version, listing only when it has to.
+
+        The installed distribution answers for itself, which keeps a resolve
+        that never listed a package from listing it on the way out.
+        ``_build_universe`` puts the very same record in the universe in
+        place of the index entry for that version, so the two paths cannot
+        disagree.
+        """
+        installed = self.installed(project_name)
+        if installed is not None and installed.version == version:
+            return installed
+        for candidate in self.candidates(project_name):
+            if candidate.version == version:
+                return candidate
+        return None
 
     def preferred_version(self, project_name: NormalizedName) -> Version | None:
         """The installed version, when this package must not be upgraded.
@@ -403,7 +451,7 @@ class PipHostIndex:
             for version, index_candidate in best_by_version.items()
         ]
 
-        installed = self._installed_candidate(project_name)
+        installed = self.installed(project_name)
         if installed is not None:
             # An installed version replaces the index entry for the same
             # version: pip's merge iterators yield the installed candidate
@@ -415,6 +463,18 @@ class PipHostIndex:
 
         universe.sort(key=lambda entry: entry.version)
         return tuple(universe)
+
+    def _has_explicit_universe(self, project_name: NormalizedName) -> bool:
+        """Is this package's universe a link rather than the index?
+
+        The same two sources ``_explicit_universe`` reads, tested without
+        building anything: a requirement naming a link, or a constraint
+        whose lines name one.
+        """
+        if project_name in self._inputs.explicit:
+            return True
+        constraint = self._inputs.constraints.get(project_name)
+        return constraint is not None and bool(constraint.links)
 
     def _explicit_universe(
         self, project_name: NormalizedName

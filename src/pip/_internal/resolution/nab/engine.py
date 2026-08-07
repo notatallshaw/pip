@@ -420,6 +420,42 @@ class PipProvider:
             return positive
         return positive & constraint
 
+    def _prefix(
+        self, project_name: NormalizedName, version_range: RangeProtocol[Version]
+    ) -> HostCandidate | None:
+        """The installed distribution, when pip would try it before the index.
+
+        pip's candidate sequence for a package is not a list, it is
+        ``FoundCandidates``: the installed distribution first, then a
+        generator over the index that only runs if the consumer walks past
+        it. Nothing that stops at the first element makes a request, which
+        is how ``pip install <something already satisfied>`` costs pip
+        nothing.
+
+        This is that first element, and the three tests are the three pip
+        applies to it. ``preferred_version`` is
+        ``not _eligible_for_upgrade``, which is what picks
+        ``_iter_built_with_prepended`` over ``_iter_built_with_inserted``.
+        ``installed`` is None when the package is pinned to a link, because
+        then the universe is the link. Membership is tested against the
+        search's range alone, which is what ``_iter_found_candidates`` does
+        for the installed distribution
+        (``specifier.contains(installed_dist.version, prereleases=True)``).
+
+        Returning it skips the listing and never changes the answer:
+        ``_ordered`` would have put this same record first anyway, since an
+        installed distribution is never yanked, always counts as binary, and
+        is exactly what the ``preferred_version`` sort promotes.
+        """
+        candidate = self._index.installed(project_name)
+        if candidate is None:
+            return None
+        if self._index.preferred_version(project_name) != candidate.version:
+            return None
+        if candidate.version not in version_range:
+            return None
+        return candidate
+
     def _first_usable(
         self,
         project_name: NormalizedName,
@@ -427,6 +463,9 @@ class PipProvider:
         requirement: RangeProtocol[Version] | None,
     ) -> Version | None:
         """The best version in ``version_range`` whose metadata reads."""
+        prefix = self._prefix(project_name, version_range)
+        if prefix is not None and self._metadata_for(project_name, prefix) is not None:
+            return prefix.version
         for candidate in self._ordered(project_name, version_range, requirement):
             if self._metadata_for(project_name, candidate) is not None:
                 return candidate.version
@@ -615,6 +654,12 @@ class PipProvider:
         if not self._widening:
             return None
         project_name, extras = split_key(package)
+        if not self._index.is_listed(project_name):
+            # Decided from the installed distribution with no listing bought.
+            # Finding the neighbours to widen towards would have to buy one,
+            # and widening is a speed and message optimisation, so the clause
+            # keeps the exact version instead.
+            return None
         universe = [candidate.version for candidate in self._versions(project_name)]
         if not universe:
             return None
@@ -654,6 +699,11 @@ class PipProvider:
         if not isinstance(package, str):
             return constraint
         project_name, _ = split_key(package)
+        if not self._index.is_listed(project_name):
+            # Nothing widened a package that was never listed, so there is
+            # nothing to map back, and asking would buy a request to render
+            # a message.
+            return constraint
         universe = [candidate.version for candidate in self._versions(project_name)]
         if not universe or not isinstance(constraint, VersionRange):
             return constraint
@@ -666,13 +716,13 @@ class PipProvider:
     def _candidate(
         self, project_name: NormalizedName, version: Version
     ) -> HostCandidate:
-        for candidate in self._versions(project_name):
-            if candidate.version == version:
-                return candidate
-        raise AssertionError(
-            f"the engine decided {project_name} {version}, which is not in the "
-            "candidate universe pip supplied"
-        )
+        candidate = self._index.find(project_name, version)
+        if candidate is None:
+            raise AssertionError(
+                f"the engine decided {project_name} {version}, which is not in the "
+                "candidate universe pip supplied"
+            )
+        return candidate
 
     def _requirements(
         self, metadata: CandidateMetadata, extras: frozenset[NormalizedName]
