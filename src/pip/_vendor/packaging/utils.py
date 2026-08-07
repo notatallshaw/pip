@@ -5,9 +5,9 @@
 from __future__ import annotations
 
 import re
-from typing import NewType, Tuple, Union, cast
+from typing import NewType, Union, cast
 
-from .tags import Tag, UnsortedTagsError, parse_tag
+from .tags import InvalidTag, Tag, UnsortedTagsError, parse_tag
 from .version import InvalidVersion, Version, _TrimmedRelease
 
 __all__ = [
@@ -28,7 +28,10 @@ def __dir__() -> list[str]:
     return __all__
 
 
-BuildTag = Union[Tuple[()], Tuple[int, str]]
+BuildTag = Union[tuple[()], tuple[int, str]]
+"""
+A wheel build tag: an empty tuple, or a ``(build number, build tag suffix)`` pair.
+"""
 
 NormalizedName = NewType("NormalizedName", str)
 """
@@ -58,9 +61,12 @@ class InvalidSdistFilename(ValueError):
 _validate_regex = re.compile(
     r"[a-z0-9]|[a-z0-9][a-z0-9._-]*[a-z0-9]", re.IGNORECASE | re.ASCII
 )
-_normalized_regex = re.compile(r"[a-z0-9]|[a-z0-9]([a-z0-9-](?!--))*[a-z0-9]", re.ASCII)
+_normalized_regex = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*", re.ASCII)
 # PEP 427: The build number must start with a digit.
 _build_tag_regex = re.compile(r"(\d+)(.*)", re.ASCII)
+# PEP 427: Valid characters for an escaped project name in a wheel filename.
+# Requires at least one character so an empty project name is rejected.
+_wheel_name_regex = re.compile(r"^[\w._]+$", re.UNICODE)
 
 
 def canonicalize_name(name: str, *, validate: bool = False) -> NormalizedName:
@@ -87,6 +93,11 @@ def canonicalize_name(name: str, *, validate: bool = False) -> NormalizedName:
     'oslo-concurrency'
     >>> canonicalize_name("requests")
     'requests'
+
+    .. versionadded:: 16.2
+
+    .. versionchanged:: 20.4
+       The return type was changed to :class:`NormalizedName`.
     """
     if validate and not _validate_regex.fullmatch(name):
         raise InvalidName(f"name is invalid: {name!r}")
@@ -198,6 +209,10 @@ def parse_wheel_filename(
 
     .. versionadded:: 26.1
        The *validate_order* parameter.
+
+    .. versionchanged:: 26.3
+       Raises :class:`InvalidWheelFilename` on empty tag set components or an
+       empty project name.
     """
     if not filename.endswith(".whl"):
         raise InvalidWheelFilename(
@@ -214,7 +229,7 @@ def parse_wheel_filename(
     parts = filename.split("-", dashes - 2)
     name_part = parts[0]
     # See PEP 427 for the rules on escaping the project name.
-    if "__" in name_part or re.match(r"^[\w\d._]*$", name_part, re.UNICODE) is None:
+    if "__" in name_part or _wheel_name_regex.match(name_part) is None:
         raise InvalidWheelFilename(f"Invalid project name: {filename!r}")
     name = canonicalize_name(name_part)
 
@@ -243,6 +258,10 @@ def parse_wheel_filename(
             f"Invalid wheel filename (compressed tag set components must be in "
             f"sorted order per PEP 425): {filename!r}"
         ) from None
+    except InvalidTag:
+        raise InvalidWheelFilename(
+            f"Invalid wheel filename (empty tag component): {filename!r}"
+        ) from None
     return (name, version, build, tags)
 
 
@@ -255,8 +274,10 @@ def parse_sdist_filename(filename: str) -> tuple[NormalizedName, Version]:
 
     :param str filename: The name of the sdist file.
     :raises InvalidSdistFilename: If the filename does not end
-        with an sdist extension (``.zip`` or ``.tar.gz``), or if it does not
-        contain a dash separating the name and the version of the distribution.
+        with an sdist extension (``.zip`` or ``.tar.gz``), if it does not
+        contain a dash separating the name and the version of the distribution,
+        if the project name is empty, or if the version portion is not a valid
+        version.
 
     >>> from packaging.utils import parse_sdist_filename
     >>> from packaging.version import Version
@@ -265,6 +286,9 @@ def parse_sdist_filename(filename: str) -> tuple[NormalizedName, Version]:
     'foo'
     >>> ver == Version('1.0')
     True
+
+    .. versionchanged:: 26.3
+       Raises :class:`InvalidSdistFilename` on an empty project name.
 
     .. _Source distribution format: https://packaging.python.org/specifications/source-distribution-format/#source-distribution-file-name
     """
@@ -283,6 +307,10 @@ def parse_sdist_filename(filename: str) -> tuple[NormalizedName, Version]:
     name_part, sep, version_part = file_stem.rpartition("-")
     if not sep:
         raise InvalidSdistFilename(f"Invalid sdist filename: {filename!r}")
+    if not name_part:
+        raise InvalidSdistFilename(
+            f"Invalid sdist filename (empty project name): {filename!r}"
+        )
 
     name = canonicalize_name(name_part)
 

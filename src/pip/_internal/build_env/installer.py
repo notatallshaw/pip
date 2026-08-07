@@ -137,6 +137,7 @@ class SubprocessBuildEnvironmentInstaller:
 
         if finder.uploaded_prior_to:
             args.extend(["--uploaded-prior-to", finder.uploaded_prior_to.isoformat()])
+
         args.append("--")
         args.extend(requirements)
 
@@ -310,10 +311,10 @@ class InprocessBuildEnvironmentInstaller:
 
     def _make_resolver(self) -> BaseResolver:
         """Create a new resolver for one time use."""
-        # Legacy installer never used the legacy resolver so create a
-        # resolvelib resolver directly. Yuck.
+        # The legacy installer never used the legacy resolver, so build
+        # dependencies are always resolved by pip's real resolver.
         from pip._internal.req.constructors import install_req_from_req_string
-        from pip._internal.resolution.resolvelib.resolver import Resolver
+        from pip._internal.resolution.nab.resolver import Resolver
 
         return Resolver(
             make_install_req=install_req_from_req_string,
