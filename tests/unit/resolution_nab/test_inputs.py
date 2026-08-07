@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import pathlib
+
 import pytest
 
-from pip._vendor.packaging.utils import canonicalize_name
+from pip._vendor.packaging.utils import NormalizedName, canonicalize_name
 
 from pip._internal.exceptions import InstallationError
 from pip._internal.req.constructors import install_req_from_line
+from pip._internal.req.req_install import InstallRequirement
 from pip._internal.resolution.nab.inputs import collect_inputs
 from pip._internal.utils.deprecation import PipDeprecationWarning
 
@@ -32,6 +35,51 @@ def test_collect_inputs_splits_a_specifier_with_extras() -> None:
         "foo",
         "foo[bar]",
     ]
+
+
+def test_collect_inputs_splits_a_link_with_extras(tmp_path: pathlib.Path) -> None:
+    source = tmp_path / "LocalExtras"
+    source.mkdir()
+    (source / "setup.py").write_text("")
+
+    def name_link(ireq: InstallRequirement) -> NormalizedName:
+        return canonicalize_name("localextras")
+
+    inputs = collect_inputs(
+        [_ireq(f"{source}[bar]")],
+        ignore_dependencies=False,
+        name_link=name_link,
+    )
+    assert [requirement.key for requirement in inputs.requirements] == [
+        "localextras",
+        "localextras[bar]",
+    ]
+    assert all(
+        requirement.link is not None for requirement in inputs.requirements
+    ), "a link requirement keeps its link on both halves"
+
+
+def test_collect_inputs_drops_extras_from_the_base_half_text() -> None:
+    inputs = collect_inputs([_ireq("foo[bar]>=1")], ignore_dependencies=False)
+    assert [requirement.text for requirement in inputs.requirements] == [
+        "foo>=1",
+        "foo[bar]>=1",
+    ]
+
+
+def test_collect_inputs_keeps_the_requirement_as_the_user_wrote_it() -> None:
+    inputs = collect_inputs([_ireq("requirements.txt")], ignore_dependencies=False)
+    assert [requirement.text for requirement in inputs.requirements] == [
+        "requirements.txt"
+    ]
+
+
+def test_roots_for_returns_every_requirement_on_one_node() -> None:
+    inputs = collect_inputs(
+        [_ireq("pkg[ext1]>1"), _ireq("pkg==1.0")], ignore_dependencies=False
+    )
+    assert [root.text for root in inputs.roots_for("pkg")] == ["pkg>1", "pkg==1.0"]
+    assert [root.text for root in inputs.roots_for("pkg[ext1]")] == ["pkg[ext1]>1"]
 
 
 def test_collect_inputs_puts_extras_requirements_last() -> None:
