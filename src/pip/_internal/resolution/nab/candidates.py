@@ -244,6 +244,23 @@ class PipHostIndex:
             if candidate.yanked
         )
 
+    def yanked_among(
+        self, project_name: NormalizedName, candidates: Sequence[Version]
+    ) -> frozenset[Version]:
+        """Which of ``candidates`` the index marks yanked.
+
+        An installed distribution has no index file and no yank flag, and it
+        is the entry :meth:`_build_universe` keeps for its version, so a
+        question only about it is answered without listing anything.
+        """
+        wanted = set(candidates)
+        installed = self.installed(project_name)
+        if installed is not None:
+            wanted.discard(installed.version)
+        if not wanted:
+            return frozenset()
+        return frozenset(self.yanked_versions(project_name) & wanted)
+
     def prefers_binary(self) -> bool:
         """``--prefer-binary``: try every wheel before any source archive.
 
@@ -466,27 +483,6 @@ class PipHostIndex:
         if constraint is not None:
             hashes &= constraint.hashes
         return hashes
-
-    def preferences(self) -> dict[str, Version]:
-        """Versions nab should try first: what is installed and must not move.
-
-        pip expresses "prefer what is installed" by ordering candidates
-        (``_iter_built_with_prepended``). nab expresses it as a preference
-        map, honoured when the version is in range and usable, so the
-        preference is passed rather than baked into the order.
-
-        Built from every installed distribution up front, because nab reads
-        the map at construction time and a package's eligibility does not
-        depend on anything the search discovers.
-        """
-        if self._factory.force_reinstall:
-            return {}
-        preferences: dict[str, Version] = {}
-        for project_name, dist in self._factory._installed_dists.items():
-            if self.eligible_for_upgrade(project_name):
-                continue
-            preferences[project_name] = self._installed_version(dist)
-        return preferences
 
     def _build_universe(self, project_name: NormalizedName) -> Sequence[HostCandidate]:
         explicit = self._explicit_universe(project_name)

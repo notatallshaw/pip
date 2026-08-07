@@ -49,6 +49,7 @@ from typing import TYPE_CHECKING
 from pip._vendor.nab_index.client import SdistFile, WheelFile
 from pip._vendor.nab_python.provider import MetadataError
 from pip._vendor.nab_python.store import InMemoryIndex
+from pip._vendor.packaging.utils import canonicalize_name
 from pip._vendor.packaging.version import Version
 
 from pip._internal.resolution.nab.candidates import CandidateUnavailable
@@ -215,6 +216,38 @@ class PipFetchPort:
             f"nab asked to download {package} {version} from {url}; pip owns "
             "direct URLs above this port"
         )
+
+    # ------------------------------------------------- the seeded version
+
+    def offline_metadata(self, package: str, version: Version) -> str | None:
+        """METADATA for a version pip can serve with no request, or None.
+
+        The installed distribution is the only such version: it is on disk,
+        it is what pip's own resolver reads without touching the index, and
+        supplying it here is what lets nab decide an already-satisfied
+        requirement with no listing at all.
+
+        The three things :meth:`_fill_metadata` does to a fetched candidate
+        are done here too, because this text stands in for that one exactly:
+        a candidate pip cannot prepare and a distribution whose own
+        Requires-Python excludes the target both decline the seed rather
+        than record a rejection, since declining just sends nab to the
+        listing, and ``--no-deps`` drops the requirements at source.
+        """
+        name = canonicalize_name(package)
+        candidate = self._host.installed(name)
+        if candidate is None or candidate.version != version:
+            return None
+        try:
+            dist = self._host.metadata(candidate)
+        except CandidateUnavailable:
+            return None
+        if self._requires_python_refusal(dist) is not None:
+            return None
+        requires = self._host.adopt_dependencies(candidate, dist)
+        if self._ignore_dependencies:
+            requires = []
+        return _metadata_text(dist, requires)
 
     # ---------------------------------------------------------- work
 

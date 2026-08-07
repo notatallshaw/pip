@@ -143,10 +143,36 @@ class YankPolicy:
     def yanked_versions(
         self, package: str, candidates: Sequence[Version], /
     ) -> frozenset[Version]:
-        return self._index.yanked_versions(canonicalize_name(package))
+        return self._index.yanked_among(canonicalize_name(package), candidates)
 
     def admits_yanked(self, package: str, /, *, all_yanked: bool) -> bool:
         return all_yanked and canonicalize_name(package) in self._pinned
+
+
+class PreferencePolicy:
+    """The installed environment, as the version nab tries before it lists.
+
+    pip's own resolver expresses "prefer what is installed" by putting the
+    installed candidate first in a lazy candidate sequence and touching the
+    index only if the solver asks for more
+    (``resolution/model/found_candidates.py``). nab expresses it as a
+    preferred version plus the metadata to check it against, which makes the
+    same resolve ask the index the same number of times: none.
+    """
+
+    def __init__(self, index: PipHostIndex, port: PipFetchPort) -> None:
+        self._index = index
+        self._port = port
+
+    def preferred_version(self, package: str, /) -> Version | None:
+        name = canonicalize_name(package)
+        if self._index.eligible_for_upgrade(name):
+            return None
+        candidate = self._index.installed(name)
+        return None if candidate is None else candidate.version
+
+    def preferred_metadata(self, package: str, version: Version, /) -> str | None:
+        return self._port.offline_metadata(package, version)
 
 
 class _PreferBinaryProvider(NabProvider):
@@ -218,7 +244,7 @@ def solve(
         root_extras=root_extras,
         constraints=constraints,
         yank_policy=yank_policy,
-        preferences=index.preferences(),
+        preference_policy=PreferencePolicy(index, port),
     )
     resolver: NabResolver[str, Version] = NabResolver(
         provider,
