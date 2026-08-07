@@ -18,6 +18,7 @@ from pip._vendor.packaging.version import Version
 from pip._internal.index.collector import LinkCollector
 from pip._internal.index.package_finder import PackageFinder
 from pip._internal.metadata import BaseDistribution, get_metadata_distribution
+from pip._internal.models.release_control import ReleaseControl
 from pip._internal.models.search_scope import SearchScope
 from pip._internal.models.selection_prefs import SelectionPreferences
 from pip._internal.network.session import PipSession
@@ -168,6 +169,114 @@ def test_force_reinstall_sends_the_answer_back_to_the_index(
     index = _index(factory, yanking_finder, ["pkg"])
 
     assert index.installed(canonicalize_name("pkg")) is None
+
+
+def test_no_release_control_admits_no_prerelease(
+    factory: Factory, yanking_finder: PackageFinder
+) -> None:
+    index = _index(factory, yanking_finder, ["pkg"])
+    assert index.allows_prereleases(canonicalize_name("pkg")) is False
+
+
+def test_release_control_is_read_live_and_only_on_the_admitting_side(
+    factory: Factory, yanking_finder: PackageFinder
+) -> None:
+    """A requirements file can set ``--pre`` after the finder was built.
+
+    ``--only-final`` must not come back through this reader:
+    ``CandidateEvaluator.rank_candidates`` is the one place pip applies it,
+    and applying it twice would also drop a pre-release the user named by an
+    exact pin or by URL.
+    """
+    index = _index(factory, yanking_finder, ["pkg"])
+    name = canonicalize_name("pkg")
+    release_control = ReleaseControl()
+
+    yanking_finder.set_release_control(release_control)
+    assert index.allows_prereleases(name) is False
+
+    release_control.handle_mutual_excludes(
+        ":all:",
+        release_control.all_releases,
+        release_control.only_final,
+        "all_releases",
+    )
+    assert index.allows_prereleases(name) is True
+
+    release_control.handle_mutual_excludes(
+        ":all:", release_control.only_final, release_control.all_releases, "only_final"
+    )
+    assert index.allows_prereleases(name) is False
+
+
+def test_a_flag_for_another_package_does_not_reach_this_one(
+    factory: Factory, yanking_finder: PackageFinder
+) -> None:
+    index = _index(factory, yanking_finder, ["pkg", "other"])
+    release_control = ReleaseControl()
+    release_control.handle_mutual_excludes(
+        "other",
+        release_control.all_releases,
+        release_control.only_final,
+        "all_releases",
+    )
+    yanking_finder.set_release_control(release_control)
+
+    assert index.allows_prereleases(canonicalize_name("other")) is True
+    assert index.allows_prereleases(canonicalize_name("pkg")) is False
+
+
+def test_the_installed_version_is_admitted_whatever_the_upgrade_strategy(
+    factory: Factory,
+    yanking_finder: PackageFinder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The admission is not the seed: ``--upgrade`` drops one and not the other.
+
+    pip's ``_iter_built_with_inserted`` still yields the installed candidate
+    under an upgrade, just in version order rather than first, so what is
+    installed stays admissible while it stops being preferred.
+    """
+    monkeypatch.setitem(
+        factory._installed_dists,
+        canonicalize_name("pkg"),
+        _installed_dist("pkg", "2.0rc1"),
+    )
+    inputs = collect_inputs([install_req_from_line("pkg")], ignore_dependencies=False)
+    index = PipHostIndex(
+        factory=factory,
+        finder=yanking_finder,
+        inputs=inputs,
+        upgrade_strategy="eager",
+        make_install_req=install_req_from_line,
+    )
+    name = canonicalize_name("pkg")
+
+    assert index.eligible_for_upgrade(name)
+    assert index.installed_versions(name) == frozenset({Version("2.0rc1")})
+
+
+def test_nothing_installed_admits_nothing(
+    factory: Factory, yanking_finder: PackageFinder
+) -> None:
+    index = _index(factory, yanking_finder, ["pkg"])
+    assert index.installed_versions(canonicalize_name("pkg")) == frozenset()
+
+
+def test_force_reinstall_admits_nothing(
+    factory: Factory,
+    yanking_finder: PackageFinder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(
+        factory._installed_dists,
+        canonicalize_name("pkg"),
+        _installed_dist("pkg", "2.0rc1"),
+    )
+    monkeypatch.setattr(factory, "_force_reinstall", True)
+    index = _index(factory, yanking_finder, ["pkg"])
+
+    assert index.installed_versions(canonicalize_name("pkg")) == frozenset()
 
 
 def test_universe_is_ascending_and_deduplicated(

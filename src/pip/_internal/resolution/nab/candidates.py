@@ -261,6 +261,42 @@ class PipHostIndex:
             return frozenset()
         return frozenset(self.yanked_versions(project_name) & wanted)
 
+    def allows_prereleases(self, project_name: NormalizedName) -> bool:
+        """``--pre`` and its friends, for one project.
+
+        Only the admitting side. ``--only-final`` is applied to the universe
+        by ``CandidateEvaluator.rank_candidates``, which is the one place pip
+        applies it; re-applying it here would also drop a pre-release named
+        by a URL or by an exact pin, which pip installs. Read live, because
+        a requirements file can set release control after the finder was
+        made.
+        """
+        release_control = self._finder.release_control
+        if release_control is None:
+            return False
+        return release_control.allows_prereleases(project_name) is True
+
+    def installed_versions(self, project_name: NormalizedName) -> frozenset[Version]:
+        """The installed version, which pip admits on bounds alone.
+
+        ``Factory._iter_found_candidates`` asks only whether what is already
+        there still fits
+        (``specifier.contains(installed_dist.version, prereleases=True)``),
+        so an installed ``2.0rc1`` survives a plain ``pip install pkg`` and
+        falls to a ``pkg<2``.
+
+        Not the same set as the version :meth:`installed` seeds the provider
+        with. The seed is skipped for a package the upgrade strategy allows
+        pip to move; the admission applies whatever the strategy is, because
+        pip's ``_iter_built_with_inserted`` still yields the installed
+        candidate under ``--upgrade``, just in version order rather than
+        first.
+        """
+        candidate = self.installed(project_name)
+        if candidate is None:
+            return frozenset()
+        return frozenset((candidate.version,))
+
     def prefers_binary(self) -> bool:
         """``--prefer-binary``: try every wheel before any source archive.
 
