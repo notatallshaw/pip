@@ -15,6 +15,5 @@ setuptools==70.3.0
 tomli==2.4.1
 tomli-w==1.2.0
 truststore==0.10.4
-nab-index==0.0.13.dev0
-nab-python==0.0.13.dev0
+nab-provider==0.0.13.dev0
 nab-resolver==0.0.13.dev0

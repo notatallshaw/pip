@@ -46,9 +46,9 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from pip._vendor.nab_index.client import SdistFile, WheelFile
-from pip._vendor.nab_python.provider import MetadataError
-from pip._vendor.nab_python.store import InMemoryIndex
+from pip._vendor.nab_provider.provider import MetadataError
+from pip._vendor.nab_provider.records import SdistFile, WheelFile
+from pip._vendor.nab_provider.store import InMemoryIndex
 from pip._vendor.packaging.utils import canonicalize_name
 from pip._vendor.packaging.version import Version
 
@@ -98,7 +98,7 @@ _SETTLED = LazyFetch(None)
 
 
 class PipFetchPort:
-    """``nab_python.fetch_port.FetchPort`` over pip's index layer.
+    """``nab_provider.fetch_port.FetchPort`` over pip's index layer.
 
     Five of the nine members are live. ``request_range_metadata``,
     ``request_sdist_archive`` and ``request_direct_archive`` raise: pip owns

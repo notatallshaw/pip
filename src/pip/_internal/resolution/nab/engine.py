@@ -4,8 +4,8 @@ This is the only module in the adapter that imports nab, apart from
 :mod:`.fetch_port`, which implements nab's own fetch interface.
 
 What it binds to. nab ships two resolvers: ``nab_resolver``, a generic
-packaging-free PubGrub solver, and ``nab_python``, the PyPI provider that
-drives it. This seam takes both. pip builds ``nab_python.provider.Provider``
+packaging-free PubGrub solver, and ``nab_provider``, the PyPI provider that
+drives it. This seam takes both. pip builds ``nab_provider.provider.Provider``
 directly and hands it a fetch port, so nab keeps the candidate scan, the
 metadata ladder, the decision priority key, the range widening, the yank
 rule, the prerelease admission, the extras proxies and the look-ahead.
@@ -13,7 +13,7 @@ What pip supplies is the index behind the port and the facts only pip has:
 which versions are yanked, which requirement pins one, which installed
 version should be tried first, and which versions need no build.
 
-What it does not bind to is ``nab_python._resolve.engine``.
+What it does not bind to is ``nab_project._resolve.engine``.
 ``_EngineSettings`` requires a ``NabProjectConfig``, whose replacement is a
 deliberately deferred redesign, and what the engine adds over the provider
 is per-target iteration, marker-set slicing and a lock writer. pip resolves
@@ -33,14 +33,14 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from pip._vendor.nab_python.diagnostics import BlockerKind, NoVersionsKind
-from pip._vendor.nab_python.provider import (
+from pip._vendor.nab_provider.diagnostics import BlockerKind, NoVersionsKind
+from pip._vendor.nab_provider.provider import (
     ExtrasMode,
     MetadataError,
     join_extra,
     split_extra,
 )
-from pip._vendor.nab_python.provider import Provider as NabProvider
+from pip._vendor.nab_provider.provider import Provider as NabProvider
 from pip._vendor.nab_resolver.errors import ResolutionError
 from pip._vendor.nab_resolver.resolver import Resolver as NabResolver
 from pip._vendor.nab_resolver.root import ROOT
@@ -340,7 +340,7 @@ def _root_ranges(
 ) -> tuple[dict[str, VersionRange], set[tuple[str, str]]]:
     """pip's root requirements in nab's key shape.
 
-    Mirrors ``nab_python._resolve.inputs.build_resolver_inputs``: one range
+    Mirrors ``nab_provider.resolver_inputs.build_resolver_inputs``: one range
     per canonical name, intersected across repeats, plus one unbounded entry
     per extra under its own ``name[extra]`` key. ``inputs`` has already
     dropped the requirements whose markers do not apply and named every
