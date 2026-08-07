@@ -230,7 +230,22 @@ class PipHostIndex:
                         candidate.version if candidate.explicit_link is None else None
                     ),
                 )
-        except (MetadataInconsistent, MetadataInvalid) as exc:
+        except MetadataInvalid as exc:
+            # pip warns about this one rather than dropping it quietly, and
+            # this is the only place a version is dropped for it now that
+            # ``FoundCandidates`` is off the resolve path.
+            logger.warning(
+                "Ignoring version %s of %s since it has invalid metadata:\n"
+                "%s\n"
+                "Please use pip<24.1 if you need to use this version.",
+                candidate.version,
+                exc.ireq.name,
+                exc,
+            )
+            raise CandidateUnavailable(
+                candidate.project_name, candidate.version, str(exc)
+            ) from exc
+        except MetadataInconsistent as exc:
             raise CandidateUnavailable(
                 candidate.project_name, candidate.version, str(exc)
             ) from exc
