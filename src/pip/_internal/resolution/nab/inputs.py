@@ -143,6 +143,7 @@ def collect_inputs(
     *,
     ignore_dependencies: bool,
     name_link: Callable[[InstallRequirement], NormalizedName] | None = None,
+    check_link: Callable[[Link], None] | None = None,
 ) -> ResolveInputs:
     """Split pip's root ireqs into requirements, constraints and explicit links.
 
@@ -154,6 +155,10 @@ def collect_inputs(
         preparing it. ``pip install ./some/path`` gives no name until the
         distribution has been built, so the caller supplies the one piece of
         machinery that can do it.
+    :param check_link: refuses a link this platform cannot install, before
+        anything tries to resolve it. pip raises for a requirement's own
+        link and swallows for one that only a constraint names, so the check
+        belongs here rather than in the candidate builder.
     """
     inputs = ResolveInputs(ignore_dependencies=ignore_dependencies)
 
@@ -172,7 +177,7 @@ def collect_inputs(
                 inputs.constraints[name] = Constraint.from_ireq(ireq)
             continue
 
-        requirements = list(_root_requirements_from_ireq(ireq, name_link))
+        requirements = list(_root_requirements_from_ireq(ireq, name_link, check_link))
         if not requirements:
             continue
         if ireq.user_supplied and requirements[0].key not in inputs.user_requested:
@@ -190,6 +195,7 @@ def collect_inputs(
 def _root_requirements_from_ireq(
     ireq: InstallRequirement,
     name_link: Callable[[InstallRequirement], NormalizedName] | None,
+    check_link: Callable[[Link], None] | None = None,
 ) -> Iterable[RootRequirement]:
     """Zero, one or two root requirements from one ireq.
 
@@ -206,6 +212,9 @@ def _root_requirements_from_ireq(
             ireq.markers,
         )
         return
+
+    if ireq.link is not None and check_link is not None:
+        check_link(ireq.link)
 
     if ireq.name:
         project_name = canonicalize_name(ireq.name)
