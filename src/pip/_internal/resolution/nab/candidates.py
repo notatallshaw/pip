@@ -322,7 +322,26 @@ class PipHostIndex:
                         candidate.version if candidate.explicit_link is None else None
                     ),
                 )
-        except (MetadataInconsistent, MetadataInvalid) as exc:
+        except MetadataInvalid as exc:
+            # Where pip says this: ``found_candidates._iter_built``, which
+            # neither arm goes through, so the warning has to fire wherever
+            # the version is actually dropped. Same sentence, ``pip<24.1``
+            # line included, because that is what tells the user which
+            # version was skipped and why the answer is older than expected.
+            logger.warning(
+                "Ignoring version %s of %s since it has invalid metadata:\n"
+                "%s\n"
+                "Please use pip<24.1 if you need to use this version.",
+                candidate.version,
+                exc.ireq.name,
+                exc,
+            )
+            raise CandidateUnavailable(
+                candidate.project_name, candidate.version, str(exc)
+            ) from exc
+        except MetadataInconsistent as exc:
+            # Dropped quietly, as pip drops it: the factory has already
+            # logged this one at info level and returned None.
             raise CandidateUnavailable(
                 candidate.project_name, candidate.version, str(exc)
             ) from exc
