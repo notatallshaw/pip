@@ -98,3 +98,18 @@ def test_metadata_reads_raw_dependencies(
     assert metadata.project_name == canonicalize_name("requires-simple-extra")
     assert any("extra ==" in dep for dep in metadata.raw_dependencies)
     assert metadata.provided_extras == frozenset({canonicalize_name("extra")})
+
+
+def test_the_universe_records_which_versions_need_no_build(
+    factory: Factory, yanking_finder: PackageFinder
+) -> None:
+    """``--prefer-binary`` sorts on this, so it has to survive the grouping."""
+    index = _index(factory, yanking_finder, ["simplewheel", "simple"])
+
+    wheels = index.candidates(canonicalize_name("simplewheel"))
+    assert wheels
+    assert all(candidate.is_binary for candidate in wheels)
+
+    archives = index.candidates(canonicalize_name("simple"))
+    assert archives
+    assert not any(candidate.is_binary for candidate in archives)
