@@ -23,6 +23,14 @@ Three properties have to hold of the universe and each one is load-bearing:
    ranking is still what decides which *file* represents a version, so the
    universe is built by ranking first and then grouping by version.
 
+   Sorting by version drops the one term of ``_sort_key`` that is a
+   preference *between* versions rather than between the files of one
+   version: ``binary_preference``, which is ``--prefer-binary`` and which
+   sits above the version, so a 0.8 wheel is preferred to a 1.0 source
+   archive. Each record carries :attr:`HostCandidate.is_binary` instead,
+   and :mod:`.engine` applies the preference where the versions still in
+   range are known, which is where pip applies it too.
+
 3. Yanked versions are carried, flagged, never dropped here. PEP 592 makes a
    yanked version selectable exactly when the requirement pins it, and
    whether it is pinned is not known until the requirements have been merged.
@@ -98,11 +106,18 @@ class HostCandidate:
     Exactly one of the three sources is set. An installed distribution has
     no artifact, so it can never route through a download, and an explicit
     link replaces the listing rather than joining it.
+
+    ``is_binary`` is what ``--prefer-binary`` sorts on: True when this
+    version needs no build, which is a wheel or a distribution that is
+    already installed. It is recorded whether or not the user asked for the
+    preference, so the flag decides whether it is read and never what it
+    says.
     """
 
     project_name: NormalizedName
     version: Version
     yanked: bool
+    is_binary: bool = False
     index_candidate: InstallationCandidate | None = None
     installed_dist: BaseDistribution | None = None
     explicit_link: Link | None = None
@@ -146,6 +161,7 @@ class PipHostIndex:
         self._upgrade_strategy = upgrade_strategy
         self._make_install_req = make_install_req
         self._universe: dict[NormalizedName, Sequence[HostCandidate]] = {}
+        self._binary_versions: dict[NormalizedName, frozenset[Version]] = {}
         self._templates: dict[NormalizedName, InstallRequirement] = {}
         self._comes_from: dict[NormalizedName, InstallRequirement] = {}
         self._requested_as: dict[NormalizedName, str] = {}
@@ -188,6 +204,32 @@ class PipHostIndex:
             for candidate in self.candidates(project_name)
             if candidate.yanked
         )
+
+    def prefers_binary(self) -> bool:
+        """``--prefer-binary``: try every wheel before any source archive.
+
+        Read live rather than once at construction, because a requirements
+        file can turn it on after the finder was built (``req_file.py``
+        calls ``PackageFinder.set_prefer_binary``).
+        """
+        return self._finder.prefer_binary
+
+    def binary_versions(self, project_name: NormalizedName) -> frozenset[Version]:
+        """Which of ``project_name``'s versions need no build.
+
+        The other half of ``--prefer-binary``. Answered off the universe
+        rather than off the finder, so it names the file pip's ranking
+        actually chose for each version.
+        """
+        cached = self._binary_versions.get(project_name)
+        if cached is None:
+            cached = frozenset(
+                candidate.version
+                for candidate in self.candidates(project_name)
+                if candidate.is_binary
+            )
+            self._binary_versions[project_name] = cached
+        return cached
 
     def metadata(self, candidate: HostCandidate) -> BaseDistribution:
         """Prepare ``candidate`` and return pip's distribution for it.
@@ -427,6 +469,7 @@ class PipHostIndex:
                 project_name=project_name,
                 version=version,
                 yanked=index_candidate.link.is_yanked,
+                is_binary=index_candidate.link.is_wheel,
                 index_candidate=index_candidate,
             )
             for version, index_candidate in best_by_version.items()
@@ -519,6 +562,7 @@ class PipHostIndex:
             project_name=project_name,
             version=candidate.version,
             yanked=link.is_yanked,
+            is_binary=link.is_wheel,
             explicit_link=link,
         )
 
@@ -532,6 +576,12 @@ class PipHostIndex:
             project_name=project_name,
             version=self._installed_version(dist),
             yanked=False,
+            # Nothing to download and nothing to build, so it is what
+            # --prefer-binary asks for. pip never runs _sort_key over an
+            # installed candidate, and "prefer what is installed" is applied
+            # above this, so the flag can only move a version pip was
+            # already free to upgrade past.
+            is_binary=True,
             installed_dist=dist,
         )
 

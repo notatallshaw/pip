@@ -100,3 +100,20 @@ def test_metadata_reads_raw_dependencies(
     )
     assert any("extra ==" in dep for dep in dist.iter_raw_dependencies())
     assert set(dist.iter_provided_extras()) == {canonicalize_name("extra")}
+
+
+def test_the_universe_records_which_versions_need_no_build(
+    factory: Factory, yanking_finder: PackageFinder
+) -> None:
+    """``--prefer-binary`` sorts on this, so it has to survive the grouping."""
+    index = _index(factory, yanking_finder, ["simplewheel", "simple"])
+
+    wheels = index.candidates(canonicalize_name("simplewheel"))
+    assert wheels
+    assert index.binary_versions(canonicalize_name("simplewheel")) == {
+        candidate.version for candidate in wheels
+    }
+
+    archives = index.candidates(canonicalize_name("simple"))
+    assert archives
+    assert not index.binary_versions(canonicalize_name("simple"))

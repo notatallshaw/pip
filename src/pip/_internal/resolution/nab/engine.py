@@ -10,8 +10,8 @@ directly and hands it a fetch port, so nab keeps the candidate scan, the
 metadata ladder, the decision priority key, the range widening, the yank
 rule, the prerelease admission, the extras proxies and the look-ahead.
 What pip supplies is the index behind the port and the facts only pip has:
-which versions are yanked, which requirement pins one, and which installed
-version should be tried first.
+which versions are yanked, which requirement pins one, which installed
+version should be tried first, and which versions need no build.
 
 What it does not bind to is ``nab_python._resolve.engine``.
 ``_EngineSettings`` requires a ``NabProjectConfig``, whose replacement is a
@@ -145,6 +145,37 @@ class YankPolicy:
         return all_yanked and canonicalize_name(package) in self._pinned
 
 
+class _PreferBinaryProvider(NabProvider):
+    """nab's provider with pip's ``--prefer-binary`` ordering on top.
+
+    ``binary_preference`` sits above the version in
+    ``CandidateEvaluator._sort_key``, so pip tries a 0.8 wheel before a 1.0
+    source archive. nab orders candidates by version alone, and the listing
+    is the wrong place to say otherwise: the same order backs the widening
+    universe, which has to stay version-monotonic.
+
+    :meth:`selectable_versions` is where the two meet. nab hands it the
+    versions left in the range being chosen from, in the order the strategy
+    will read them, which is exactly the set pip applies the preference to
+    in ``_iter_found_candidates``. Reordering is not filtering, so every
+    version stays selectable and only the order they are tried in moves.
+    """
+
+    def __init__(self, *args: Any, index: PipHostIndex, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._index = index
+
+    def selectable_versions(
+        self, normalized: str, candidates: list[Version]
+    ) -> list[Version]:
+        selectable = super().selectable_versions(normalized, candidates)
+        if not self._index.prefers_binary():
+            return selectable
+        binary = self._index.binary_versions(canonicalize_name(normalized))
+        # Stable, so each group keeps the version order nab handed over.
+        return sorted(selectable, key=lambda version: version not in binary)
+
+
 def solve(
     *,
     inputs: ResolveInputs,
@@ -167,8 +198,9 @@ def solve(
     )
     requirements, root_extras = _root_ranges(inputs)
     constraints = _constraint_ranges(inputs, root_extras)
-    provider = NabProvider(
+    provider = _PreferBinaryProvider(
         port,
+        index=index,
         root_requirements=dict(requirements),
         # ``target=None`` turns off every filter pip has already applied:
         # wheel tags, Requires-Python and the upload cutoff. Running them
