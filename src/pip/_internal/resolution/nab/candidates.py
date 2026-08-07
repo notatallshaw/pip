@@ -163,6 +163,7 @@ class PipHostIndex:
         self._upgrade_strategy = upgrade_strategy
         self._make_install_req = make_install_req
         self._universe: dict[NormalizedName, Sequence[HostCandidate]] = {}
+        self._installed: dict[NormalizedName, HostCandidate | None] = {}
         self._binary_versions: dict[NormalizedName, frozenset[Version]] = {}
         self._templates: dict[NormalizedName, InstallRequirement] = {}
         self._index_templates: dict[NormalizedName, InstallRequirement] = {}
@@ -187,10 +188,45 @@ class PipHostIndex:
         self._universe[project_name] = universe
         return universe
 
+    def installed(self, project_name: NormalizedName) -> HostCandidate | None:
+        """The installed distribution as a candidate, without listing.
+
+        ``None`` when nothing is installed, when ``--force-reinstall`` or
+        ``--ignore-installed`` means the index answers instead, or when the
+        package has an explicit universe: a requirement or constraint naming
+        a URL, path, VCS ref or editable replaces the index entirely
+        (:meth:`_explicit_universe`), and what is installed is not in it.
+
+        The explicit test is made on every call rather than memoised with
+        the candidate, because :meth:`register_explicit` can give a package
+        an explicit universe part way through a resolve.
+        """
+        if self._has_explicit_universe(project_name):
+            return None
+        if project_name not in self._installed:
+            self._installed[project_name] = self._installed_candidate(project_name)
+        return self._installed[project_name]
+
+    def _has_explicit_universe(self, project_name: NormalizedName) -> bool:
+        if project_name in self._inputs.explicit:
+            return True
+        constraint = self._inputs.constraints.get(project_name)
+        return constraint is not None and bool(constraint.links)
+
     def find(
         self, project_name: NormalizedName, version: Version
     ) -> HostCandidate | None:
-        """The candidate for one version, or None if nothing supplies it."""
+        """The candidate for one version, or None if nothing supplies it.
+
+        The installed distribution answers for its own version without a
+        listing. That is not a shortcut with a different answer: when the
+        universe is built, an installed version replaces the index entry for
+        the same version (see :meth:`_build_universe`), so this returns the
+        object the full universe would have returned.
+        """
+        installed = self.installed(project_name)
+        if installed is not None and installed.version == version:
+            return installed
         for candidate in self.candidates(project_name):
             if candidate.version == version:
                 return candidate
@@ -447,7 +483,7 @@ class PipHostIndex:
             return {}
         preferences: dict[str, Version] = {}
         for project_name, dist in self._factory._installed_dists.items():
-            if self._eligible_for_upgrade(project_name):
+            if self.eligible_for_upgrade(project_name):
                 continue
             preferences[project_name] = self._installed_version(dist)
         return preferences
@@ -483,7 +519,11 @@ class PipHostIndex:
             for version, index_candidate in best_by_version.items()
         ]
 
-        installed = self._installed_candidate(project_name)
+        # :meth:`installed` rather than :meth:`_installed_candidate`, so the
+        # universe carries the same record the seed path answered from. The
+        # two agree here: this line is only reached when the package has no
+        # explicit universe, which is the only thing the former adds.
+        installed = self.installed(project_name)
         if installed is not None:
             # An installed version replaces the index entry for the same
             # version: pip's merge iterators yield the installed candidate
@@ -635,7 +675,7 @@ class PipHostIndex:
         except InvalidVersion as exc:
             raise InvalidInstalledPackage(dist=dist, invalid_exc=exc) from exc
 
-    def _eligible_for_upgrade(self, project_name: NormalizedName) -> bool:
+    def eligible_for_upgrade(self, project_name: NormalizedName) -> bool:
         """Are upgrades allowed for this project?
 
         Same rule as ``PipProvider.find_matches``: eager upgrades everything,

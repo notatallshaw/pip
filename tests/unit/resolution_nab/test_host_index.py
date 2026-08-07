@@ -13,9 +13,11 @@ from typing import TYPE_CHECKING
 import pytest
 
 from pip._vendor.packaging.utils import canonicalize_name
+from pip._vendor.packaging.version import Version
 
 from pip._internal.index.collector import LinkCollector
 from pip._internal.index.package_finder import PackageFinder
+from pip._internal.metadata import BaseDistribution, get_metadata_distribution
 from pip._internal.models.search_scope import SearchScope
 from pip._internal.models.selection_prefs import SelectionPreferences
 from pip._internal.network.session import PipSession
@@ -24,6 +26,8 @@ from pip._internal.resolution.nab.candidates import PipHostIndex
 from pip._internal.resolution.nab.inputs import collect_inputs
 
 if TYPE_CHECKING:
+    from typing import NoReturn
+
     from pip._internal.req.req_install import InstallRequirement
     from pip._internal.resolution.model.factory import Factory
 
@@ -61,6 +65,109 @@ def _index_from_ireqs(
         upgrade_strategy="to-satisfy-only",
         make_install_req=install_req_from_line,
     )
+
+
+def _installed_dist(name: str, version: str) -> BaseDistribution:
+    """A real distribution over real METADATA bytes."""
+    text = f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n\n"
+    return get_metadata_distribution(
+        text.encode(), f"{name}-{version}.dist-info", str(canonicalize_name(name))
+    )
+
+
+def _refuse_to_list(project_name: str) -> NoReturn:
+    raise AssertionError(f"listed {project_name}")
+
+
+def test_the_installed_distribution_answers_without_listing(
+    factory: Factory,
+    yanking_finder: PackageFinder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The whole point of W1: no listing to say what is already there.
+
+    pip's own resolver never lists a package whose installed version
+    satisfies, because the installed candidate is element zero of a lazy
+    sequence. Here the same fact is answered off the installed distribution
+    directly, and the finder is rigged to fail so that a listing shows up
+    as an error rather than as a slow test.
+    """
+    monkeypatch.setitem(
+        factory._installed_dists,
+        canonicalize_name("pkg"),
+        _installed_dist("pkg", "1.0"),
+    )
+    monkeypatch.setattr(yanking_finder, "find_all_candidates", _refuse_to_list)
+    index = _index(factory, yanking_finder, ["pkg"])
+    name = canonicalize_name("pkg")
+
+    installed = index.installed(name)
+    assert installed is not None
+    assert installed.version == Version("1.0")
+    assert installed.is_installed
+    assert index.find(name, Version("1.0")) is installed
+
+    with pytest.raises(AssertionError, match="listed pkg"):
+        index.find(name, Version("2.0"))
+
+
+def test_a_url_requirement_hides_the_installed_distribution(
+    factory: Factory,
+    yanking_finder: PackageFinder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``pip install ./pkg`` must look at the path, installed or not."""
+    monkeypatch.setitem(
+        factory._installed_dists,
+        canonicalize_name("pkg"),
+        _installed_dist("pkg", "1.0"),
+    )
+    index = _index(
+        factory, yanking_finder, ["pkg @ https://example.com/pkg-2.0.tar.gz"]
+    )
+
+    assert index.installed(canonicalize_name("pkg")) is None
+
+
+def test_a_url_constraint_hides_the_installed_distribution(
+    factory: Factory,
+    yanking_finder: PackageFinder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A constraint naming a URL replaces the universe the same way."""
+    monkeypatch.setitem(
+        factory._installed_dists,
+        canonicalize_name("pkg"),
+        _installed_dist("pkg", "1.0"),
+    )
+    index = _index_from_ireqs(
+        factory,
+        yanking_finder,
+        [
+            install_req_from_line("pkg"),
+            install_req_from_line(
+                "pkg @ https://example.com/pkg-2.0.tar.gz", constraint=True
+            ),
+        ],
+    )
+
+    assert index.installed(canonicalize_name("pkg")) is None
+
+
+def test_force_reinstall_sends_the_answer_back_to_the_index(
+    factory: Factory,
+    yanking_finder: PackageFinder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(
+        factory._installed_dists,
+        canonicalize_name("pkg"),
+        _installed_dist("pkg", "1.0"),
+    )
+    monkeypatch.setattr(factory, "_force_reinstall", True)
+    index = _index(factory, yanking_finder, ["pkg"])
+
+    assert index.installed(canonicalize_name("pkg")) is None
 
 
 def test_universe_is_ascending_and_deduplicated(
