@@ -403,19 +403,21 @@ class PipHostIndex:
         """
         ireq = self._make_install_req(spec, comes_from)
         assert ireq.name is not None, "a dependency always carries a name"
+        assert ireq.link is not None, "a direct URL requirement carries a link"
         project_name = canonicalize_name(ireq.name)
-        existing = self._inputs.explicit.get(project_name)
-        if existing is not None:
-            # Two spellings of one URL are one requirement: pip compares them
-            # with links_equivalent, which ignores the ``#egg=`` fragment and
-            # query-parameter order.
-            assert existing.link is not None
-            assert ireq.link is not None
-            return links_equivalent(existing.link, ireq.link)
+        existing = self._inputs.explicit.get(project_name, [])
+        # Two spellings of one URL are one requirement: pip compares them
+        # with links_equivalent, which ignores the ``#egg=`` fragment and
+        # query-parameter order.
+        for other in existing:
+            assert other.link is not None
+            if links_equivalent(other.link, ireq.link):
+                return True
         if project_name in self._universe:
             return False
-        self._inputs.explicit[project_name] = ireq
-        self._templates[project_name] = ireq
+        if not existing:
+            self._templates[project_name] = ireq
+        self._inputs.explicit.setdefault(project_name, []).append(ireq)
         return True
 
     def hashes_for(self, project_name: NormalizedName) -> Hashes:
@@ -510,9 +512,16 @@ class PipHostIndex:
         URL constraints themselves become the candidates.
         """
         constraint = self._inputs.constraints.get(project_name)
-        ireq = self._inputs.explicit.get(project_name)
+        ireqs = self._inputs.explicit.get(project_name, [])
 
-        if ireq is not None:
+        if ireqs:
+            if _distinct_links(ireqs) > 1:
+                # An explicit candidate has to satisfy every requirement that
+                # names a link, and two different URLs never both hold, so
+                # the package is left with nothing. That is what pip
+                # concludes too, and the error path names both requests.
+                return ()
+            ireq = ireqs[0]
             assert ireq.link is not None
             self._templates.setdefault(project_name, ireq)
             candidate = self._build_explicit(project_name, ireq.link, ireq)
@@ -699,6 +708,20 @@ class PipHostIndex:
             }
         self._index_templates[project_name] = template
         return template
+
+
+def _distinct_links(ireqs: Sequence[InstallRequirement]) -> int:
+    """How many different URLs a project's explicit requirements name.
+
+    ``links_equivalent`` rather than equality, because pip counts two
+    spellings of one URL as one requirement.
+    """
+    distinct: list[Link] = []
+    for ireq in ireqs:
+        assert ireq.link is not None
+        if not any(links_equivalent(link, ireq.link) for link in distinct):
+            distinct.append(ireq.link)
+    return len(distinct)
 
 
 def _activating_extras(

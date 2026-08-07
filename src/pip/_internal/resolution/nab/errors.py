@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from pip._vendor.packaging.version import Version
 
     from pip._internal.exceptions import InstallationError
+    from pip._internal.models.link import Link
     from pip._internal.resolution.model.base import Candidate, Requirement
     from pip._internal.resolution.model.factory import Factory
     from pip._internal.resolution.nab.candidates import PipHostIndex
@@ -163,7 +164,7 @@ def causes_from_derivation(
         selected = _most_constrained(requested)
 
     causes: list[FailureCause] = list(rejected)
-    seen: set[tuple[str | None, str, object]] = set()
+    seen: set[tuple[str | None, str, object, Link | None]] = set()
     for parent_key, dep_key, parent_range in [] if rejected else selected:
         node_causes: Sequence[FailureCause]
         if parent_key is None:
@@ -181,8 +182,16 @@ def causes_from_derivation(
             # Two versions of one parent declaring the same dependency are
             # two causes, not one: pip names each version separately. One
             # widened clause stands for all of them, so the versions are
-            # recovered here rather than counted off the clauses.
-            fingerprint = (parent_key, cause.requirement, cause.parent_version)
+            # recovered here rather than counted off the clauses. Two roots
+            # naming different extras of one project are one cause on the
+            # base node, which the link keys apart from a second URL.
+            link = None if cause.explicit_root is None else cause.explicit_root.link
+            fingerprint = (
+                parent_key,
+                cause.requirement,
+                cause.parent_version,
+                link,
+            )
             if fingerprint in seen:
                 continue
             seen.add(fingerprint)

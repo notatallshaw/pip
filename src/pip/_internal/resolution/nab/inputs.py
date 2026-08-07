@@ -85,7 +85,11 @@ class ResolveInputs:
     # Requirements that name a URL, VCS ref, local path or editable. Under this
     # arm each is a package whose candidate universe is exactly one entry, so
     # the index supplier answers for them and the engine sees a normal package.
-    explicit: dict[NormalizedName, InstallRequirement] = field(default_factory=dict)
+    # A list because a user can name two different URLs for one project, which
+    # pip resolves to nothing and reports naming both.
+    explicit: dict[NormalizedName, list[InstallRequirement]] = field(
+        default_factory=dict
+    )
     ignore_dependencies: bool = False
 
     def specifier_for(self, project_name: NormalizedName) -> SpecifierSet:
@@ -174,7 +178,7 @@ def collect_inputs(
         if ireq.user_supplied and requirements[0].key not in inputs.user_requested:
             inputs.user_requested[requirements[0].key] = index
         if ireq.link is not None:
-            inputs.explicit[requirements[0].project_name] = ireq
+            inputs.explicit.setdefault(requirements[0].project_name, []).append(ireq)
         inputs.requirements.extend(requirements)
 
     # Put requirements with extras at the end, matching
