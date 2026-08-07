@@ -7,6 +7,7 @@ to catch a wiring mistake between the finder, the factory and the universe.
 
 from __future__ import annotations
 
+import hashlib
 from typing import TYPE_CHECKING
 
 import pytest
@@ -23,6 +24,7 @@ from pip._internal.resolution.nab.candidates import PipHostIndex
 from pip._internal.resolution.nab.inputs import collect_inputs
 
 if TYPE_CHECKING:
+    from pip._internal.req.req_install import InstallRequirement
     from pip._internal.resolution.model.factory import Factory
 
     from tests.lib import TestData
@@ -43,10 +45,15 @@ def yanking_finder(data: TestData) -> PackageFinder:
 
 
 def _index(factory: Factory, finder: PackageFinder, lines: list[str]) -> PipHostIndex:
-    inputs = collect_inputs(
-        [install_req_from_line(line) for line in lines],
-        ignore_dependencies=False,
+    return _index_from_ireqs(
+        factory, finder, [install_req_from_line(line) for line in lines]
     )
+
+
+def _index_from_ireqs(
+    factory: Factory, finder: PackageFinder, ireqs: list[InstallRequirement]
+) -> PipHostIndex:
+    inputs = collect_inputs(ireqs, ignore_dependencies=False)
     return PipHostIndex(
         factory=factory,
         finder=finder,
@@ -100,3 +107,60 @@ def test_metadata_reads_raw_dependencies(
     )
     assert any("extra ==" in dep for dep in dist.iter_raw_dependencies())
     assert set(dist.iter_provided_extras()) == {canonicalize_name("extra")}
+
+
+def test_the_universe_records_which_versions_need_no_build(
+    factory: Factory, yanking_finder: PackageFinder
+) -> None:
+    """``--prefer-binary`` sorts on this, so it has to survive the grouping."""
+    index = _index(factory, yanking_finder, ["simplewheel", "simple"])
+
+    wheels = index.candidates(canonicalize_name("simplewheel"))
+    assert wheels
+    assert index.binary_versions(canonicalize_name("simplewheel")) == {
+        candidate.version for candidate in wheels
+    }
+
+    archives = index.candidates(canonicalize_name("simple"))
+    assert archives
+    assert not index.binary_versions(canonicalize_name("simple"))
+
+
+def test_a_constraints_hash_pins_the_candidates_install_requirement(
+    factory: Factory, yanking_finder: PackageFinder, data: TestData
+) -> None:
+    """A constraint may carry the ``--hash`` lines for an unpinned requirement.
+
+    pip copies them onto the template it builds candidates from, and
+    ``make_install_req_from_link`` then writes the candidate's install
+    requirement as ``name==version`` rather than repeating the unpinned
+    requirement. Without that the install fails hash checking with "all
+    requirements must have their versions pinned with ==".
+    """
+    wheel = data.packages / "simplewheel-1.0-py2.py3-none-any.whl"
+    digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
+    index = _index_from_ireqs(
+        factory,
+        yanking_finder,
+        [
+            install_req_from_line("simplewheel"),
+            install_req_from_line(
+                "simplewheel==1.0",
+                constraint=True,
+                hash_options={"sha256": [digest]},
+            ),
+        ],
+    )
+
+    name = canonicalize_name("simplewheel")
+    chosen = next(
+        candidate
+        for candidate in index.candidates(name)
+        if str(candidate.version) == "1.0"
+    )
+    ireq = index.pip_candidate(chosen, frozenset()).get_install_requirement()
+
+    assert ireq is not None
+    assert str(ireq.req) == "simplewheel==1.0"
+    assert ireq.is_pinned
+    assert ireq.hash_options == {"sha256": [digest]}
