@@ -14,9 +14,14 @@ from typing import (
     TypeVar,
     cast,
 )
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
-from .markers import Environment, Marker, default_environment
+from .markers import (
+    Environment,
+    Marker,
+    _pep440_python_full_version,
+    default_environment,
+)
 from .specifiers import SpecifierSet
 from .tags import create_compatible_tags_selector, sys_tags
 from .utils import (
@@ -45,6 +50,7 @@ __all__ = [
     "PackageVcs",
     "PackageWheel",
     "Pylock",
+    "PylockSelectError",
     "PylockUnsupportedVersionError",
     "PylockValidationError",
     "is_valid_pylock_path",
@@ -99,7 +105,10 @@ def _get(d: Mapping[str, Any], expected_type: type[_T], key: str) -> _T | None:
     """Get a value from the dictionary and verify it's the expected type."""
     if (value := d.get(key)) is None:
         return None
-    if not isinstance(value, expected_type):
+    if not isinstance(value, expected_type) or (
+        # Special case: bool is a subclass of int, but TOML distinguishes the two
+        expected_type is int and isinstance(value, bool)
+    ):
         raise PylockValidationError(
             f"Unexpected type {type(value).__name__} "
             f"(expected {expected_type.__name__})",
@@ -255,7 +264,8 @@ def _url_name(url: str | None) -> str | None:
     if not url:
         return None
     url_path = urlparse(url).path
-    return url_path.rsplit("/", 1)[-1]
+    # The last path component is percent-encoded, so decode it to the file name
+    return unquote(url_path.rsplit("/", 1)[-1])
 
 
 def _validate_hashes(hashes: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -306,7 +316,10 @@ class PylockUnsupportedVersionError(PylockValidationError):
 
 
 class PylockSelectError(Exception):
-    """Base exception for errors raised by :meth:`Pylock.select`."""
+    """Base exception for errors raised by :meth:`Pylock.select`.
+
+    .. versionadded:: 26.1
+    """
 
 
 @dataclass(frozen=True, init=False)
@@ -761,6 +774,8 @@ class Pylock:
         This method must be used on valid Pylock instances (i.e. one obtained
         from :meth:`Pylock.from_dict` or if constructed manually, after calling
         :meth:`Pylock.validate`).
+
+        .. versionadded:: 26.1
         """
         compatible_tags_selector = create_compatible_tags_selector(tags or sys_tags())
 
@@ -782,7 +797,7 @@ class Pylock:
                 ),
             ),
         )
-        env_python_full_version = (
+        env_python_full_version = _pep440_python_full_version(
             environment["python_full_version"]
             if environment
             else default_environment()["python_full_version"]

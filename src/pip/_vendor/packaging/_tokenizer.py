@@ -3,13 +3,18 @@ from __future__ import annotations
 import contextlib
 import re
 from dataclasses import dataclass
-from typing import Generator, Mapping, NoReturn
+from typing import TYPE_CHECKING, NoReturn
 
 from .specifiers import Specifier
+
+if TYPE_CHECKING:
+    from collections.abc import Generator, Mapping
 
 
 @dataclass
 class Token:
+    __slots__ = ("name", "position", "text")
+
     name: str
     text: str
     position: int
@@ -95,6 +100,8 @@ class Tokenizer:
     matches.
     """
 
+    __slots__ = ("next_token", "position", "rules", "source")
+
     def __init__(
         self,
         source: str,
@@ -135,7 +142,7 @@ class Tokenizer:
     def expect(self, name: str, *, expected: str) -> Token:
         """Expect a certain token name next, failing with a syntax error otherwise.
 
-        The token is *not* read.
+        The token is read and returned.
         """
         if not self.check(name):
             raise self.raise_syntax_error(f"Expected {expected}")

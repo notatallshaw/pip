@@ -181,7 +181,7 @@ def test_upgrade_with_newest_already_installed(
         "simple",
     )
     assert not result.files_created, "simple upgraded when it should not have"
-    if resolver_variant == "resolvelib":
+    if resolver_variant == "nab":
         msg = "Requirement already satisfied"
     else:
         msg = "already up-to-date"
