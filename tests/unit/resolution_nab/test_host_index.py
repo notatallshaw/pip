@@ -24,12 +24,12 @@ from pip._internal.models.search_scope import SearchScope
 from pip._internal.models.selection_prefs import SelectionPreferences
 from pip._internal.network.session import PipSession
 from pip._internal.req.constructors import install_req_from_line
+from pip._internal.req.req_install import InstallRequirement
 from pip._internal.resolution.nab.candidates import PipHostIndex
 from pip._internal.resolution.nab.engine import PipProvider, YankPolicy
 from pip._internal.resolution.nab.inputs import ResolveInputs, collect_inputs
 
 if TYPE_CHECKING:
-    from pip._internal.req.req_install import InstallRequirement
     from pip._internal.resolution.model.factory import Factory
 
     from tests.lib import TestData
@@ -196,7 +196,7 @@ def blocked_finder(yanking_finder: PackageFinder) -> PackageFinder:
     def refuse(project_name: str) -> None:
         raise AssertionError(f"listed the index for {project_name}")
 
-    yanking_finder.find_all_candidates = refuse  # type: ignore[method-assign]
+    yanking_finder.find_all_candidates = refuse  # type: ignore[assignment]
     return yanking_finder
 
 
@@ -365,8 +365,9 @@ def test_an_extras_nodes_dependency_is_credited_to_the_extras_requirement(
     assert chosen is not None
     dependency = index.pip_candidate(chosen, frozenset()).get_install_requirement()
     assert dependency is not None
-    assert dependency.comes_from is not None
-    assert dependency.comes_from.from_path() == node
+    parent = dependency.comes_from
+    assert isinstance(parent, InstallRequirement)
+    assert parent.from_path() == node
 
 
 def test_a_transitively_reached_extras_node_records_who_asked(

@@ -70,6 +70,7 @@ if TYPE_CHECKING:
     from pip._internal.req.req_install import InstallRequirement
     from pip._internal.resolution.base import InstallRequirementProvider
     from pip._internal.resolution.model.base import Candidate
+    from pip._internal.resolution.model.candidates import BaseCandidate
     from pip._internal.resolution.model.factory import Factory
     from pip._internal.resolution.nab.inputs import ResolveInputs
 
@@ -616,7 +617,7 @@ class PipHostIndex:
 
     def _build_explicit(
         self, project_name: NormalizedName, link: Link, template: InstallRequirement
-    ) -> Candidate | None:
+    ) -> BaseCandidate | None:
         try:
             self._factory._fail_if_link_is_unsupported_wheel(link)
         except UnsupportedWheel:
