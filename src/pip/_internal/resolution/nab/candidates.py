@@ -18,6 +18,14 @@ anything. Three properties have to hold and each one is load-bearing:
    ranking is still what decides which *file* represents a version, so the
    universe is built by ranking first and then grouping by version.
 
+   Sorting by version keeps property 1 and drops one thing pip's ranking
+   was carrying: ``binary_preference``, the ``--prefer-binary`` element,
+   which sits *above* the version in ``_sort_key`` and so orders a 0.8
+   wheel ahead of a 1.0 sdist. That is a preference between versions, not
+   between the files of one version, so it cannot live in this ordering.
+   Each record carries :attr:`HostCandidate.is_binary` instead and the
+   engine applies it where it decides which version to try first.
+
 3. Yanked versions are carried, flagged, never dropped here. PEP 592 makes a
    yanked version selectable exactly when the requirement pins it, and
    whether it is pinned is not known until the requirements have been merged.
@@ -86,11 +94,18 @@ class HostCandidate:
     Exactly one of the three sources is set. An installed distribution has
     no artifact, so it can never route through a download, and an explicit
     link replaces the listing rather than joining it.
+
+    ``is_binary`` is what ``--prefer-binary`` sorts on: True when this
+    version needs no build, which is a wheel or a distribution that is
+    already installed. It is recorded unconditionally and read only when
+    the user asked for the preference, so the flag decides whether it is
+    used and never what it says.
     """
 
     project_name: NormalizedName
     version: Version
     yanked: bool
+    is_binary: bool = False
     index_candidate: InstallationCandidate | None = None
     installed_dist: BaseDistribution | None = None
     explicit_link: Link | None = None
@@ -322,6 +337,15 @@ class PipHostIndex:
             return None
         return release_control.allows_prereleases(project_name)
 
+    def prefers_binary(self) -> bool:
+        """``--prefer-binary``: try every wheel before any source archive.
+
+        Read live rather than at universe-build time, because a
+        requirements file can turn it on after the finder was made
+        (``req_file.py`` calls ``PackageFinder.set_prefer_binary``).
+        """
+        return self._finder.prefer_binary
+
     def hashes_for(self, project_name: NormalizedName) -> Hashes:
         """The hash allowlist the command line puts on ``project_name``."""
         hashes = Hashes()
@@ -358,6 +382,7 @@ class PipHostIndex:
                 project_name=project_name,
                 version=version,
                 yanked=index_candidate.link.is_yanked,
+                is_binary=index_candidate.link.is_wheel,
                 index_candidate=index_candidate,
             )
             for version, index_candidate in best_by_version.items()
@@ -450,6 +475,7 @@ class PipHostIndex:
             project_name=project_name,
             version=candidate.version,
             yanked=link.is_yanked,
+            is_binary=link.is_wheel,
             explicit_link=link,
         )
 
@@ -463,6 +489,12 @@ class PipHostIndex:
             project_name=project_name,
             version=self._installed_version(dist),
             yanked=False,
+            # Nothing to download and nothing to build, so it is what
+            # --prefer-binary asks for. pip never runs _sort_key over an
+            # installed candidate, and the "prefer what is installed" rule
+            # is applied after this one, so the flag can only move an
+            # installed version that pip was already free to upgrade past.
+            is_binary=True,
             installed_dist=dist,
         )
 

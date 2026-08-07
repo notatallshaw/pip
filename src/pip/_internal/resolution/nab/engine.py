@@ -262,6 +262,15 @@ class PipProvider:
         selectable exactly when the merged requirement pins it, and that is
         not knowable before the search. So the filter is here, where the
         range in play is known.
+
+        This is also where ``--prefer-binary`` is applied, and it is the
+        only place it can be. pip puts ``binary_preference`` above the
+        version in ``CandidateEvaluator._sort_key``, so a 0.8 wheel is
+        preferred to a 1.0 sdist; the universe cannot carry that order
+        because it has to stay version-monotonic for widening to be sound.
+        Sorting here reproduces pip's order without touching the universe:
+        every version stays selectable and only the order they are tried in
+        moves.
         """
         in_range = self._admitted(project_name, version_range, requirement)
         if not in_range:
@@ -272,6 +281,8 @@ class PipProvider:
         ):
             allowed = in_range
         allowed.reverse()
+        if self._index.prefers_binary():
+            allowed.sort(key=lambda candidate: not candidate.is_binary)
         preferred = self._index.preferred_version(project_name)
         if preferred is not None:
             allowed.sort(key=lambda candidate: candidate.version != preferred)
