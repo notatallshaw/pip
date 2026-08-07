@@ -149,19 +149,10 @@ class RequirementCommand(IndexGroupCommand):
     @staticmethod
     def determine_resolver_variant(options: Values) -> str:
         """Determines which resolver should be used, based on the given options."""
-        legacy = "legacy-resolver" in options.deprecated_features_enabled
-        nab = "nab-resolver" in options.features_enabled
-        if legacy and nab:
-            raise CommandError(
-                "Cannot use '--use-deprecated legacy-resolver' together with "
-                "'--use-feature nab-resolver'; they select different resolvers."
-            )
-        if legacy:
+        if "legacy-resolver" in options.deprecated_features_enabled:
             return "legacy"
-        if nab:
-            return "nab"
 
-        return "resolvelib"
+        return "nab"
 
     @classmethod
     def make_requirement_preparer(
@@ -217,13 +208,11 @@ class RequirementCommand(IndexGroupCommand):
                 build_constraints=build_constraint_reqs,
                 verbosity=verbosity,
                 wheel_cache=WheelCache(options.cache_dir),
-                resolver_variant=resolver_variant,
             )
         else:
             env_installer = SubprocessBuildEnvironmentInstaller(
                 finder,
                 build_constraints=build_constraints,
-                resolver_variant=resolver_variant,
             )
 
         if not options.build_isolation:
@@ -287,23 +276,6 @@ class RequirementCommand(IndexGroupCommand):
             import pip._internal.resolution.nab.resolver
 
             return pip._internal.resolution.nab.resolver.Resolver(
-                preparer=preparer,
-                finder=finder,
-                wheel_cache=wheel_cache,
-                make_install_req=make_install_req,
-                use_user_site=use_user_site,
-                ignore_dependencies=options.ignore_dependencies,
-                only_dependencies=options.only_dependencies,
-                ignore_installed=ignore_installed,
-                ignore_requires_python=ignore_requires_python,
-                force_reinstall=force_reinstall,
-                upgrade_strategy=upgrade_strategy,
-                py_version_info=py_version_info,
-            )
-        if resolver_variant == "resolvelib":
-            import pip._internal.resolution.resolvelib.resolver
-
-            return pip._internal.resolution.resolvelib.resolver.Resolver(
                 preparer=preparer,
                 finder=finder,
                 wheel_cache=wheel_cache,

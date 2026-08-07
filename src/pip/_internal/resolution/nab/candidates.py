@@ -66,9 +66,9 @@ if TYPE_CHECKING:
     from pip._internal.models.link import Link
     from pip._internal.req.req_install import InstallRequirement
     from pip._internal.resolution.base import InstallRequirementProvider
+    from pip._internal.resolution.model.base import Candidate
+    from pip._internal.resolution.model.factory import Factory
     from pip._internal.resolution.nab.inputs import ResolveInputs
-    from pip._internal.resolution.resolvelib.base import Candidate
-    from pip._internal.resolution.resolvelib.factory import Factory
 
 logger = logging.getLogger(__name__)
 
@@ -189,9 +189,8 @@ class PipHostIndex:
     def metadata(self, candidate: HostCandidate) -> BaseDistribution:
         """Prepare ``candidate`` and return pip's distribution for it.
 
-        This is where pip downloads, builds and validates, exactly as it does
-        for the resolvelib variant, so a candidate probe under this arm costs
-        what a candidate probe costs pip today.
+        This is where pip downloads, builds and validates, so a candidate
+        probe costs what a candidate probe has always cost pip.
         """
         return self.pip_candidate(candidate, frozenset()).dist  # type: ignore[attr-defined]
 

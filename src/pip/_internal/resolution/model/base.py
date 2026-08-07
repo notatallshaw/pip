@@ -1,8 +1,15 @@
+"""pip's resolution domain model: requirements, candidates and failure causes.
+
+Nothing here depends on a search algorithm. A resolver asks the model what a
+requirement means and which candidates exist, and reports what it could not
+satisfy as :class:`RequirementInformation` pairs.
+"""
+
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass
-from typing import Optional
+from typing import NamedTuple, Optional
 
 from pip._vendor.packaging.specifiers import SpecifierSet
 from pip._vendor.packaging.utils import NormalizedName
@@ -162,3 +169,25 @@ class Candidate:
 
     def format_for_error(self) -> str:
         raise NotImplementedError("Subclass should override")
+
+
+class RequirementInformation(NamedTuple):
+    """One requirement, and the candidate that declared it.
+
+    ``parent`` is None for a requirement the user asked for directly.
+    """
+
+    requirement: Requirement
+    parent: Candidate | None
+
+
+class ResolutionImpossible(Exception):
+    """No candidate set satisfies every requirement.
+
+    ``causes`` is the evidence pip renders the conflict report from; see
+    :meth:`pip._internal.resolution.model.factory.Factory.get_installation_error`.
+    """
+
+    def __init__(self, causes: Collection[RequirementInformation]) -> None:
+        super().__init__(causes)
+        self.causes = causes

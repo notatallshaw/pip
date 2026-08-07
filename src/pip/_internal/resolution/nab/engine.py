@@ -48,6 +48,7 @@ from pip._vendor.packaging.ranges import VersionRange
 from pip._vendor.packaging.utils import canonicalize_name
 
 from pip._internal.exceptions import InstallationError
+from pip._internal.resolution.model.base import format_name
 from pip._internal.resolution.nab.errors import (
     FailureCause,
     RejectionBlocker,
@@ -55,7 +56,6 @@ from pip._internal.resolution.nab.errors import (
 )
 from pip._internal.resolution.nab.fetch_port import PipFetchPort
 from pip._internal.resolution.nab.inputs import split_key
-from pip._internal.resolution.resolvelib.base import format_name
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence

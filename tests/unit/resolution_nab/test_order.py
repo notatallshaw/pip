@@ -1,11 +1,8 @@
 """Installation order over a graph the nab adapter builds.
 
-``tests/unit/resolution_resolvelib/test_resolver.py`` pins the same
-expectations, but it builds resolvelib's own ``DirectedGraph`` and stubs a
-resolvelib ``Result``, so it cannot say anything about the graph a
-PubGrub-derived edge list produces. These cases run the identical
-expectations through ``MutableGraph`` and through the nab resolver's
-``get_installation_order``.
+These cases run pip's installation-order expectations through
+``MutableGraph`` and through the nab resolver's ``get_installation_order``,
+so they exercise the graph a PubGrub-derived edge list produces.
 """
 
 from __future__ import annotations
