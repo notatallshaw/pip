@@ -182,6 +182,16 @@ class PipHostIndex:
         self._universe[project_name] = universe
         return universe
 
+    def is_listed(self, project_name: NormalizedName) -> bool:
+        """Has ``project_name``'s universe already been paid for?
+
+        A caller that only wants to order its work can ask this first and
+        answer from something else when it is False, rather than buying an
+        index request to produce a number. pip's own resolver never lists a
+        package to decide which package to look at next.
+        """
+        return project_name in self._universe
+
     def preferred_version(self, project_name: NormalizedName) -> Version | None:
         """The installed version, when this package must not be upgraded.
 

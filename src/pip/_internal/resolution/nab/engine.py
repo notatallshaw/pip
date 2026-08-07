@@ -64,6 +64,12 @@ _TIER_AFFECTED = 0
 _TIER_NORMAL = 1
 _TIER_CULPRIT = 2
 
+# Stands in for the candidate count of a package whose index listing has not
+# been paid for yet, so an unlisted package sorts behind one the search
+# already knows. nab's own provider uses the same prior for a listing that is
+# still in flight (``nab_python/_provider/priority.py``).
+_NO_LISTING_PRIOR = 1000
+
 
 @dataclass(frozen=True)
 class ResolvedPin:
@@ -503,6 +509,15 @@ class PipProvider:
     ) -> int:
         """How many of ``project_name``'s versions fall inside ``version_range``.
 
+        Counted only from a universe some other call already bought. Asking
+        the index here would list every package still undecided before any
+        of them is decided, which pip does not do: its own ``get_preference``
+        reads the requirements it has been handed and never touches the
+        candidate sequence, so a listing is paid for when a package is
+        chosen, not when it is ranked. An unlisted package answers with
+        :data:`_NO_LISTING_PRIOR` instead and sorts behind the ones the
+        search already knows.
+
         Memoised, because it is a pure function of the two arguments and the
         search asks for it hundreds of thousands of times. Both halves of
         that claim are load-bearing:
@@ -519,21 +534,23 @@ class PipProvider:
         cover the same versions but compare unequal simply miss the memo and
         are counted again, which costs time and never correctness.
 
-        The universe build stays where it was: a memo hit implies an earlier
-        miss on the same project, and that miss went through ``_versions``.
+        The prior is deliberately not memoised: the listing arrives later in
+        the same resolve, and a later scan should then see the real count.
         """
         per_project = self._matching.get(project_name)
-        if per_project is None:
-            per_project = self._matching[project_name] = {}
-        else:
+        if per_project is not None:
             cached = per_project.get(version_range)
             if cached is not None:
                 return cached
+        if not self._index.is_listed(project_name):
+            return _NO_LISTING_PRIOR
         matching = sum(
             1
             for candidate in self._versions(project_name)
             if candidate.version in version_range
         )
+        if per_project is None:
+            per_project = self._matching[project_name] = {}
         per_project[version_range] = matching
         return matching
 
