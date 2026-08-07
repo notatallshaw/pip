@@ -65,6 +65,7 @@ if DEBUNDLED:
     vendored("distro")
     vendored("packaging")
     vendored("nab_provider")
+    vendored("nab_provider.conflict_kind")
     vendored("nab_provider.diagnostics")
     vendored("nab_provider.provider")
     vendored("nab_provider.records")
