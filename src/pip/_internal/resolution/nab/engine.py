@@ -29,10 +29,10 @@ from pip._vendor.packaging.requirements import InvalidRequirement
 from pip._vendor.packaging.utils import canonicalize_name
 
 from pip._internal.exceptions import InstallationError
+from pip._internal.resolution.model.base import format_name
 from pip._internal.resolution.nab.candidates import CandidateUnavailable
 from pip._internal.resolution.nab.errors import FailureCause, causes_from_derivation
 from pip._internal.resolution.nab.inputs import is_pinned, split_key
-from pip._internal.resolution.resolvelib.base import format_name
 from pip._internal.utils.packaging import get_requirement
 
 if TYPE_CHECKING:
