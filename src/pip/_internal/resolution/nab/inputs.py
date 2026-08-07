@@ -18,6 +18,7 @@ from pip._vendor.packaging.specifiers import SpecifierSet
 from pip._vendor.packaging.utils import canonicalize_name
 
 from pip._internal.exceptions import InstallationError
+from pip._internal.req.constructors import install_req_drop_extras
 from pip._internal.req.req_install import check_invalid_constraint_type
 from pip._internal.resolution.model.base import Constraint, format_name
 from pip._internal.utils.packaging import get_requirement
@@ -27,6 +28,7 @@ if TYPE_CHECKING:
 
     from pip._vendor.packaging.utils import NormalizedName
 
+    from pip._internal.models.link import Link
     from pip._internal.req.req_install import InstallRequirement
 
 logger = logging.getLogger(__name__)
@@ -55,7 +57,13 @@ class RootRequirement:
     """One root requirement, as one node in the resolver's problem.
 
     ``key`` is the resolver key, which carries the ``[extras]`` part when
-    there is one. ``project_name`` never does.
+    there is one. ``project_name`` never does. ``text`` is how pip's own
+    ``Requirement`` for this half spells itself, computed here rather than
+    rebuilt from the key: pip's hint for ``pip install requirements.txt``
+    tests the requirement reading exactly ``requirements.txt``, and the key
+    is the canonical name. ``link`` is set when the user named a URL, path,
+    VCS ref or editable, which pip reports as the distribution it builds
+    rather than as a specifier.
     """
 
     key: str
@@ -63,6 +71,8 @@ class RootRequirement:
     extras: frozenset[NormalizedName]
     specifier: SpecifierSet
     ireq: InstallRequirement
+    text: str
+    link: Link | None
 
 
 @dataclass
@@ -93,6 +103,16 @@ class ResolveInputs:
         if constraint is not None:
             specifier &= constraint.specifier
         return specifier
+
+    def roots_for(self, key: str) -> Sequence[RootRequirement]:
+        """Every root requirement recorded against the node named ``key``.
+
+        The resolvelib equivalent is one ``Criterion``'s ``information``, and
+        pip's conflict report prints one line per entry. nab folds the ranges
+        into one clause per node, so the entries are recovered here rather
+        than off the derivation.
+        """
+        return [root for root in self.requirements if root.key == key]
 
     def pinned_packages(self) -> frozenset[NormalizedName]:
         """Packages the command line pins, for the PEP 592 yank exception.
@@ -169,10 +189,11 @@ def _root_requirements_from_ireq(
 ) -> Iterable[RootRequirement]:
     """Zero, one or two root requirements from one ireq.
 
-    Zero when the markers do not apply. Two when the ireq carries both a
-    specifier and extras, which pip splits so the base is constrained
-    centrally (``SpecifierWithoutExtrasRequirement`` plus
-    ``SpecifierRequirement``).
+    Zero when the markers do not apply. Two when the ireq carries extras and
+    either a specifier or a link, which is where pip splits it too: the base
+    is constrained centrally and the extras ride on top
+    (``SpecifierWithoutExtrasRequirement`` plus ``SpecifierRequirement``, or
+    the base link candidate plus the extras candidate).
     """
     if not ireq.match_markers():
         logger.info(
@@ -194,13 +215,15 @@ def _root_requirements_from_ireq(
     # candidate.
     specifier = ireq.specifier if ireq.req is not None else SpecifierSet()
 
-    if extras and specifier:
+    if extras and (specifier or ireq.link is not None):
         yield RootRequirement(
             key=project_name,
             project_name=project_name,
             extras=frozenset(),
             specifier=specifier,
             ireq=ireq,
+            text=_root_text(install_req_drop_extras(ireq), project_name, frozenset()),
+            link=ireq.link,
         )
     yield RootRequirement(
         key=format_name(project_name, extras),
@@ -208,7 +231,28 @@ def _root_requirements_from_ireq(
         extras=extras,
         specifier=specifier,
         ireq=ireq,
+        text=_root_text(ireq, project_name, extras),
+        link=ireq.link,
     )
+
+
+def _root_text(
+    ireq: InstallRequirement,
+    project_name: NormalizedName,
+    extras: frozenset[NormalizedName],
+) -> str:
+    """How pip's ``Requirement`` for this half spells itself.
+
+    A link-backed root is normally rendered from the candidate it builds, so
+    this is only its fallback. It is the name rather than ``name @ url`` on
+    purpose: the fallback runs when the candidate could not be built, and a
+    URL-bearing string would send the renderer back to build it again.
+    """
+    if ireq.link is not None:
+        return format_name(project_name, extras)
+    if ireq.req is not None:
+        return str(ireq.req)
+    return format_name(project_name, extras)
 
 
 def split_key(key: str) -> tuple[NormalizedName, frozenset[NormalizedName]]:
