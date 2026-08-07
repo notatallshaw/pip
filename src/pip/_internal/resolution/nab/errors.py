@@ -20,6 +20,7 @@ from pip._internal.resolution.model.base import (
     RequirementInformation,
     ResolutionImpossible,
 )
+from pip._internal.resolution.model.requirements import UnsatisfiableRequirement
 from pip._internal.resolution.nab.candidates import CandidateUnavailable
 from pip._internal.resolution.nab.inputs import split_key
 
@@ -31,10 +32,10 @@ if TYPE_CHECKING:
     from pip._vendor.packaging.version import Version
 
     from pip._internal.exceptions import InstallationError
-    from pip._internal.resolution.model.base import Candidate
+    from pip._internal.resolution.model.base import Candidate, Requirement
     from pip._internal.resolution.model.factory import Factory
     from pip._internal.resolution.nab.candidates import PipHostIndex
-    from pip._internal.resolution.nab.inputs import ResolveInputs
+    from pip._internal.resolution.nab.inputs import ResolveInputs, RootRequirement
 
 
 @dataclass(frozen=True)
@@ -74,6 +75,16 @@ class FailureCause:
     # running interpreter's version. pip reports that case first and with a
     # different sentence.
     requires_python: SpecifierSet | None = None
+    # Set for a root the user named by URL, path, VCS ref or editable. pip
+    # reports such a request as the distribution it builds, version and
+    # location included, so the cause carries the root and the renderer
+    # rebuilds the candidate rather than parsing ``requirement`` back into
+    # something that would have to be built again.
+    explicit_root: RootRequirement | None = None
+    # The extras of the node this cause is about, which is not the same as
+    # the root's own extras: two roots naming different extras of one project
+    # both constrain the base node, and pip names the base candidate there.
+    node_extras: frozenset[NormalizedName] = frozenset()
 
 
 def causes_from_derivation(
@@ -389,6 +400,11 @@ def _cause_pair(
     factory: Factory,
     index: PipHostIndex,
 ) -> RequirementInformation | None:
+    if cause.explicit_root is not None:
+        return RequirementInformation(
+            _explicit_requirement(cause, factory=factory, index=index), None
+        )
+
     parent = _parent_candidate(cause, index=index)
     if cause.requires_python is not None:
         requirement = factory.make_requires_python_requirement(cause.requires_python)
@@ -417,6 +433,26 @@ def _cause_pair(
     # A specifier plus extras splits in two; the second is the one carrying
     # the extras, which is what pip's message names.
     return RequirementInformation(requirements[-1], parent)
+
+
+def _explicit_requirement(
+    cause: FailureCause,
+    *,
+    factory: Factory,
+    index: PipHostIndex,
+) -> Requirement:
+    """pip's requirement for a distribution the user named directly.
+
+    pip reports such a request as the distribution, so the message carries
+    the version and where it came from. A distribution that will not build
+    has no version to report, and pip says so in its own sentence
+    (``UnsatisfiableRequirement``), which is what the fallback is.
+    """
+    assert cause.explicit_root is not None
+    candidate = index.explicit_candidate(cause.explicit_root, cause.node_extras)
+    if candidate is None:
+        return UnsatisfiableRequirement(cause.explicit_root.project_name)
+    return factory.make_requirement_from_candidate(candidate)
 
 
 def _parent_candidate(cause: FailureCause, *, index: PipHostIndex) -> Candidate | None:
