@@ -2584,12 +2584,12 @@ def test_new_resolver_dont_backtrack_on_conflicting_constraints_on_extras(
     assert (
         "pkg-2.0" not in result.stdout or "pkg-1.0" not in result.stdout
     ), "Should only try one of 1.0, 2.0 depending on order"
-    assert "Reporter.starting()" in result.stdout, (
+    assert "Resolver.derivation(" in result.stdout, (
         "This should never fail unless the debug reporting format has changed,"
         " in which case the other assertions in this test need to be reviewed."
     )
     assert (
-        "Reporter.rejecting_candidate" not in result.stdout
+        "Resolver.adding_requirement(" not in result.stdout
     ), "Should be able to conclude conflict before even selecting a candidate"
     assert (
         "conflict is caused by" in result.stdout

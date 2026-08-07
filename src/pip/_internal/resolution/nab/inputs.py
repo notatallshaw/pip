@@ -2,7 +2,7 @@
 
 Mirrors ``Factory.collect_root_requirements`` and
 ``Factory._make_requirements_from_install_req``, but produces a neutral
-description of the problem instead of resolvelib ``Requirement`` objects.
+description of the problem instead of pip ``Requirement`` objects.
 Nothing here imports nab; the engine seam in :mod:`.engine` maps this onto
 nab's own input types.
 """
@@ -19,7 +19,7 @@ from pip._vendor.packaging.utils import canonicalize_name
 
 from pip._internal.exceptions import InstallationError
 from pip._internal.req.req_install import check_invalid_constraint_type
-from pip._internal.resolution.resolvelib.base import Constraint, format_name
+from pip._internal.resolution.model.base import Constraint, format_name
 from pip._internal.utils.packaging import get_requirement
 
 if TYPE_CHECKING:

@@ -23,7 +23,7 @@ from pip._internal.resolution.nab.candidates import PipHostIndex
 from pip._internal.resolution.nab.inputs import collect_inputs
 
 if TYPE_CHECKING:
-    from pip._internal.resolution.resolvelib.factory import Factory
+    from pip._internal.resolution.model.factory import Factory
 
     from tests.lib import TestData
 

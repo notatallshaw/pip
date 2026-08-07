@@ -1,10 +1,10 @@
-"""Resolution backed by nab, pip's third resolver variant.
+"""Resolution backed by nab, pip's resolver.
 
-Selected with ``--use-feature=nab-resolver``. pip owns the index layer, the
-installed environment and every install decision; nab owns the search and
-the provider that drives it. The division is deliberate: because every
-candidate probe costs exactly what a probe costs pip today, a benchmark
-against the resolvelib variant measures search quality and nothing else.
+pip owns the index layer, the installed environment and every install
+decision; nab owns the search and the provider that drives it. The division
+is deliberate: because every candidate probe costs exactly what a probe has
+always cost pip, a benchmark against pip's previous resolver measures search
+quality and nothing else.
 
 What lives where:
 
@@ -17,9 +17,8 @@ What lives where:
 - :mod:`.errors` rebuilds pip's error sentences from the engine's causes.
 - :mod:`.engine` builds nab's own ``Provider`` over the port and runs the
   PubGrub solver on it.
-- ``resolution._reqset`` and ``resolution._order`` are shared with the
-  resolvelib variant, so reinstall decisions and installation order cannot
-  drift between the two.
+- ``resolution._reqset`` and ``resolution._order`` hold the reinstall and
+  installation-order rules, independent of the search.
 """
 
 from __future__ import annotations
@@ -30,12 +29,12 @@ from typing import TYPE_CHECKING
 from pip._internal.resolution._order import MutableGraph, installation_order
 from pip._internal.resolution._reqset import build_requirement_set
 from pip._internal.resolution.base import BaseResolver
+from pip._internal.resolution.model.factory import Factory
 from pip._internal.resolution.nab.candidates import PipHostIndex
 from pip._internal.resolution.nab.engine import EngineFailure, YankPolicy, solve
 from pip._internal.resolution.nab.errors import to_installation_error
 from pip._internal.resolution.nab.inputs import collect_inputs
 from pip._internal.resolution.nab.observer import NabReporter
-from pip._internal.resolution.resolvelib.factory import Factory
 
 if TYPE_CHECKING:
     from pip._vendor.packaging.utils import NormalizedName
@@ -47,9 +46,9 @@ if TYPE_CHECKING:
     from pip._internal.req.req_install import InstallRequirement
     from pip._internal.req.req_set import RequirementSet
     from pip._internal.resolution.base import InstallRequirementProvider
+    from pip._internal.resolution.model.base import Candidate
     from pip._internal.resolution.nab.candidates import HostCandidate
     from pip._internal.resolution.nab.engine import Solution
-    from pip._internal.resolution.resolvelib.base import Candidate
 
 logger = logging.getLogger(__name__)
 
@@ -147,12 +146,11 @@ class Resolver(BaseResolver):
     def _warn_missing_extras(self, candidates: list[Candidate]) -> None:
         """Let pip say what an extras candidate does not provide.
 
-        ``ExtrasCandidate.iter_dependencies`` carries the sentence, and it is
-        the only copy of it in the resolvelib variant. Draining it on the
-        chosen candidates is what makes the two variants word this the same
-        way. nab warns about the same thing in its own words at the same
-        time, so the line appears twice; re-wording nab's is a nab-side hook
-        that does not exist.
+        ``ExtrasCandidate.iter_dependencies`` carries the sentence and is the
+        only copy of it pip owns. Draining it on the chosen candidates is what
+        keeps the wording pip's. nab warns about the same thing in its own
+        words at the same time, so the line appears twice; re-wording nab's is
+        a nab-side hook that does not exist.
 
         ``with_requires`` follows ``--no-deps``, because that is the flag
         pip's own copy reads: under it, pip never looks at the extras and
@@ -173,7 +171,7 @@ class Resolver(BaseResolver):
 
         The returned list contains a requirement before another that depends
         on it. The engine records the edges it derived, and they are walked
-        by the same weighting the resolvelib variant uses.
+        by ``resolution._order``'s weighting.
         """
         assert self._solution is not None, "must call resolve() first"
 
