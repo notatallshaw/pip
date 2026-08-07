@@ -26,6 +26,8 @@ from pip._internal.resolution.nab.inputs import is_pinned, split_key
 from tests.lib.index import make_mock_candidate
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from pip._vendor.packaging.utils import NormalizedName
 
 
@@ -174,14 +176,15 @@ def test_yank_policy_reports_facts_and_leaves_the_rule_to_nab() -> None:
             _record("2.0", yanked=True),
         ]
     }
-    policy = YankPolicy(
-        _FixedIndex(universe), frozenset({canonicalize_name("mypackage")})
-    )
+    index = _FixedIndex(universe)
+    policy = YankPolicy(index, frozenset({canonicalize_name("mypackage")}))
     name = canonicalize_name("mypackage")
 
     assert policy.yanked_versions(name, [Version("1.0"), Version("2.0")]) == frozenset(
         {Version("2.0")}
     )
+    assert policy.yanked_versions(name, [Version("1.0")]) == frozenset()
+    assert index.asked == [[Version("1.0"), Version("2.0")], [Version("1.0")]]
     assert not policy.admits_yanked(name, all_yanked=False)
     assert policy.admits_yanked(name, all_yanked=True)
 
@@ -202,16 +205,27 @@ def _record(version: str, *, yanked: bool) -> HostCandidate:
 
 
 class _FixedIndex:
-    """``PipHostIndex.yanked_versions`` over a fixed universe."""
+    """``PipHostIndex.yanked_among`` over a fixed universe.
+
+    ``asked`` records the candidate lists the policy passed on, which is what
+    keeps the narrowed question narrow: nab hands over the versions the range
+    left, and a host that can answer for those cheaply is never asked about
+    the whole project.
+    """
 
     def __init__(self, universe: dict[NormalizedName, list[HostCandidate]]) -> None:
         self._universe = universe
+        self.asked: list[list[Version]] = []
 
-    def yanked_versions(self, project_name: NormalizedName) -> frozenset[Version]:
+    def yanked_among(
+        self, project_name: NormalizedName, candidates: Sequence[Version]
+    ) -> frozenset[Version]:
+        self.asked.append(list(candidates))
+        wanted = set(candidates)
         return frozenset(
             candidate.version
             for candidate in self._universe.get(project_name, [])
-            if candidate.yanked
+            if candidate.yanked and candidate.version in wanted
         )
 
 
