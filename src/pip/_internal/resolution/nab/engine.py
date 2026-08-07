@@ -140,7 +140,9 @@ class YankPolicy:
         self._index = index
         self._pinned = pinned_on_command_line
 
-    def yanked_versions(self, package: str, /) -> frozenset[Version]:
+    def yanked_versions(
+        self, package: str, candidates: Sequence[Version], /
+    ) -> frozenset[Version]:
         return self._index.yanked_versions(canonicalize_name(package))
 
     def admits_yanked(self, package: str, /, *, all_yanked: bool) -> bool:

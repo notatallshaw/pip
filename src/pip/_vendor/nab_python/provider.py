@@ -102,6 +102,8 @@ __all__ = [
     "LocalSource",
     "MetadataError",
     "MissingExtraError",
+    "PreferencePolicy",
+    "PrereleasePolicy",
     "Provider",
     "ProviderStats",
     "ResolutionStrategy",
@@ -262,13 +264,21 @@ class YankPolicy(Protocol):
     own keeps it conforming.
     """
 
-    def yanked_versions(self, package: str, /) -> AbstractSet[Version]:
-        """Which versions of ``package`` are yanked releases.
+    def yanked_versions(
+        self, package: str, candidates: Sequence[Version], /
+    ) -> AbstractSet[Version]:
+        """Which of ``candidates`` are yanked releases of ``package``.
 
         ``package`` is a canonical project name, never an extras key: an
         extras proxy is selected out of its base's files and inherits their
-        yank flags.  Asked once per selection, so a host that computes it
-        from a listing should memoise it there.
+        yank flags.  ``candidates`` are the versions the range being chosen
+        from left, which is all the rule looks at, so a host that can answer
+        for one version cheaply and for the whole project expensively is
+        never asked the expensive question.  Answering wider than asked is
+        allowed, because a host that already holds the listing has nothing
+        to gain by intersecting; the rule reads the answer against
+        ``candidates`` either way.  Asked once per selection, so a host that
+        computes it from a listing should memoise it there.
         """
         ...
 
@@ -283,6 +293,103 @@ class YankPolicy(Protocol):
         ranges, and a range cannot tell ``==1.0`` apart from
         ``>=1.0,<=1.0``, which pins nothing under PEP 592, or from a
         singleton the search itself derived.
+        """
+        ...
+
+
+class PreferencePolicy(Protocol):
+    """Versions the host can serve with no fetch, tried before a listing.
+
+    ``preferences`` says which version to try first.  This says the same
+    thing and adds the one fact that makes the answer checkable offline:
+    the version's METADATA, which the host already holds.  A provider that
+    has both can decide a package without asking for its listing at all,
+    which is what an embedder whose environment already satisfies a
+    requirement needs; pip's own resolver does it by putting the installed
+    distribution first in a lazy candidate sequence.
+
+    The seeded version is a prefix of the universe, never the universe.  A
+    version this policy offers must also appear, with the same metadata, in
+    the listing the host serves for that package, because the moment the
+    seed is out of range or look-ahead refuses it the provider asks for the
+    listing and the two answers have to agree.
+
+    Both package parameters are positional-only, so what a host calls the
+    argument is the host's business.
+    """
+
+    def preferred_version(self, package: str, /) -> Version | None:
+        """Return the version of ``package`` to try first, or ``None``.
+
+        ``package`` is a canonical project name, never an extras key.
+        """
+        ...
+
+    def preferred_metadata(self, package: str, version: Version, /) -> str | None:
+        """``version``'s METADATA text, or ``None`` to fetch it normally.
+
+        ``None`` is the honest answer for a preference the host cannot back
+        with bytes it already has, and it costs nothing: the provider then
+        behaves exactly as it does with a plain ``preferences`` mapping.
+        Asked at most once per ``(package, version)``, and only when the
+        provider is about to need the answer, so a host may do real work
+        here.
+        """
+        ...
+
+
+class PrereleasePolicy(Protocol):
+    """Pre-release admissions a host has that no requirement states.
+
+    A host that supplies its own candidate universe may admit a
+    pre-release for reasons the resolver cannot see.  Two of them, both
+    pip's: a release-control flag (``--pre``, ``--all-releases``, and their
+    requirements-file forms) says yes for a package or for every package;
+    and a distribution already installed is judged by the requirement's
+    bounds and by nothing else, so an installed ``2.0rc1`` survives a plain
+    ``pip install pkg``.
+
+    Neither is a property of any requirement, so neither can be carried by
+    a range.  ``VersionRange`` records an opt-in only where a specifier
+    named a pre-release, and a range built with a configured policy cannot
+    be combined with one nab derived
+    (``VersionRange._check_policy_compat``).
+
+    Only the admitting side lives here.  A host that forbids pre-releases
+    does it by not offering them: nab filters the versions it is given, so
+    a refusal belongs in the universe, where it also cannot reach a
+    pre-release the user named by URL or by an exact pin.
+
+    Unset, PEP 440's default governs every version, which is every resolve
+    driven off nab's own index.
+
+    Both package parameters are positional-only, so what a host calls the
+    argument is the host's business and adding a keyword argument of its
+    own keeps it conforming.
+    """
+
+    def admits_prereleases(self, package: str, /) -> bool:
+        """Whether every pre-release of ``package`` may be admitted.
+
+        ``package`` is a canonical project name, never an extras key: an
+        extras proxy is selected out of its base's releases and inherits
+        the base's answer.  Asked once per selection, so a host that reads
+        it off a flag should not compute anything expensive.
+        """
+        ...
+
+    def admitted_prereleases(self, package: str, /) -> AbstractSet[Version]:
+        """Which versions of ``package`` are admitted on bounds alone.
+
+        For each of these the pre-release buffer is skipped and only
+        membership in the range being chosen from is tested.  A host uses
+        it for a version it already holds rather than one it found: the
+        question is whether what is there still fits, not whether it is the
+        release the user would have picked.
+
+        Asked once per selection, and only when
+        :meth:`admits_prereleases` said no, since a yes already covers
+        every version.
         """
         ...
 
@@ -323,6 +430,16 @@ class Provider:
     which of them are PEP 592 yanked and when a yanked one is still
     selectable; see :class:`YankPolicy`.  Unset, nothing is yanked, which
     is every resolve driven off nab's own index.
+
+    ``preference_policy`` is ``preferences`` for a host that can also serve
+    the preferred version's METADATA, which lets the provider decide a
+    package without fetching its listing; see :class:`PreferencePolicy`.
+    It answers the same question as ``preferences``, so passing both is a
+    :exc:`ValueError` rather than a precedence rule.
+
+    ``prerelease_policy`` is how a host says which pre-releases it admits
+    for reasons no requirement states; see :class:`PrereleasePolicy`.
+    Unset, PEP 440's default governs every version.
     """
 
     # Declared in ``_provider.listing``, which reads it directly while
@@ -401,6 +518,8 @@ class Provider:
         constraints: Mapping[str, VersionRange] | None = None,
         trust_unverified_sdist_deps: bool = False,
         yank_policy: YankPolicy | None = None,
+        preference_policy: PreferencePolicy | None = None,
+        prerelease_policy: PrereleasePolicy | None = None,
     ) -> None:
         """Construct the provider; see the class docstring for parameters."""
         if isinstance(resolution_strategy, str):
@@ -418,6 +537,7 @@ class Provider:
         self.target = target
         self.uploaded_prior_to = uploaded_prior_to
         self._yank_policy = yank_policy
+        self._prerelease_policy = prerelease_policy
         # The pre-tag half of the listing filter, shared with the other
         # targets of this resolve.  ``None`` computes it here instead.
         self.listing_filter_cache = listing_filter_cache
@@ -446,6 +566,15 @@ class Provider:
             canonicalize_name(name): version
             for name, version in (preferences or {}).items()
         }
+        # Two sources for one answer is the ambiguity a loud crash is for.
+        if preference_policy is not None and preferences:
+            msg = "pass preferences or preference_policy, not both"
+            raise ValueError(msg)
+        self._preference_policy = preference_policy
+        # Whether the host's offline metadata for one (package, version) was
+        # asked for and landed.  Kept out of ``versions_cache`` and its derived
+        # views: a seed is a prefix of the universe, never the universe.
+        self._seeded: dict[tuple[str, Version], bool] = {}
         self._package_overrides = tuple(package_overrides)
         self._index_overrides: Mapping[str, IndexOverride] = index_overrides or {}
 
@@ -1094,7 +1223,9 @@ class Provider:
         so they are the set the "can only be satisfied by a yanked release"
         test runs over: a yanked version survives only when every candidate
         left is yanked and the host's policy admits it.  The order is kept,
-        because the caller's strategy reads it.
+        because the caller's strategy reads it.  The host is asked about
+        those candidates and nothing else, so answering never costs it more
+        than the selection in play.
 
         This is the one place the resolver applies yanking, and it is
         applied here rather than to the listing because both halves of the
@@ -1106,7 +1237,7 @@ class Provider:
         """
         if self._yank_policy is None:
             return candidates
-        yanked = self._yank_policy.yanked_versions(normalized)
+        yanked = self._yank_policy.yanked_versions(normalized, candidates)
         if not yanked:
             return candidates
         live = [v for v in candidates if v not in yanked]
@@ -1115,6 +1246,48 @@ class Provider:
         if self._yank_policy.admits_yanked(normalized, all_yanked=not live):
             return candidates
         return live
+
+    def admissible_versions(
+        self,
+        normalized: str,
+        version_range: VersionRange,
+        all_versions: list[Version],
+    ) -> list[Version]:
+        """Return the versions of ``normalized`` inside ``version_range``.
+
+        Pre-releases follow PEP 440's default, which is what the range
+        itself encodes, except where the host's policy speaks: a blanket
+        admission filters with ``prereleases=True``, and an
+        admitted-on-bounds version is added back after the default pass if
+        the bounds hold it.
+
+        ``prereleases=True`` is passed per call rather than configured on a
+        range, so no range in the resolve changes policy and
+        ``VersionRange``'s combine-time policy check is never reached.  The
+        add-back uses ``contains(..., installed=True)``, packaging's own
+        spelling of "judge this by the bounds alone".
+
+        The result keeps ``all_versions``' order, newest first, which is
+        what the caller reads.
+        """
+        policy = self._prerelease_policy
+        if policy is None:
+            return list(version_range.filter(all_versions))
+        if policy.admits_prereleases(normalized):
+            return list(version_range.filter(all_versions, prereleases=True))
+        admissible = list(version_range.filter(all_versions))
+        admitted = policy.admitted_prereleases(normalized)
+        if not admitted:
+            return admissible
+        kept = set(admissible)
+        kept.update(
+            version
+            for version in admitted
+            if version not in kept and version_range.contains(version, installed=True)
+        )
+        if len(kept) == len(admissible):
+            return admissible
+        return [version for version in all_versions if version in kept]
 
     def choose_version(
         self, package: str, version_range: RangeProtocol[Version]
@@ -1142,7 +1315,8 @@ class Provider:
         version_list = self.fetch_versions(package)
         all_versions = self.versions_only(normalized, version_list)
         candidates = self.selectable_versions(
-            normalized, list(version_range.filter(all_versions))
+            normalized,
+            self.admissible_versions(normalized, version_range, all_versions),
         )
 
         # VersionRange.filter yields newest-first; reverse for LOWEST so
@@ -1182,12 +1356,16 @@ class Provider:
         additionally needs to declare the extra.  A package the strategy
         wants lowest for keeps its own floor, so alignment cannot make the
         result depend on the order the targets resolve in.
+
+        A host that backs its preference with the version's METADATA is
+        answered from that one version, so the listing is never asked for.
+        The seed is checked against the same range and the same yank rule
+        the listing would have been, and a seed the range or look-ahead
+        refuses falls through to the listing, which is still the universe.
         """
-        preferred = self._preferences.get(normalized)
+        preferred = self._preferred_for(normalized)
         if preferred is None or self.wants_lowest(normalized):
             return None
-
-        all_versions = self.versions_only(normalized, self.fetch_versions(package))
 
         # The proxy's range is built full(), so intersect it with the base's
         # positive range, which carries the pre-release admission granted by
@@ -1199,8 +1377,13 @@ class Provider:
             if base_range is not None:
                 admit_range = version_range & base_range
 
+        if self._seed(normalized, preferred):
+            candidates = [preferred]
+        else:
+            candidates = self.versions_only(normalized, self.fetch_versions(package))
+
         if preferred not in self.selectable_versions(
-            normalized, list(admit_range.filter(all_versions))
+            normalized, self.admissible_versions(normalized, admit_range, candidates)
         ):
             return None
 
@@ -1210,6 +1393,40 @@ class Provider:
             else self._look_ahead_ok(normalized, preferred, check_decisions=True)
         )
         return preferred if usable else None
+
+    def _preferred_for(self, normalized: str) -> Version | None:
+        """Return the version to try first for ``normalized``, from either source."""
+        if self._preference_policy is not None:
+            return self._preference_policy.preferred_version(normalized)
+        return self._preferences.get(normalized)
+
+    def _seed(self, normalized: str, version: Version) -> bool:
+        """Parse the host's offline metadata for ``version``; True if it landed.
+
+        The parse populates ``deps_cache`` through the ordinary
+        ``parse_and_cache_metadata`` path, so look-ahead and
+        ``get_dependencies`` find it there and neither needs the listing.
+        A seed the parser rejects is not a hard error: the listing is still
+        the universe, so the provider falls back to it and the same
+        rejection is recorded against the fetched copy.
+        """
+        if self._preference_policy is None or normalized in self.versions_cache:
+            return False
+        cache_key = (normalized, version)
+        cached = self._seeded.get(cache_key)
+        if cached is not None:
+            return cached
+        text = self._preference_policy.preferred_metadata(normalized, version)
+        if text is None:
+            self._seeded[cache_key] = False
+            return False
+        try:
+            self._parse_and_cache_metadata_guarded(cache_key, text, from_sdist=False)
+        except MetadataError:
+            self._seeded[cache_key] = False
+            return False
+        self._seeded[cache_key] = True
+        return True
 
     def has_satisfying_version(
         self, package: str, version_range: RangeProtocol[Version]

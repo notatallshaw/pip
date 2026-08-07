@@ -179,7 +179,9 @@ def test_yank_policy_reports_facts_and_leaves_the_rule_to_nab() -> None:
     )
     name = canonicalize_name("mypackage")
 
-    assert policy.yanked_versions(name) == frozenset({Version("2.0")})
+    assert policy.yanked_versions(name, [Version("1.0"), Version("2.0")]) == frozenset(
+        {Version("2.0")}
+    )
     assert not policy.admits_yanked(name, all_yanked=False)
     assert policy.admits_yanked(name, all_yanked=True)
 

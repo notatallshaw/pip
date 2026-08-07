@@ -60,9 +60,13 @@ def choose_extra_version(
             normalized,
             package,
         )
-        candidates = list(version_range.filter(all_versions))
+        candidates = provider.admissible_versions(
+            normalized, version_range, all_versions
+        )
     else:
-        candidates = list((version_range & base_range).filter(all_versions))
+        candidates = provider.admissible_versions(
+            normalized, version_range & base_range, all_versions
+        )
 
     # A proxy is one of its base's releases, so the base's yank flags and the
     # base's pin decide it.  choose_version never runs for a proxy key, so
