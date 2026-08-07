@@ -49,7 +49,10 @@ from pip._internal.exceptions import (
     UnsupportedWheel,
 )
 from pip._internal.models.link import links_equivalent
-from pip._internal.req.constructors import install_req_from_link_and_ireq
+from pip._internal.req.constructors import (
+    install_req_from_line,
+    install_req_from_link_and_ireq,
+)
 from pip._internal.utils.hashes import Hashes
 from pip._internal.utils.packaging import get_requirement
 
@@ -280,9 +283,9 @@ class PipHostIndex:
         line handed on without it, and nab sees an ordinary dependency whose
         universe happens to hold exactly one version.
         """
-        comes_from = self.pip_candidate(
-            candidate, frozenset()
-        ).get_install_requirement()
+        base = self.pip_candidate(candidate, frozenset()).get_install_requirement()
+        provided = frozenset(dist.iter_provided_extras())
+        parents: dict[frozenset[NormalizedName], InstallRequirement | None] = {}
         lines: list[str] = []
         for raw in dist.iter_raw_dependencies():
             line = raw.strip()
@@ -295,6 +298,10 @@ class PipHostIndex:
                 # words. Passing the line through keeps that its decision.
                 lines.append(line)
                 continue
+            extras = _activating_extras(requirement, provided)
+            if extras not in parents:
+                parents[extras] = self._extras_parent(base, extras)
+            comes_from = parents[extras]
             name = canonicalize_name(requirement.name)
             if name not in self._templates:
                 self._requested_as.setdefault(name, requirement.name)
@@ -310,6 +317,25 @@ class PipHostIndex:
                 )
             lines.append(_without_url(requirement))
         return lines
+
+    @staticmethod
+    def _extras_parent(
+        base: InstallRequirement | None, extras: frozenset[NormalizedName]
+    ) -> InstallRequirement | None:
+        """The requirement a dependency behind ``extra == "x"`` comes from.
+
+        pip credits it to the ``pkg[x]`` node and not to ``pkg``, and that is
+        the name ``(from ...)`` carries. nab keys the two as separate
+        packages, so the base candidate's ireq is the wrong one to hand on
+        and the spelling with the extras is rebuilt from it.
+        """
+        if base is None or base.req is None or not extras:
+            return base
+        if extras <= {canonicalize_name(extra) for extra in base.req.extras}:
+            return base
+        return install_req_from_line(
+            _with_extras(base.req, extras), comes_from=base.comes_from
+        )
 
     def register_explicit(
         self, spec: str, comes_from: InstallRequirement | None
@@ -560,6 +586,34 @@ class PipHostIndex:
         )
         self._templates[project_name] = template
         return template
+
+
+def _activating_extras(
+    requirement: Requirement, provided: frozenset[NormalizedName]
+) -> frozenset[NormalizedName]:
+    """Which of the parent's extras switch this dependency on.
+
+    Empty when the dependency applies with no extra requested, which is the
+    same test pip's own metadata layer makes before it hands a requirement
+    to the resolver.
+    """
+    marker = requirement.marker
+    if marker is None or marker.evaluate({"extra": ""}):
+        return frozenset()
+    return frozenset(extra for extra in provided if marker.evaluate({"extra": extra}))
+
+
+def _with_extras(requirement: Requirement, extras: frozenset[NormalizedName]) -> str:
+    """``pkg[extra]==1.0``: one requirement, respelled with more extras."""
+    merged = sorted({canonicalize_name(e) for e in requirement.extras} | extras)
+    text = f"{requirement.name}[{','.join(merged)}]"
+    if requirement.specifier:
+        text += str(requirement.specifier)
+    if requirement.url:
+        text += f"@ {requirement.url}"
+    if requirement.marker is not None:
+        text += f" ; {requirement.marker}"
+    return text
 
 
 def _without_url(requirement: Requirement) -> str:
