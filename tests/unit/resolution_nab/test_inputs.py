@@ -6,7 +6,8 @@ import pytest
 
 from pip._vendor.packaging.utils import canonicalize_name
 
-from pip._internal.exceptions import InstallationError
+from pip._internal.exceptions import InstallationError, UnsupportedWheel
+from pip._internal.models.link import Link
 from pip._internal.req.constructors import install_req_from_line
 from pip._internal.resolution.nab.inputs import collect_inputs
 from pip._internal.utils.deprecation import PipDeprecationWarning
@@ -92,3 +93,42 @@ def test_specifier_for_ands_requirements_and_constraints() -> None:
     )
     specifier = inputs.specifier_for(canonicalize_name("foo"))
     assert set(str(specifier).split(",")) == {">=1", "<3"}
+
+
+def test_a_requirements_own_link_is_checked_before_anything_resolves() -> None:
+    """pip refuses an unusable wheel at input time, not as a failed search.
+
+    Left to the candidate builder it becomes an empty universe, and the
+    error renderer then lists the index to write its message, which is one
+    request pip never makes and a worse sentence.
+    """
+    checked = []
+
+    def check(link: Link) -> None:
+        checked.append(link.filename)
+        raise UnsupportedWheel(f"{link.filename} is not a supported wheel")
+
+    with pytest.raises(UnsupportedWheel):
+        collect_inputs(
+            [_ireq("/tmp/simple.dist-0.1-py1-none-invalid.whl")],
+            ignore_dependencies=False,
+            check_link=check,
+        )
+    assert checked == ["simple.dist-0.1-py1-none-invalid.whl"]
+
+
+def test_a_constraints_link_is_left_to_the_candidate_builder() -> None:
+    """pip swallows the same exception for a link a constraint names."""
+    inputs = collect_inputs(
+        [
+            _ireq("simple.dist"),
+            _ireq("/tmp/simple.dist-0.1-py1-none-invalid.whl", constraint=True),
+        ],
+        ignore_dependencies=False,
+        check_link=_refuse_every_link,
+    )
+    assert [r.key for r in inputs.requirements] == [canonicalize_name("simple.dist")]
+
+
+def _refuse_every_link(link: Link) -> None:
+    raise UnsupportedWheel(f"{link.filename} is not a supported wheel")

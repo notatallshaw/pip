@@ -100,6 +100,7 @@ class Resolver(BaseResolver):
             root_reqs,
             ignore_dependencies=self.ignore_dependencies,
             name_link=self._name_link_requirement,
+            check_link=self.factory._fail_if_link_is_unsupported_wheel,
         )
         index = self._index = PipHostIndex(
             factory=self.factory,

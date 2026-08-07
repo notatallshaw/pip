@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 
     from pip._vendor.packaging.utils import NormalizedName
 
+    from pip._internal.models.link import Link
     from pip._internal.req.req_install import InstallRequirement
 
 logger = logging.getLogger(__name__)
@@ -119,6 +120,7 @@ def collect_inputs(
     *,
     ignore_dependencies: bool,
     name_link: Callable[[InstallRequirement], NormalizedName] | None = None,
+    check_link: Callable[[Link], None] | None = None,
 ) -> ResolveInputs:
     """Split pip's root ireqs into requirements, constraints and explicit links.
 
@@ -130,6 +132,11 @@ def collect_inputs(
         preparing it. ``pip install ./some/path`` gives no name until the
         distribution has been built, so the caller supplies the one piece of
         machinery that can do it.
+    :param check_link: refuses a link this platform cannot use, by raising.
+        pip rejects a wheel whose tags do not match before anything resolves,
+        and the message goes straight to the user. Injected for the same
+        reason as ``name_link``: this module deliberately imports nothing
+        from the factory.
     """
     inputs = ResolveInputs(ignore_dependencies=ignore_dependencies)
 
@@ -148,7 +155,7 @@ def collect_inputs(
                 inputs.constraints[name] = Constraint.from_ireq(ireq)
             continue
 
-        requirements = list(_root_requirements_from_ireq(ireq, name_link))
+        requirements = list(_root_requirements_from_ireq(ireq, name_link, check_link))
         if not requirements:
             continue
         if ireq.user_supplied and requirements[0].key not in inputs.user_requested:
@@ -166,6 +173,7 @@ def collect_inputs(
 def _root_requirements_from_ireq(
     ireq: InstallRequirement,
     name_link: Callable[[InstallRequirement], NormalizedName] | None,
+    check_link: Callable[[Link], None] | None = None,
 ) -> Iterable[RootRequirement]:
     """Zero, one or two root requirements from one ireq.
 
@@ -181,6 +189,14 @@ def _root_requirements_from_ireq(
             ireq.markers,
         )
         return
+
+    if ireq.link is not None and check_link is not None:
+        # Where pip raises it: in ``_make_requirements_from_install_req``,
+        # for a requirement's own link only. A link a constraint names is
+        # still swallowed, in the candidate builder, because a constraint
+        # this platform cannot use leaves no candidate rather than being an
+        # error the user has to read.
+        check_link(ireq.link)
 
     if ireq.name:
         project_name = canonicalize_name(ireq.name)
