@@ -2,9 +2,10 @@
 
 pip prints three escalating messages when it keeps rejecting versions of one
 package, at the 1st, 8th and 13th rejection, and ``PIP_RESOLVER_DEBUG``
-turns every resolver event into a log line. Both come from resolvelib
-reporter callbacks that PubGrub has no equivalent for: PubGrub does not
-reject candidates one at a time, it derives that a range is impossible.
+turns every resolver event into a log line. Both were written against
+per-candidate reporter callbacks that PubGrub has no equivalent for: PubGrub
+does not reject candidates one at a time, it derives that a range is
+impossible.
 
 The counter is driven by the one PubGrub event that means what pip's does.
 pip prints from ``rejecting_candidate``, which fires when a candidate that
@@ -27,7 +28,7 @@ if TYPE_CHECKING:
 
     from pip._vendor.packaging.utils import NormalizedName
 
-    from pip._internal.resolution.resolvelib.base import Constraint
+    from pip._internal.resolution.model.base import Constraint
 
 logger = logging.getLogger(__name__)
 
@@ -86,9 +87,9 @@ class NabReporter:
     def event(self, name: str, *args: object) -> None:
         """Log a resolver event under ``PIP_RESOLVER_DEBUG``.
 
-        The resolvelib variant has one reporter method per event; nab has one
-        observer with a fixed set of callbacks. Rather than pin either shape
-        into pip, the engine seam forwards a name and its arguments.
+        nab has one observer with a fixed set of callbacks. Rather than pin
+        that shape into pip, the engine seam forwards a name and its
+        arguments.
         """
         if not self._debug:
             return

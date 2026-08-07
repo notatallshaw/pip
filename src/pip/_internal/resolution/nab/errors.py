@@ -16,9 +16,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from pip._vendor.resolvelib import ResolutionImpossible
-from pip._vendor.resolvelib.structs import RequirementInformation
-
+from pip._internal.resolution.model.base import (
+    RequirementInformation,
+    ResolutionImpossible,
+)
 from pip._internal.resolution.nab.candidates import CandidateUnavailable
 from pip._internal.resolution.nab.inputs import split_key
 
@@ -30,10 +31,10 @@ if TYPE_CHECKING:
     from pip._vendor.packaging.version import Version
 
     from pip._internal.exceptions import InstallationError
+    from pip._internal.resolution.model.base import Candidate
+    from pip._internal.resolution.model.factory import Factory
     from pip._internal.resolution.nab.candidates import PipHostIndex
     from pip._internal.resolution.nab.inputs import ResolveInputs
-    from pip._internal.resolution.resolvelib.base import Candidate, Requirement
-    from pip._internal.resolution.resolvelib.factory import Factory
 
 
 @dataclass(frozen=True)
@@ -292,9 +293,7 @@ def to_installation_error(
         if pair is not None
     ]
     assert pip_causes, "Installation error reported with no rebuildable cause"
-    impossible: ResolutionImpossible[Requirement, Candidate] = ResolutionImpossible(
-        pip_causes
-    )
+    impossible = ResolutionImpossible(pip_causes)
     return factory.get_installation_error(
         impossible,
         {str(name): constraint for name, constraint in inputs.constraints.items()},
@@ -306,7 +305,7 @@ def _cause_pair(
     *,
     factory: Factory,
     index: PipHostIndex,
-) -> RequirementInformation[Requirement, Candidate] | None:
+) -> RequirementInformation | None:
     parent = _parent_candidate(cause, index=index)
     if cause.requires_python is not None:
         requirement = factory.make_requires_python_requirement(cause.requires_python)

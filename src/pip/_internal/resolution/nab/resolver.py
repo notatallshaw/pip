@@ -1,10 +1,9 @@
 """Resolution backed by nab, pip's third resolver variant.
 
-Selected with ``--use-feature=nab-resolver``. pip owns the index layer, the
-installed environment and every install decision; nab owns the search. The
-division is deliberate: because every candidate probe costs exactly what a
-probe costs pip today, a benchmark against the resolvelib variant measures
-search quality and nothing else.
+pip owns the index layer, the installed environment and every install
+decision; nab owns the search. The division is deliberate: because every
+candidate probe costs exactly what a probe has always cost pip, a benchmark
+against pip's previous resolver measures search quality and nothing else.
 
 What lives where:
 
@@ -14,11 +13,9 @@ What lives where:
   entirely out of pip's finder, factory and preparer.
 - :mod:`.observer` keeps pip's backtracking messages.
 - :mod:`.errors` rebuilds pip's error sentences from the engine's causes.
-- :mod:`.engine` is the only module that will import nab, and it is the only
-  one that still raises ``NotImplementedError``.
-- ``resolution._reqset`` and ``resolution._order`` are shared with the
-  resolvelib variant, so reinstall decisions and installation order cannot
-  drift between the two.
+- :mod:`.engine` is the only module that imports nab.
+- ``resolution._reqset`` and ``resolution._order`` hold the reinstall and
+  installation-order rules, independent of the search.
 """
 
 from __future__ import annotations
@@ -29,12 +26,12 @@ from typing import TYPE_CHECKING
 from pip._internal.resolution._order import MutableGraph, installation_order
 from pip._internal.resolution._reqset import build_requirement_set
 from pip._internal.resolution.base import BaseResolver
+from pip._internal.resolution.model.factory import Factory
 from pip._internal.resolution.nab.candidates import PipHostIndex
 from pip._internal.resolution.nab.engine import EngineFailure, YankPolicy, solve
 from pip._internal.resolution.nab.errors import to_installation_error
 from pip._internal.resolution.nab.inputs import collect_inputs
 from pip._internal.resolution.nab.observer import NabReporter
-from pip._internal.resolution.resolvelib.factory import Factory
 
 if TYPE_CHECKING:
     from pip._vendor.packaging.utils import NormalizedName
@@ -147,7 +144,7 @@ class Resolver(BaseResolver):
 
         The returned list contains a requirement before another that depends
         on it. The engine records the edges it derived, and they are walked
-        by the same weighting the resolvelib variant uses.
+        by ``resolution._order``'s weighting.
         """
         assert self._solution is not None, "must call resolve() first"
 

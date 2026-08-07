@@ -1,15 +1,13 @@
 """Turn a resolver's chosen candidates into a :class:`RequirementSet`.
 
-Every resolver variant ends the same way: it holds a set of chosen
-candidates and has to hand pip a ``RequirementSet`` with extras collapsed
-back onto their base requirement and ``should_reinstall`` set. That logic
-used to live inside the resolvelib resolver. It is here so the resolvelib
-variant and the nab variant behind ``--use-feature=nab-resolver`` cannot
-drift apart on reinstall decisions.
+A resolver ends holding a set of chosen candidates, and has to hand pip a
+``RequirementSet`` with extras collapsed back onto their base requirement
+and ``should_reinstall`` set. That logic lives here rather than inside the
+resolver.
 
 The candidate type is a structural protocol rather than
-``pip._internal.resolution.resolvelib.base.Candidate``, so this module does
-not import either resolver.
+``pip._internal.resolution.model.base.Candidate``, so this module imports
+no resolver.
 """
 
 from __future__ import annotations
@@ -38,7 +36,7 @@ logger = logging.getLogger(__name__)
 class ResolvedCandidate(Protocol):
     """The part of a resolved candidate this module reads.
 
-    ``pip._internal.resolution.resolvelib.base.Candidate`` satisfies this
+    ``pip._internal.resolution.model.base.Candidate`` satisfies this
     structurally, and so does the nab adapter's candidate wrapper.
     """
 

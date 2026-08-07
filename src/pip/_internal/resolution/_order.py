@@ -1,15 +1,12 @@
-"""Installation ordering, shared by every resolver variant.
+"""Installation ordering.
 
-``get_topological_weights`` and ``_req_set_item_sorter`` were moved here
-verbatim from ``pip._internal.resolution.resolvelib.resolver``. They are
-pinned by 17 parametrised unit cases and both resolver variants have to
-produce the same order, so they live in one place and take a graph through a
-structural protocol rather than through resolvelib's ``DirectedGraph``.
+``get_topological_weights`` and ``_req_set_item_sorter`` are pinned by 17
+parametrised unit cases. They take a graph through a structural protocol so
+the ordering rule is independent of how a resolver records its edges.
 
-``MutableGraph`` is the implementation a resolver that does not carry
-resolvelib's graph builds instead. ``get_topological_weights`` prunes leaves
-by calling ``graph.remove()``, so the graph has to be mutable and it has to
-carry the ``None`` root.
+``MutableGraph`` is the graph implementation a resolver builds to feed them.
+``get_topological_weights`` prunes leaves by calling ``graph.remove()``, so
+the graph has to be mutable and it has to carry the ``None`` root.
 """
 
 from __future__ import annotations
@@ -29,8 +26,7 @@ if TYPE_CHECKING:
 class WeightGraph(Protocol):
     """The part of a dependency graph ``get_topological_weights`` reads.
 
-    resolvelib's ``DirectedGraph[str | None]`` satisfies this structurally,
-    and so does :class:`MutableGraph`.
+    :class:`MutableGraph` satisfies this structurally.
     """
 
     def __iter__(self) -> Iterator[str | None]: ...
@@ -214,7 +210,7 @@ def get_topological_weights(
 
     # Visit the remaining graph, this will only have nodes to handle if the
     # graph had a cycle in it, which the pruning step above could not handle.
-    # `None` is guaranteed to be the root node by resolvelib.
+    # `None` is the root node the resolver records every root under.
     visit(None)
 
     # Sanity check: all requirement keys should be in the weights,

@@ -17,7 +17,6 @@ from pip._vendor.packaging.requirements import InvalidRequirement
 from pip._vendor.packaging.specifiers import SpecifierSet
 from pip._vendor.packaging.utils import NormalizedName, canonicalize_name
 from pip._vendor.packaging.version import InvalidVersion, Version
-from pip._vendor.resolvelib import ResolutionImpossible
 from pip._vendor.rich.markup import escape
 
 from pip._internal.cache import CacheEntry, WheelCache
@@ -49,7 +48,7 @@ from pip._internal.utils.hashes import Hashes
 from pip._internal.utils.packaging import get_requirement
 from pip._internal.utils.virtualenv import running_under_virtualenv
 
-from .base import Candidate, Constraint, Requirement
+from .base import Candidate, Constraint, Requirement, ResolutionImpossible
 from .candidates import (
     AlreadyInstalledCandidate,
     BaseCandidate,
@@ -573,11 +572,11 @@ class Factory:
                     collected.user_requested[template.name] = i
                 collected.requirements.extend(reqs)
         # Put requirements with extras at the end of the root requires. This does not
-        # affect resolvelib's picking preference but it does affect its initial criteria
-        # population: by putting extras at the end we enable the candidate finder to
-        # present resolvelib with a smaller set of candidates to resolvelib, already
-        # taking into account any non-transient constraints on the associated base. This
-        # means resolvelib will have fewer candidates to visit and reject.
+        # affect which package the resolver picks first, but it does affect the initial
+        # candidate set: by putting extras at the end we enable the candidate finder to
+        # present a smaller set of candidates, already taking into account any
+        # non-transient constraints on the associated base. That means fewer candidates
+        # to visit and reject.
         # Python's list sort is stable, meaning relative order is kept for objects with
         # the same key.
         collected.requirements.sort(key=lambda r: r.name != r.project_name)
@@ -784,7 +783,7 @@ class Factory:
 
     def get_installation_error(
         self,
-        e: ResolutionImpossible[Requirement, Candidate],
+        e: ResolutionImpossible,
         constraints: dict[str, Constraint],
     ) -> InstallationError:
         assert e.causes, "Installation error reported with no cause"
