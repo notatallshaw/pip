@@ -26,9 +26,11 @@ from pip._vendor.nab_resolver.resolver import Resolver as NabResolver
 from pip._vendor.nab_resolver.root import ROOT
 from pip._vendor.packaging.ranges import VersionRange
 from pip._vendor.packaging.requirements import InvalidRequirement
+from pip._vendor.packaging.specifiers import SpecifierSet
 from pip._vendor.packaging.utils import canonicalize_name
 
 from pip._internal.exceptions import InstallationError
+from pip._internal.models.link import links_equivalent
 from pip._internal.resolution.model.base import format_name
 from pip._internal.resolution.nab.candidates import CandidateUnavailable
 from pip._internal.resolution.nab.errors import FailureCause, causes_from_derivation
@@ -40,17 +42,17 @@ if TYPE_CHECKING:
 
     from pip._vendor.nab_resolver.types import Incompatibility, RangeProtocol
     from pip._vendor.packaging.requirements import Requirement as PackagingRequirement
-    from pip._vendor.packaging.specifiers import SpecifierSet
     from pip._vendor.packaging.utils import NormalizedName
     from pip._vendor.packaging.version import Version
 
+    from pip._internal.models.link import Link
     from pip._internal.req.req_install import InstallRequirement
     from pip._internal.resolution.nab.candidates import (
         CandidateMetadata,
         HostCandidate,
         PipHostIndex,
     )
-    from pip._internal.resolution.nab.inputs import ResolveInputs
+    from pip._internal.resolution.nab.inputs import ResolveInputs, RootRequirement
     from pip._internal.resolution.nab.observer import NabReporter
 
 logger = logging.getLogger(__name__)
@@ -805,30 +807,93 @@ class PipProvider:
 
     # ------------------------------------------------------- error path
 
-    def requirement_text(self, parent_key: str | None, dep_key: str) -> str | None:
+    def requirement_text(self, parent_key: str, dep_key: str) -> str | None:
         """The dependency as written, for the clause naming ``dep_key``."""
-        if parent_key is None:
-            return self._root_text(dep_key)
         for texts in self.dep_texts.get(parent_key, {}).values():
             text = texts.get(dep_key)
             if text is not None:
                 return text
         return None
 
-    def _root_text(self, dep_key: str) -> str | None:
-        """The root requirement as the user typed it.
+    def root_causes(self, dep_key: str) -> Sequence[FailureCause]:
+        """The user requests pip should report for a blamed root node.
 
-        Not rebuilt from the key: pip's message for ``pip install
-        requirements.txt`` keys on the requirement reading exactly
-        ``requirements.txt``, and the key is the canonical name.
+        The engine folds every request on a package into one range before the
+        solve, so its proof names one clause however many times the user
+        asked. pip's report is built from the set of requirements recorded
+        against the node, and that count is what makes
+        ``Factory.get_installation_error`` print ``The conflict is caused by:``
+        rather than the single-requirement sentence, so the requests are read
+        back off pip's own record.
+
+        Not all of them, though: pip's previous resolver adds requirements one
+        at a time and stops at the first that leaves the node with no
+        candidate, so its causes are the requests up to and including that
+        one. ``_recorded_roots`` replays that.
         """
-        for requirement in self._inputs.requirements:
-            if requirement.key != dep_key:
+        node = self._reported_node(dep_key)
+        return [
+            FailureCause(
+                requirement=root.text,
+                explicit_root=root.ireq if root.link is not None else None,
+                node_key=node,
+            )
+            for root in self._recorded_roots(node)
+        ]
+
+    def _reported_node(self, dep_key: str) -> str:
+        """The node whose requirements the message is about.
+
+        Blame can land on an extras proxy rather than on its base. The proxy
+        is not a distribution: its candidates are the base's, and a URL or a
+        specifier is recorded against the base, so the base is the node pip
+        names. A proxy whose base carries no root requirement of its own is
+        what the user typed directly, ``pip install foo[bar]`` with no
+        specifier and no link, and it stays the node.
+        """
+        project_name, extras = split_key(dep_key)
+        if not extras:
+            return dep_key
+        if self._inputs.roots_for(project_name):
+            return project_name
+        return dep_key
+
+    def _recorded_roots(self, node: str) -> list[RootRequirement]:
+        """Requests on ``node``, up to the one that empties it.
+
+        pip's previous resolver never reports every root either. It merges
+        them one at a time and raises at the first that leaves the criterion
+        with no candidate, so a lock file pinning ``simplewheel==2.0`` against
+        a command line ``simplewheel<2`` reports only the command line half
+        and keeps pip's lock-file sentence. Two requests are told apart from
+        two contradictory ones by the candidates, not by the ranges: ``<2``
+        and ``>1`` are both non-empty.
+
+        A URL is the one thing the candidate list cannot answer, because a
+        package named by two different URLs is deliberately left with an
+        empty universe. A second distinct URL ends the walk on its own.
+        """
+        roots = self._inputs.roots_for(node)
+        if len(roots) < 2:
+            return roots
+        project_name, _ = split_key(node)
+        reported: list[RootRequirement] = []
+        links: list[Link] = []
+        accumulated = SpecifierSet()
+        for root in roots:
+            reported.append(root)
+            if root.link is not None:
+                if any(not links_equivalent(root.link, seen) for seen in links):
+                    break
+                links.append(root.link)
                 continue
-            if requirement.ireq.req is not None:
-                return str(requirement.ireq.req)
-            return f"{dep_key}{requirement.specifier}"
-        return None
+            accumulated &= root.specifier
+            if not any(
+                accumulated.contains(candidate.version, prereleases=True)
+                for candidate in self._versions(project_name)
+            ):
+                break
+        return reported
 
     def parent_versions(
         self, parent_key: str, parent_range: RangeProtocol[Version]
@@ -961,6 +1026,7 @@ def _failure(exc: ResolutionError, provider: PipProvider) -> EngineFailure:
         exc.incompatibility,
         root_sentinel=ROOT,
         requirement_text=provider.requirement_text,
+        root_causes=provider.root_causes,
         parent_versions=provider.parent_versions,
         requires_python=provider.requires_python_refusal,
     )

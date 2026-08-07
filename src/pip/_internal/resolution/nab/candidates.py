@@ -50,7 +50,10 @@ from pip._internal.exceptions import (
     UnsupportedWheel,
 )
 from pip._internal.models.link import links_equivalent
-from pip._internal.req.constructors import install_req_from_link_and_ireq
+from pip._internal.req.constructors import (
+    install_req_drop_extras,
+    install_req_from_link_and_ireq,
+)
 from pip._internal.utils.hashes import Hashes
 
 if TYPE_CHECKING:
@@ -350,16 +353,18 @@ class PipHostIndex:
         assert ireq.name is not None, "a dependency always carries a name"
         project_name = canonicalize_name(ireq.name)
         existing = self._inputs.explicit.get(project_name)
-        if existing is not None:
+        if existing:
             # Two spellings of one URL are one requirement: pip compares them
             # with links_equivalent, which ignores the ``#egg=`` fragment and
             # query-parameter order.
-            assert existing.link is not None
             assert ireq.link is not None
-            return links_equivalent(existing.link, ireq.link)
+            return all(
+                entry.link is not None and links_equivalent(entry.link, ireq.link)
+                for entry in existing
+            )
         if project_name in self._universe:
             return False
-        self._inputs.explicit[project_name] = ireq
+        self._inputs.explicit[project_name] = [ireq]
         self._templates[project_name] = ireq
         return True
 
@@ -492,9 +497,15 @@ class PipHostIndex:
         URL constraints themselves become the candidates.
         """
         constraint = self._inputs.constraints.get(project_name)
-        ireq = self._inputs.explicit.get(project_name)
+        ireqs = self._inputs.explicit.get(project_name)
 
-        if ireq is not None:
+        if ireqs:
+            if self._distinct_links(ireqs) > 1:
+                # An explicit candidate has to satisfy every explicit
+                # requirement, and two different URLs never both do, so pip's
+                # own ``find_candidates`` leaves this package with nothing.
+                return ()
+            ireq = ireqs[0]
             assert ireq.link is not None
             self._templates.setdefault(project_name, ireq)
             candidate = self._build_explicit(project_name, ireq.link, ireq)
@@ -525,6 +536,36 @@ class PipHostIndex:
             records.append(self._explicit_record(project_name, candidate, link))
         records.sort(key=lambda record: record.version)
         return tuple(records)
+
+    @staticmethod
+    def _distinct_links(ireqs: Sequence[InstallRequirement]) -> int:
+        distinct: list[Link] = []
+        for ireq in ireqs:
+            assert ireq.link is not None
+            if not any(links_equivalent(link, ireq.link) for link in distinct):
+                distinct.append(ireq.link)
+        return len(distinct)
+
+    def explicit_candidate(
+        self,
+        project_name: NormalizedName,
+        ireq: InstallRequirement,
+        extras: frozenset[NormalizedName],
+    ) -> Candidate | None:
+        """The candidate one link-backed root builds, for the error message.
+
+        Deliberately not read from the universe. The message has to name the
+        distribution in exactly the two cases the universe is empty: a
+        constraint excluded it, or a second URL contradicted it. The template
+        drops the extras the way ``_make_requirements_from_install_req``
+        does, because the base candidate is what the extras ride on.
+        """
+        assert ireq.link is not None
+        template = install_req_drop_extras(ireq) if ireq.extras else ireq
+        base = self._build_explicit(project_name, ireq.link, template)
+        if base is None or not extras:
+            return base
+        return self._factory._make_extras_candidate(base, frozenset(extras))
 
     def _build_explicit(
         self, project_name: NormalizedName, link: Link, template: InstallRequirement

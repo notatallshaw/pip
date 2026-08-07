@@ -18,6 +18,7 @@ from pip._vendor.packaging.specifiers import SpecifierSet
 from pip._vendor.packaging.utils import canonicalize_name
 
 from pip._internal.exceptions import InstallationError
+from pip._internal.req.constructors import install_req_drop_extras
 from pip._internal.req.req_install import check_invalid_constraint_type
 from pip._internal.resolution.model.base import Constraint, format_name
 from pip._internal.utils.packaging import get_requirement
@@ -57,6 +58,16 @@ class RootRequirement:
 
     ``key`` is the resolver key, which carries the ``[extras]`` part when
     there is one. ``project_name`` never does.
+
+    ``text`` is the requirement as the user wrote it, per half: the base half
+    of ``foo[bar]>=1`` reads ``foo>=1``, which is what pip's own
+    ``SpecifierWithoutExtrasRequirement`` renders. Rebuilding it from the key
+    and the specifier instead loses the spelling, and pip's ``requirements.txt``
+    hint keys on the requirement reading exactly ``requirements.txt``.
+
+    ``link`` is set when the user named a URL, path, VCS ref or editable. pip
+    reports such a request as the distribution it builds rather than as a
+    specifier, so the distinction has to survive as far as the error path.
     """
 
     key: str
@@ -64,6 +75,8 @@ class RootRequirement:
     extras: frozenset[NormalizedName]
     specifier: SpecifierSet
     ireq: InstallRequirement
+    text: str
+    link: Link | None = None
 
 
 @dataclass
@@ -76,8 +89,24 @@ class ResolveInputs:
     # Requirements that name a URL, VCS ref, local path or editable. Under this
     # arm each is a package whose candidate universe is exactly one entry, so
     # the index supplier answers for them and the engine sees a normal package.
-    explicit: dict[NormalizedName, InstallRequirement] = field(default_factory=dict)
+    # A list rather than one entry per project: two different URLs for one
+    # project is a problem the user has to be shown both halves of, and
+    # keeping only the last one drops half the message.
+    explicit: dict[NormalizedName, list[InstallRequirement]] = field(
+        default_factory=dict
+    )
     ignore_dependencies: bool = False
+
+    def roots_for(self, key: str) -> list[RootRequirement]:
+        """Every root requirement recorded against one resolver key.
+
+        The engine folds them into one range before the solve, so its proof
+        can only ever name the fold. pip's conflict report names each request
+        separately, so the requests are recovered from pip's own record.
+        """
+        return [
+            requirement for requirement in self.requirements if requirement.key == key
+        ]
 
     def specifier_for(self, project_name: NormalizedName) -> SpecifierSet:
         """The specifier known for ``project_name`` before the solve starts.
@@ -161,7 +190,7 @@ def collect_inputs(
         if ireq.user_supplied and requirements[0].key not in inputs.user_requested:
             inputs.user_requested[requirements[0].key] = index
         if ireq.link is not None:
-            inputs.explicit[requirements[0].project_name] = ireq
+            inputs.explicit.setdefault(requirements[0].project_name, []).append(ireq)
         inputs.requirements.extend(requirements)
 
     # Put requirements with extras at the end, matching
@@ -210,13 +239,19 @@ def _root_requirements_from_ireq(
     # candidate.
     specifier = ireq.specifier if ireq.req is not None else SpecifierSet()
 
-    if extras and specifier:
+    # A link ireq always produces the base half too, even without a specifier,
+    # because ``_make_requirements_from_install_req`` always makes the base
+    # link candidate before the extras one: the extras ride on a candidate the
+    # base already named.
+    if extras and (specifier or ireq.link is not None):
         yield RootRequirement(
             key=project_name,
             project_name=project_name,
             extras=frozenset(),
             specifier=specifier,
             ireq=ireq,
+            text=_requirement_text(install_req_drop_extras(ireq), project_name),
+            link=ireq.link,
         )
     yield RootRequirement(
         key=format_name(project_name, extras),
@@ -224,7 +259,22 @@ def _root_requirements_from_ireq(
         extras=extras,
         specifier=specifier,
         ireq=ireq,
+        text=_requirement_text(ireq, project_name),
+        link=ireq.link,
     )
+
+
+def _requirement_text(ireq: InstallRequirement, project_name: NormalizedName) -> str:
+    """The requirement as written, or the best reconstruction of it.
+
+    ``str(ireq.req)`` is the spelling pip renders and the string its
+    ``requirements.txt`` hint tests. An unnamed URL requirement has no parsed
+    requirement to read, and pip never renders one as a specifier anyway: it
+    renders the distribution the link builds.
+    """
+    if ireq.req is not None:
+        return str(ireq.req)
+    return str(project_name)
 
 
 def split_key(key: str) -> tuple[NormalizedName, frozenset[NormalizedName]]:

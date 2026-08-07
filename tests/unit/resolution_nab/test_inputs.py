@@ -132,3 +132,46 @@ def test_a_constraints_link_is_left_to_the_candidate_builder() -> None:
 
 def _refuse_every_link(link: Link) -> None:
     raise UnsupportedWheel(f"{link.filename} is not a supported wheel")
+
+
+def test_each_half_carries_the_spelling_pip_renders() -> None:
+    """The base half of ``foo[bar]>=1`` reads ``foo>=1``, as pip renders it."""
+    inputs = collect_inputs([_ireq("foo[bar]>=1")], ignore_dependencies=False)
+    assert [(r.key, r.text) for r in inputs.requirements] == [
+        (canonicalize_name("foo"), "foo>=1"),
+        ("foo[bar]", "foo[bar]>=1"),
+    ]
+
+
+def test_a_link_requirement_always_names_its_base() -> None:
+    """pip makes the base link candidate before the extras one, always."""
+    inputs = collect_inputs(
+        [_ireq("foo[bar] @ file:///tmp/foo-1.0.tar.gz")],
+        ignore_dependencies=False,
+    )
+    keys = [r.key for r in inputs.requirements]
+    assert keys == [canonicalize_name("foo"), "foo[bar]"]
+    assert all(r.link is not None for r in inputs.requirements)
+    assert inputs.user_requested == {canonicalize_name("foo"): 0}
+
+
+def test_two_paths_for_one_project_are_both_recorded() -> None:
+    """Keeping only the last drops half the conflict message."""
+    inputs = collect_inputs(
+        [
+            _ireq("foo @ file:///tmp/foo-1.0.tar.gz"),
+            _ireq("foo @ file:///tmp/foo-2.0.tar.gz"),
+        ],
+        ignore_dependencies=False,
+    )
+    assert len(inputs.explicit[canonicalize_name("foo")]) == 2
+    assert len(inputs.roots_for(canonicalize_name("foo"))) == 2
+
+
+def test_roots_for_reads_one_key_not_one_project() -> None:
+    inputs = collect_inputs(
+        [_ireq("pkg[ext1]>1"), _ireq("pkg==1.0")], ignore_dependencies=False
+    )
+    base = inputs.roots_for(canonicalize_name("pkg"))
+    assert [r.text for r in base] == ["pkg>1", "pkg==1.0"]
+    assert [r.text for r in inputs.roots_for("pkg[ext1]")] == ["pkg[ext1]>1"]

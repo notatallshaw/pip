@@ -20,6 +20,7 @@ from pip._internal.resolution.model.base import (
     RequirementInformation,
     ResolutionImpossible,
 )
+from pip._internal.resolution.model.requirements import UnsatisfiableRequirement
 from pip._internal.resolution.nab.candidates import CandidateUnavailable
 from pip._internal.resolution.nab.inputs import split_key
 
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
     from pip._vendor.packaging.version import Version
 
     from pip._internal.exceptions import InstallationError
+    from pip._internal.req.req_install import InstallRequirement
     from pip._internal.resolution.model.base import Candidate
     from pip._internal.resolution.model.factory import Factory
     from pip._internal.resolution.nab.candidates import PipHostIndex
@@ -54,13 +56,20 @@ class FailureCause:
     # running interpreter's version. pip reports that case first and with a
     # different sentence.
     requires_python: SpecifierSet | None = None
+    # Set on a root the user named by URL, path, VCS ref or editable. pip
+    # renders such a request as the distribution it builds, ``name version
+    # (from location)``, not as a specifier, so the ireq has to reach the
+    # renderer.
+    explicit_root: InstallRequirement | None = None
+    node_key: str | None = None
 
 
 def causes_from_derivation(
     derivation: object,
     *,
     root_sentinel: object,
-    requirement_text: Callable[[str | None, str], str | None],
+    requirement_text: Callable[[str, str], str | None],
+    root_causes: Callable[[str], Sequence[FailureCause]],
     parent_versions: Callable[[str, object], Sequence[Version]],
     requires_python: Callable[[str], SpecifierSet | None],
 ) -> Sequence[FailureCause]:
@@ -75,7 +84,12 @@ def causes_from_derivation(
     So the walk collects the external clauses and keeps the ones that name a
     requirement:
 
-    - a ``ROOT`` clause is "the user requested X", with no parent;
+    - a ``ROOT`` clause is "the user requested X", with no parent. The engine
+      folds every user requirement on a package into one range before the
+      solve, so there is exactly one such clause per package however many
+      times the user asked for it. ``root_causes`` reads the requests back off
+      pip's own record instead, because the count is what decides whether pip
+      prints ``The conflict is caused by:`` at all;
     - a ``DEPENDENCY`` clause is "P at V depends on X";
     - a ``NO_VERSIONS`` or ``CONSTRAINT`` clause names no requirement at all.
       It says which package ran out, and pip recomputes that half itself
@@ -115,17 +129,30 @@ def causes_from_derivation(
         selected = _most_constrained(requested)
 
     causes: list[FailureCause] = []
-    seen: set[tuple[str | None, str, object]] = set()
+    seen: set[tuple[str | None, str, object, int | None]] = set()
     for parent_key, dep_key, parent_range in selected:
-        text = requirement_text(parent_key, dep_key) or dep_key
-        for cause in _causes(
-            text, parent_key, parent_range, parent_versions=parent_versions
-        ):
+        if parent_key is None:
+            reported: Sequence[FailureCause] = root_causes(dep_key)
+        else:
+            reported = _causes(
+                requirement_text(parent_key, dep_key) or dep_key,
+                parent_key,
+                parent_range,
+                parent_versions=parent_versions,
+            )
+        for cause in reported:
             # Two versions of one parent declaring the same dependency are
             # two causes, not one: pip names each version separately. One
             # widened clause stands for all of them, so the versions are
-            # recovered here rather than counted off the clauses.
-            fingerprint = (parent_key, text, cause.parent_version)
+            # recovered here rather than counted off the clauses. Two roots
+            # naming two local paths read alike as text and are told apart by
+            # the ireq, which is what carries the version and the location.
+            fingerprint = (
+                parent_key,
+                cause.requirement,
+                cause.parent_version,
+                None if cause.explicit_root is None else id(cause.explicit_root),
+            )
             if fingerprint in seen:
                 continue
             seen.add(fingerprint)
@@ -315,6 +342,26 @@ def _cause_pair(
             # rebuildable parent has nothing to say.
             return None
         return RequirementInformation(requirement, parent)
+
+    if cause.explicit_root is not None:
+        # pip renders a request the user made by URL, path, VCS ref or
+        # editable as the distribution it builds, so the version and the
+        # location survive into "Cannot install foo 2.0". Rebuilding it as a
+        # specifier loses both.
+        assert cause.node_key is not None
+        project_name, node_extras = split_key(cause.node_key)
+        candidate = index.explicit_candidate(
+            project_name, cause.explicit_root, node_extras
+        )
+        if candidate is None:
+            # The distribution will not build. pip says so in that many
+            # words rather than naming a version it does not have.
+            return RequirementInformation(
+                UnsatisfiableRequirement(project_name), parent
+            )
+        return RequirementInformation(
+            factory.make_requirement_from_candidate(candidate), parent
+        )
 
     # The extras of the parent node have to travel with the requirement: a
     # dependency of ``pkg[ext]`` still carries its ``; extra == "ext"``
