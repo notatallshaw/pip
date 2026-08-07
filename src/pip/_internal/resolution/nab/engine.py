@@ -175,6 +175,31 @@ class PreferencePolicy:
         return self._port.offline_metadata(package, version)
 
 
+class PrereleasePolicy:
+    """The two prerelease admissions pip has that no requirement states.
+
+    Release control is the user saying yes, for one package or for all of
+    them. The installed distribution is pip asking only whether what is
+    already there still fits. nab owns neither rule; it asks for the facts
+    where it filters.
+
+    Only the admitting side is here. ``--only-final`` is applied to the
+    universe by ``CandidateEvaluator.rank_candidates``, which is where a
+    refusal belongs: a universe with no pre-release in it cannot admit one,
+    and a pre-release the user named by URL or by an exact pin never goes
+    through that filter.
+    """
+
+    def __init__(self, index: PipHostIndex) -> None:
+        self._index = index
+
+    def admits_prereleases(self, package: str, /) -> bool:
+        return self._index.allows_prereleases(canonicalize_name(package))
+
+    def admitted_prereleases(self, package: str, /) -> frozenset[Version]:
+        return self._index.installed_versions(canonicalize_name(package))
+
+
 class _PreferBinaryProvider(NabProvider):
     """nab's provider with pip's ``--prefer-binary`` ordering on top.
 
@@ -212,6 +237,7 @@ def solve(
     index: PipHostIndex,
     reporter: NabReporter,
     yank_policy: YankPolicy,
+    prerelease_policy: PrereleasePolicy,
     python_version: Version,
     ignore_requires_python: bool = False,
 ) -> Solution:
@@ -244,6 +270,7 @@ def solve(
         root_extras=root_extras,
         constraints=constraints,
         yank_policy=yank_policy,
+        prerelease_policy=prerelease_policy,
         preference_policy=PreferencePolicy(index, port),
     )
     resolver: NabResolver[str, Version] = NabResolver(

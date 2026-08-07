@@ -3,11 +3,10 @@
 pip owns the index layer, the installed environment and every install
 decision; nab owns the search and the provider that drives it. A candidate
 probe costs what a probe has always cost pip, so a benchmark against pip's
-previous resolver is close to a measure of search quality. One known
-exception: :mod:`.candidates` lists a package's whole index before it can
-answer anything about that package, where pip's previous resolver could skip
-the listing when an installed distribution already satisfied the
-requirement.
+previous resolver is close to a measure of search quality. A package whose
+installed version already satisfies costs nothing at all: :mod:`.candidates`
+answers for the installed distribution without listing, and nab tries that
+version before it asks for a listing.
 
 What lives where:
 
@@ -34,7 +33,12 @@ from pip._internal.resolution._reqset import build_requirement_set
 from pip._internal.resolution.base import BaseResolver
 from pip._internal.resolution.model.factory import Factory
 from pip._internal.resolution.nab.candidates import PipHostIndex
-from pip._internal.resolution.nab.engine import EngineFailure, YankPolicy, solve
+from pip._internal.resolution.nab.engine import (
+    EngineFailure,
+    PrereleasePolicy,
+    YankPolicy,
+    solve,
+)
 from pip._internal.resolution.nab.errors import to_installation_error
 from pip._internal.resolution.nab.inputs import collect_inputs
 from pip._internal.resolution.nab.observer import NabReporter
@@ -120,6 +124,7 @@ class Resolver(BaseResolver):
                 index=index,
                 reporter=reporter,
                 yank_policy=YankPolicy(index, inputs.pinned_packages()),
+                prerelease_policy=PrereleasePolicy(index),
                 python_version=self.factory._python_candidate.version,
                 ignore_requires_python=self.factory._ignore_requires_python,
             )
