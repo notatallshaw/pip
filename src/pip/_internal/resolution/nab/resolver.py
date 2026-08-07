@@ -1,9 +1,12 @@
-"""Resolution backed by nab, pip's third resolver variant.
+"""Resolution backed by nab, pip's resolver.
 
 pip owns the index layer, the installed environment and every install
-decision; nab owns the search. The division is deliberate: because every
-candidate probe costs exactly what a probe has always cost pip, a benchmark
-against pip's previous resolver measures search quality and nothing else.
+decision; nab owns the search. A candidate probe costs what a probe has
+always cost pip, so a benchmark against pip's previous resolver is close to
+a measure of search quality. One known exception: :mod:`.candidates` lists a
+package's whole index before it can answer anything about that package,
+where pip's previous resolver could skip the listing when an installed
+distribution already satisfied the requirement.
 
 What lives where:
 
