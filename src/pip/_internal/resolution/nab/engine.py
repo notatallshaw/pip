@@ -45,9 +45,11 @@ from pip._vendor.nab_resolver.errors import ResolutionError
 from pip._vendor.nab_resolver.resolver import Resolver as NabResolver
 from pip._vendor.nab_resolver.root import ROOT
 from pip._vendor.packaging.ranges import VersionRange
+from pip._vendor.packaging.specifiers import SpecifierSet
 from pip._vendor.packaging.utils import canonicalize_name
 
 from pip._internal.exceptions import InstallationError
+from pip._internal.models.link import links_equivalent
 from pip._internal.resolution.model.base import format_name
 from pip._internal.resolution.nab.errors import (
     FailureCause,
@@ -61,12 +63,12 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
     from pip._vendor.nab_resolver.types import RangeProtocol
-    from pip._vendor.packaging.specifiers import SpecifierSet
     from pip._vendor.packaging.utils import NormalizedName
     from pip._vendor.packaging.version import Version
 
+    from pip._internal.models.link import Link
     from pip._internal.resolution.nab.candidates import PipHostIndex
-    from pip._internal.resolution.nab.inputs import ResolveInputs
+    from pip._internal.resolution.nab.inputs import ResolveInputs, RootRequirement
     from pip._internal.resolution.nab.observer import NabReporter
 
 logger = logging.getLogger(__name__)
@@ -225,7 +227,7 @@ def solve(
     try:
         solution = resolver.solve(requirements, constraints)
     except ResolutionError as exc:
-        raise _failure(exc, provider, port, inputs) from exc
+        raise _failure(exc, provider, port, inputs, index) from exc
     except MetadataError as exc:
         # Every candidate of a package the search had already committed to
         # turned out to be unreadable. nab reports it as a metadata error
@@ -332,8 +334,9 @@ def _failure(
     provider: NabProvider,
     port: PipFetchPort,
     inputs: ResolveInputs,
+    index: PipHostIndex,
 ) -> EngineFailure:
-    reader = _DerivationReader(provider, port, inputs)
+    reader = _DerivationReader(provider, port, inputs, index)
     causes = causes_from_derivation(
         exc.incompatibility,
         root_sentinel=ROOT,
@@ -362,11 +365,16 @@ class _DerivationReader:
     """
 
     def __init__(
-        self, provider: NabProvider, port: PipFetchPort, inputs: ResolveInputs
+        self,
+        provider: NabProvider,
+        port: PipFetchPort,
+        inputs: ResolveInputs,
+        index: PipHostIndex,
     ) -> None:
         self._provider = provider
         self._port = port
         self._inputs = inputs
+        self._index = index
 
     def root_causes(self, dep_key: str) -> list[FailureCause]:
         """pip's causes for every root requirement on ``dep_key``.
@@ -378,8 +386,8 @@ class _DerivationReader:
         back from what pip collected. A node with no root requirement is a
         dependency clause's target, which never reaches here.
         """
-        _, extras = split_key(dep_key)
-        roots = self._inputs.roots_for(dep_key)
+        key, extras = self._reported_node(dep_key)
+        roots = self._inputs.roots_for(key)
         if not roots:
             return [FailureCause(requirement=dep_key)]
         return [
@@ -388,8 +396,66 @@ class _DerivationReader:
                 explicit_root=root if root.link is not None else None,
                 node_extras=extras,
             )
-            for root in roots
+            for root in self._recorded_roots(roots)
         ]
+
+    def _recorded_roots(
+        self, roots: Sequence[RootRequirement]
+    ) -> Sequence[RootRequirement]:
+        """The root requirements pip would have recorded before giving up.
+
+        resolvelib adds root requirements one at a time and stops at the
+        first one that leaves the package with no candidate, so the report
+        names that requirement and the ones ahead of it, not every
+        requirement the user wrote. ``pip install "pkg>1" "pkg==1.0"`` names
+        both, because ``>1`` still has 2.0; a lock file pinning 2.0 plus a
+        command line asking for ``<2`` names only ``<2``, because the pin
+        leaves 2.0 as the only candidate and ``<2`` rules it out on its own.
+
+        nab folds every root into one range before the solve, so the stopping
+        point is recovered by replaying the intersection over the candidates
+        pip would have searched. Two requirements naming different URLs are
+        the one case the candidates cannot answer: each names its own
+        distribution, and the second is what makes them irreconcilable.
+        """
+        links: list[Link] = []
+        specifier = SpecifierSet()
+        for count, root in enumerate(roots, start=1):
+            if root.link is not None:
+                if not any(links_equivalent(link, root.link) for link in links):
+                    links.append(root.link)
+                if len(links) > 1:
+                    return roots[:count]
+                continue
+            specifier &= root.specifier
+            if links:
+                continue
+            if not self._admits(roots[0].project_name, specifier):
+                return roots[:count]
+        return roots
+
+    def _admits(self, project_name: NormalizedName, specifier: SpecifierSet) -> bool:
+        """Whether any candidate pip can see satisfies ``specifier``."""
+        return any(
+            specifier.contains(candidate.version, prereleases=True)
+            for candidate in self._index.candidates(project_name)
+        )
+
+    def _reported_node(self, dep_key: str) -> tuple[str, frozenset[NormalizedName]]:
+        """The node pip would have reported ``dep_key`` against.
+
+        nab keys an extras proxy as a package of its own and decides it
+        before its base, so a project left with no version is blamed on the
+        proxy. It is one distribution, the proxy's candidates are the base's,
+        and pip records a URL or a specifier against the base, so the base is
+        the node whose requirements the message is about. A proxy whose base
+        carries no root requirement of its own is what the user named
+        directly, and it stays the node.
+        """
+        project_name, extras = split_key(dep_key)
+        if extras and self._inputs.roots_for(project_name):
+            return project_name, frozenset()
+        return dep_key, extras
 
     def requirement_text(self, parent_key: str, dep_key: str) -> str | None:
         """The dependency as written, for the clause naming ``dep_key``."""
