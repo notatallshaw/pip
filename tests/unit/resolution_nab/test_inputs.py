@@ -8,7 +8,8 @@ import pytest
 
 from pip._vendor.packaging.utils import NormalizedName, canonicalize_name
 
-from pip._internal.exceptions import InstallationError
+from pip._internal.exceptions import InstallationError, UnsupportedWheel
+from pip._internal.models.link import Link
 from pip._internal.req.constructors import install_req_from_line
 from pip._internal.req.req_install import InstallRequirement
 from pip._internal.resolution.nab.inputs import collect_inputs
@@ -131,6 +132,39 @@ def test_pinned_packages_sees_a_pin_from_a_constraint_line() -> None:
 def test_pinned_packages_ignores_a_range() -> None:
     inputs = collect_inputs([_ireq("foo>=1.0")], ignore_dependencies=False)
     assert inputs.pinned_packages() == frozenset()
+
+
+def test_collect_inputs_refuses_a_link_the_platform_cannot_install() -> None:
+    """A wheel this platform cannot use is a hard error, as it is in pip.
+
+    ``Factory._make_requirements_from_install_req`` raises ``UnsupportedWheel``
+    for a requirement's own link before anything tries to resolve it, so the
+    message reaches stderr rather than becoming an empty candidate universe
+    that the error renderer then has to list the index to explain.
+    """
+    checked: list[Link] = []
+
+    def check_link(link: Link) -> None:
+        checked.append(link)
+        raise UnsupportedWheel(f"{link.filename} is not a supported wheel")
+
+    with pytest.raises(UnsupportedWheel, match="not a supported wheel"):
+        collect_inputs(
+            [_ireq("pkg @ https://example.com/pkg-1.0-py1-none-invalid.whl")],
+            ignore_dependencies=False,
+            check_link=check_link,
+        )
+    assert [link.filename for link in checked] == ["pkg-1.0-py1-none-invalid.whl"]
+
+
+def test_collect_inputs_does_not_check_a_requirement_with_no_link() -> None:
+    def check_link(link: Link) -> None:
+        raise AssertionError("checked a requirement that names no link")
+
+    inputs = collect_inputs(
+        [_ireq("pkg>=1")], ignore_dependencies=False, check_link=check_link
+    )
+    assert [requirement.key for requirement in inputs.requirements] == ["pkg"]
 
 
 def test_specifier_for_ands_requirements_and_constraints() -> None:
