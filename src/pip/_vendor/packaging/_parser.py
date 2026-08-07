@@ -68,14 +68,7 @@ class Value(Node):
     __slots__ = ()
 
     def serialize(self) -> str:
-        value = str(self)
-        if '"' not in value:
-            return f'"{value}"'
-        if "'" not in value:
-            return f"'{value}'"
-        raise ValueError(
-            "Cannot serialize marker value containing both quote characters"
-        )
+        return f'"{self}"'
 
 
 class Op(Node):
