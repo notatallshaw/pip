@@ -64,8 +64,6 @@ if DEBUNDLED:
     vendored("distlib")
     vendored("distro")
     vendored("packaging")
-    vendored("nab_index")
-    vendored("nab_python")
     vendored("nab_resolver")
     vendored("nab_resolver.errors")
     vendored("nab_resolver.resolver")

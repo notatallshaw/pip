@@ -1,1 +1,1 @@
-Vendor ``nab-resolver``, ``nab-python`` and ``nab-index``; remove ``resolvelib``.
+Vendor ``nab-resolver``; remove ``resolvelib``.
