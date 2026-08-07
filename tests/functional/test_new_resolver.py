@@ -2744,3 +2744,64 @@ def test_new_resolver_comes_from_with_extra(
     assert "(from pkg[ext])" in result.stdout
     assert "(from pkg)" not in result.stdout
     script.assert_installed(pkg="1.0", dep="1.0")
+
+
+def test_new_resolver_conflict_names_the_dependency_line_that_applies(
+    script: PipTestEnvironment,
+) -> None:
+    """
+    Verify that a package declaring one dependency under several markers is
+    reported through the line whose marker holds, not the first line naming
+    the package.
+    """
+    create_basic_wheel_for_package(script, "dep", "2.0")
+    create_basic_wheel_for_package(
+        script,
+        "pkg",
+        "1.0",
+        depends=['dep==0.1; python_version < "3"', "dep==1.0"],
+    )
+
+    result = script.pip(
+        "install",
+        "--no-cache-dir",
+        "--no-index",
+        "--find-links",
+        script.scratch_path,
+        "pkg",
+        "dep==2.0",
+        expect_error=True,
+    )
+
+    assert "dep==1.0" in result.stdout, str(result)
+    assert "dep==0.1" not in result.stdout, str(result)
+
+
+def test_new_resolver_conflict_names_the_dependency_line_of_the_extra(
+    script: PipTestEnvironment,
+) -> None:
+    """
+    Verify that a package listing one dependency under several extras is
+    reported through the line belonging to the extra that was asked for.
+    """
+    create_basic_wheel_for_package(script, "dep", "2.0")
+    create_basic_wheel_for_package(
+        script,
+        "pkg",
+        "1.0",
+        extras={"ext1": ["dep==0.1"], "ext2": ["dep==1.0"]},
+    )
+
+    result = script.pip(
+        "install",
+        "--no-cache-dir",
+        "--no-index",
+        "--find-links",
+        script.scratch_path,
+        "pkg[ext2]",
+        "dep==2.0",
+        expect_error=True,
+    )
+
+    assert "dep==1.0" in result.stdout, str(result)
+    assert "dep==0.1" not in result.stdout, str(result)

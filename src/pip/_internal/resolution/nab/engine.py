@@ -33,6 +33,7 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from pip._vendor.nab_provider.conflict_kind import EMPTY_MEMBERSHIP_SETS
 from pip._vendor.nab_provider.diagnostics import BlockerKind, NoVersionsKind
 from pip._vendor.nab_provider.provider import (
     ExtrasMode,
@@ -63,6 +64,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
     from pip._vendor.nab_resolver.types import RangeProtocol
+    from pip._vendor.packaging.requirements import Requirement
     from pip._vendor.packaging.utils import NormalizedName
     from pip._vendor.packaging.version import Version
 
@@ -430,6 +432,13 @@ class _DerivationReader:
         self._port = port
         self._inputs = inputs
         self._index = index
+        # The environment nab evaluated every dependency marker against,
+        # with the lockfile-only set variables seeded empty as nab seeds
+        # them, so a marker that names one answers here as it did there.
+        self._marker_env: dict[str, str | frozenset[str]] = {
+            **provider.environment,
+            **EMPTY_MEMBERSHIP_SETS,
+        }
 
     def root_causes(self, dep_key: str) -> list[FailureCause]:
         """pip's causes for every root requirement on ``dep_key``.
@@ -512,23 +521,58 @@ class _DerivationReader:
             return project_name, frozenset()
         return dep_key, extras
 
-    def requirement_text(self, parent_key: str, dep_key: str) -> str | None:
-        """The dependency as written, for the clause naming ``dep_key``."""
-        parent_name = canonicalize_name(split_extra(parent_key)[0])
+    def requirement_text(
+        self, parent_key: str, dep_key: str, parent_version: Version
+    ) -> str | None:
+        """The dependency as ``parent_key`` at ``parent_version`` wrote it.
+
+        A distribution declares a dependency once per marker that gates it:
+        a numpy pin per Python version, or the same package listed under
+        every extra that pulls it in. Only the line whose marker holds for
+        this node is the one nab read, so only that line is the requirement
+        the clause came from. Reading any line that names the package would
+        name a requirement that is not in the resolve, and pip drops such a
+        line rather than reporting it, leaving the message with nothing to
+        say about the conflict.
+        """
+        base_name, node_extra = split_extra(parent_key)
+        metadata = self._provider.metadata_cache.get(
+            (str(canonicalize_name(base_name)), parent_version)
+        )
+        if metadata is None:
+            return None
         dep_name, dep_extra = split_extra(dep_key)
         dep_name = str(canonicalize_name(dep_name))
-        for (name, _version), metadata in self._provider.metadata_cache.items():
-            if name != parent_name:
+        for requirement in metadata.requires_dist:
+            if str(canonicalize_name(requirement.name)) != dep_name:
                 continue
-            for requirement in metadata.requires_dist:
-                if str(canonicalize_name(requirement.name)) != dep_name:
-                    continue
-                if dep_extra is not None and dep_extra not in {
-                    str(canonicalize_name(extra)) for extra in requirement.extras
-                }:
-                    continue
-                return str(requirement)
+            if dep_extra is not None and dep_extra not in {
+                str(canonicalize_name(extra)) for extra in requirement.extras
+            }:
+                continue
+            if not self._declared_by(requirement, node_extra):
+                continue
+            return str(requirement)
         return None
+
+    def _declared_by(self, requirement: Requirement, node_extra: str | None) -> bool:
+        """Whether ``node_extra``'s node is the one that declares ``requirement``.
+
+        nab splits a distribution's dependency lines across its nodes the
+        same way pip splits them across requirements: a line whose marker
+        holds with no extra active belongs to the base node, and every
+        other line belongs to the extras proxy whose extra makes it hold.
+        Mirroring that split here is what keeps the reported requirement
+        the one the search actually read.
+        """
+        marker = requirement.marker
+        if marker is None:
+            return node_extra is None
+        if marker.evaluate(self._marker_env):
+            return node_extra is None
+        if node_extra is None:
+            return False
+        return marker.evaluate({**self._marker_env, "extra": node_extra})
 
     def parent_versions(
         self, parent_key: str, parent_range: object

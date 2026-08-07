@@ -16,6 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from pip._internal.exceptions import InstallationError
 from pip._internal.resolution.model.base import (
     RequirementInformation,
     ResolutionImpossible,
@@ -31,7 +32,6 @@ if TYPE_CHECKING:
     from pip._vendor.packaging.utils import NormalizedName
     from pip._vendor.packaging.version import Version
 
-    from pip._internal.exceptions import InstallationError
     from pip._internal.models.link import Link
     from pip._internal.resolution.model.base import Candidate, Requirement
     from pip._internal.resolution.model.factory import Factory
@@ -93,7 +93,7 @@ def causes_from_derivation(
     *,
     root_sentinel: object,
     root_causes: Callable[[str], Sequence[FailureCause]],
-    requirement_text: Callable[[str, str], str | None],
+    requirement_text: Callable[[str, str, Version], str | None],
     parent_versions: Callable[[str, object], Sequence[Version]],
     requires_python: Callable[[str], SpecifierSet | None],
     blockers: Callable[[str], Sequence[RejectionBlocker]],
@@ -174,9 +174,12 @@ def causes_from_derivation(
             # the count is what makes it print the conflict report at all.
             node_causes = root_causes(dep_key)
         else:
-            text = requirement_text(parent_key, dep_key) or dep_key
             node_causes = _causes(
-                text, parent_key, parent_range, parent_versions=parent_versions
+                parent_key,
+                dep_key,
+                parent_range,
+                requirement_text=requirement_text,
+                parent_versions=parent_versions,
             )
         for cause in node_causes:
             # Two versions of one parent declaring the same dependency are
@@ -210,23 +213,25 @@ def _rejection_causes(
     found: Sequence[RejectionBlocker],
     *,
     root_causes: Callable[[str], Sequence[FailureCause]],
-    requirement_text: Callable[[str, str], str | None],
+    requirement_text: Callable[[str, str, Version], str | None],
     parent_versions: Callable[[str, object], Sequence[Version]],
 ) -> list[FailureCause]:
     """pip's causes for a package whose candidates look-ahead all refused.
 
     The blocker names the dependency that did the refusing, so the cause is
-    "``package`` at V depends on that dependency", one per version tried,
-    which is the sentence pip prints. A disagreement with a root requirement
-    also gets the root's own cause, because pip's message names both sides
-    of a conflict and only one of them is a dependency.
+    "``package`` at V depends on that dependency", one per version that
+    declares it, which is the sentence pip prints. A disagreement with a
+    root requirement also gets the root's own cause, because pip's message
+    names both sides of a conflict and only one of them is a dependency.
     """
     causes: list[FailureCause] = []
     versions = parent_versions(package, _EVERY_VERSION)
     project_name, _ = split_key(package)
     for blocker in found:
-        text = requirement_text(package, blocker.package)
-        if text is None:
+        declared = _declaring_versions(
+            package, blocker.package, versions, requirement_text=requirement_text
+        )
+        if not declared:
             continue
         # The root side first: pip lists what the user asked for above what a
         # dependency wanted.
@@ -239,9 +244,31 @@ def _rejection_causes(
                 parent_project_name=project_name,
                 parent_version=version,
             )
-            for version in versions
+            for version, text in declared
         )
     return causes
+
+
+def _declaring_versions(
+    parent_key: str,
+    dep_key: str,
+    versions: Sequence[Version],
+    *,
+    requirement_text: Callable[[str, str, Version], str | None],
+) -> list[tuple[Version, str]]:
+    """The versions of ``parent_key`` that declare ``dep_key``, and how.
+
+    One release can spell a dependency differently from the next, so the
+    requirement is asked for per version rather than once for the package.
+    A version that does not declare it at all did not want it and has
+    nothing to say about it.
+    """
+    declared: list[tuple[Version, str]] = []
+    for version in versions:
+        text = requirement_text(parent_key, dep_key, version)
+        if text is not None:
+            declared.append((version, text))
+    return declared
 
 
 def _most_constrained(
@@ -270,16 +297,17 @@ def _most_constrained(
 
 
 def _causes(
-    text: str,
     parent_key: str,
+    dep_key: str,
     parent_range: object,
     *,
+    requirement_text: Callable[[str, str, Version], str | None],
     parent_versions: Callable[[str, object], Sequence[Version]],
 ) -> list[FailureCause]:
     project_name, _ = split_key(parent_key)
     return [
         FailureCause(
-            requirement=text,
+            requirement=requirement_text(parent_key, dep_key, version) or dep_key,
             parent_key=parent_key,
             parent_project_name=project_name,
             parent_version=version,
@@ -385,8 +413,16 @@ def to_installation_error(
     factory: Factory,
     index: PipHostIndex,
     inputs: ResolveInputs,
+    fallback: str,
 ) -> InstallationError:
-    """Build the error pip would have raised for the same conflict."""
+    """Build the error pip would have raised for the same conflict.
+
+    ``fallback`` is the engine's own sentence, reported when nothing in the
+    proof rebuilds into a pip requirement. That is the same answer the
+    engine already gives for a proof that names no requirement at all, so
+    an unrenderable conflict is still an error message rather than a
+    traceback.
+    """
     assert causes, "Installation error reported with no cause"
     pip_causes = [
         pair
@@ -395,7 +431,8 @@ def to_installation_error(
         )
         if pair is not None
     ]
-    assert pip_causes, "Installation error reported with no rebuildable cause"
+    if not pip_causes:
+        return InstallationError(fallback)
     impossible = ResolutionImpossible(pip_causes)
     return factory.get_installation_error(
         impossible,
@@ -438,7 +475,12 @@ def _cause_pair(
             requested_extras=sorted(requested_extras),
         )
     )
-    assert requirements, f"requirement {cause.requirement!r} produced no cause"
+    if not requirements:
+        # pip yields nothing for a requirement whose marker does not hold,
+        # and a requirement that is not part of the resolve is not part of
+        # the conflict either. Dropping it is what pip's own resolver does
+        # with the same line, one step earlier.
+        return None
     # A specifier plus extras splits in two; the second is the one carrying
     # the extras, which is what pip's message names.
     return RequirementInformation(requirements[-1], parent)

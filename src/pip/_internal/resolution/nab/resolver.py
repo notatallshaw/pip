@@ -131,7 +131,11 @@ class Resolver(BaseResolver):
         except EngineFailure as exc:
             logger.debug("nab could not resolve:\n%s", exc)
             raise to_installation_error(
-                exc.causes, factory=self.factory, index=index, inputs=inputs
+                exc.causes,
+                factory=self.factory,
+                index=index,
+                inputs=inputs,
+                fallback=str(exc),
             ) from exc
 
         candidates = [
