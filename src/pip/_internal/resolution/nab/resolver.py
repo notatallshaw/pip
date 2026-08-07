@@ -41,7 +41,6 @@ from pip._internal.resolution.nab.observer import NabReporter
 
 if TYPE_CHECKING:
     from pip._vendor.packaging.utils import NormalizedName
-    from pip._vendor.packaging.version import Version
 
     from pip._internal.cache import WheelCache
     from pip._internal.index.package_finder import PackageFinder
@@ -51,7 +50,7 @@ if TYPE_CHECKING:
     from pip._internal.resolution.base import InstallRequirementProvider
     from pip._internal.resolution.model.base import Candidate
     from pip._internal.resolution.nab.candidates import HostCandidate
-    from pip._internal.resolution.nab.engine import Solution
+    from pip._internal.resolution.nab.engine import ResolvedPin, Solution
 
 logger = logging.getLogger(__name__)
 
@@ -130,10 +129,7 @@ class Resolver(BaseResolver):
             ) from exc
 
         candidates = [
-            index.pip_candidate(
-                self._host_candidate(index, pin.project_name, pin.version),
-                pin.extras,
-            )
+            index.pip_candidate(self._pinned_candidate(index, pin), pin.extras)
             for pin in solution.pins
         ]
         self._warn_missing_extras(candidates)
@@ -202,13 +198,17 @@ class Resolver(BaseResolver):
         return candidate.project_name
 
     @staticmethod
-    def _host_candidate(
-        index: PipHostIndex, project_name: NormalizedName, version: Version
-    ) -> HostCandidate:
-        for host_candidate in index.candidates(project_name):
-            if host_candidate.version == version:
-                return host_candidate
-        raise AssertionError(
-            f"the engine pinned {project_name} {version}, which is not in the "
-            "candidate universe pip supplied"
-        )
+    def _pinned_candidate(index: PipHostIndex, pin: ResolvedPin) -> HostCandidate:
+        """The pip record for one pin, without listing what nab never listed.
+
+        ``index.find`` answers for the installed distribution on its own, so
+        a package the engine decided from the preference is not listed here
+        just to look its answer back up.
+        """
+        candidate = index.find(pin.project_name, pin.version)
+        if candidate is None:
+            raise AssertionError(
+                f"the engine pinned {pin.project_name} {pin.version}, which is "
+                "not in the candidate universe pip supplied"
+            )
+        return candidate
