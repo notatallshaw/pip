@@ -378,10 +378,18 @@ class _DerivationReader:
         back from what pip collected. A node with no root requirement is a
         dependency clause's target, which never reaches here.
         """
+        _, extras = split_key(dep_key)
         roots = self._inputs.roots_for(dep_key)
         if not roots:
             return [FailureCause(requirement=dep_key)]
-        return [FailureCause(requirement=root.text) for root in roots]
+        return [
+            FailureCause(
+                requirement=root.text,
+                explicit_root=root if root.link is not None else None,
+                node_extras=extras,
+            )
+            for root in roots
+        ]
 
     def requirement_text(self, parent_key: str, dep_key: str) -> str | None:
         """The dependency as written, for the clause naming ``dep_key``."""

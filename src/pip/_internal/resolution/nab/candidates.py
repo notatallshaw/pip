@@ -59,6 +59,7 @@ from pip._internal.exceptions import (
 )
 from pip._internal.models.link import links_equivalent
 from pip._internal.req.constructors import (
+    install_req_drop_extras,
     install_req_from_line,
     install_req_from_link_and_ireq,
 )
@@ -80,7 +81,7 @@ if TYPE_CHECKING:
     from pip._internal.resolution.base import InstallRequirementProvider
     from pip._internal.resolution.model.base import Candidate
     from pip._internal.resolution.model.factory import Factory
-    from pip._internal.resolution.nab.inputs import ResolveInputs
+    from pip._internal.resolution.nab.inputs import ResolveInputs, RootRequirement
 
 logger = logging.getLogger(__name__)
 
@@ -542,6 +543,27 @@ class PipHostIndex:
             records.append(self._explicit_record(project_name, candidate, link))
         records.sort(key=lambda record: record.version)
         return tuple(records)
+
+    def explicit_candidate(
+        self, root: RootRequirement, extras: frozenset[NormalizedName]
+    ) -> Candidate | None:
+        """The distribution a link-backed root names, constraint or not.
+
+        :meth:`_explicit_universe` drops the candidate when a constraint
+        excludes it or when a second URL contradicts it, which is exactly the
+        failure pip has to name, so the error path asks here rather than
+        through the universe. ``Factory._make_base_candidate_from_link``
+        memoises on the link, so this is a cache hit for anything the search
+        already built.
+        """
+        assert root.link is not None
+        template = install_req_drop_extras(root.ireq) if root.ireq.extras else root.ireq
+        base = self._factory._make_base_candidate_from_link(
+            root.link, template=template, name=root.project_name, version=None
+        )
+        if base is None or not extras:
+            return base
+        return self._factory._make_extras_candidate(base, extras)
 
     def _build_explicit(
         self, project_name: NormalizedName, link: Link, template: InstallRequirement
