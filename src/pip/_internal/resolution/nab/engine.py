@@ -513,9 +513,7 @@ class PipProvider:
             texts[project_name] = f"{project_name}=={version}"
             self._warn_missing_extras(project_name, version, extras, metadata)
         if not self._inputs.ignore_dependencies:
-            comes_from = self._index.pip_candidate(
-                candidate, extras
-            ).get_install_requirement()
+            comes_from = self._parent_requirement(candidate, package, extras)
             for requirement in self._requirements(metadata, extras):
                 self._add_dependency(requirement, ranges, texts, comes_from)
 
@@ -726,6 +724,36 @@ class PipProvider:
             )
         return candidate
 
+    def _parent_requirement(
+        self,
+        candidate: HostCandidate,
+        package: str,
+        extras: frozenset[NormalizedName],
+    ) -> InstallRequirement | None:
+        """The requirement pip credits this node's dependencies to.
+
+        For a base node that is the candidate's own install requirement, and
+        the chain reads back through its ``comes_from``. For an extras node
+        it is the requirement spelled with the extras: pip builds its
+        ``ExtrasCandidate`` from the ireq that carried them and hands that
+        one to every dependency the node yields, which is what makes the
+        annotation read ``(from pkg[ext])``.
+
+        Reading the extras candidate instead would print nothing at all.
+        ``ExtrasCandidate.get_install_requirement`` returns None by design,
+        because the extras node installs nothing of its own; the base does.
+        """
+        if not extras:
+            return self._index.pip_candidate(
+                candidate, frozenset()
+            ).get_install_requirement()
+        named = self._index.node_requirement(package)
+        if named is not None:
+            return named
+        return self._index.pip_candidate(
+            candidate, frozenset()
+        ).get_install_requirement()
+
     def _requirements(
         self, metadata: CandidateMetadata, extras: frozenset[NormalizedName]
     ) -> list[PackagingRequirement]:
@@ -792,6 +820,7 @@ class PipProvider:
             key = format_name(name, extras)
             ranges.setdefault(key, VersionRange.full(admit_arbitrary=False))
             texts[key] = str(requirement)
+            self._index.note_node_requirement(key, str(requirement), comes_from)
 
     def _warn_missing_extras(
         self,

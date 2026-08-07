@@ -166,6 +166,7 @@ class PipHostIndex:
         self._templates: dict[NormalizedName, InstallRequirement] = {}
         self._index_templates: dict[NormalizedName, InstallRequirement] = {}
         self._comes_from: dict[NormalizedName, InstallRequirement] = {}
+        self._node_requirements: dict[str, InstallRequirement] = {}
         self._requested_as: dict[NormalizedName, str] = {}
         self._pip_candidates: dict[
             tuple[NormalizedName, Version, frozenset[NormalizedName]], Candidate
@@ -391,6 +392,33 @@ class PipHostIndex:
         self._requested_as.setdefault(project_name, raw_name)
         if comes_from is not None:
             self._comes_from.setdefault(project_name, comes_from)
+
+    def note_node_requirement(
+        self, key: str, spec: str, comes_from: InstallRequirement | None
+    ) -> None:
+        """Record how an extras node was asked for, and by whom.
+
+        Only the first ask is kept, because pip builds its extras candidate
+        from the first requirement recorded against the node and hands that
+        one to every dependency the node yields.
+        """
+        if key in self._node_requirements:
+            return
+        self._node_requirements[key] = self._make_install_req(spec, comes_from)
+
+    def node_requirement(self, key: str) -> InstallRequirement | None:
+        """The requirement that named an extras node, as it was written.
+
+        pip credits an extras node's dependencies to the requirement spelled
+        with the extras, which is what puts ``(from pkg[ext])`` on the line
+        rather than ``(from pkg)``. A root requirement wins over a
+        dependency, because pip's own lookup takes the first requirement
+        recorded against the node and roots are recorded first.
+        """
+        for requirement in self._inputs.requirements:
+            if requirement.key == key:
+                return requirement.ireq
+        return self._node_requirements.get(key)
 
     def allows_prereleases(self, project_name: NormalizedName) -> bool | None:
         """``--pre`` and friends, for one project.

@@ -332,3 +332,50 @@ def test_an_upgrade_sends_the_answer_back_to_the_index(
 
     with pytest.raises(AssertionError, match="listed the index for simple"):
         provider.choose_version("simple", VersionRange.full())
+
+
+def test_an_extras_nodes_dependency_is_credited_to_the_extras_requirement(
+    factory: Factory, yanking_finder: PackageFinder
+) -> None:
+    """``(from pkg[ext])``, not ``(from pkg)`` and not nothing at all.
+
+    pip builds its ``ExtrasCandidate`` from the ireq that carried the
+    extras and hands that one to every dependency the node yields. Reading
+    the base's ireq prints the base's spelling; reading the extras
+    candidate's prints nothing, because it has none.
+    """
+    node = "requires-simple-extra[extra]"
+    ireqs = [install_req_from_line(node)]
+    inputs = collect_inputs(ireqs, ignore_dependencies=False)
+    index = PipHostIndex(
+        factory=factory,
+        finder=yanking_finder,
+        inputs=inputs,
+        upgrade_strategy="to-satisfy-only",
+        make_install_req=install_req_from_line,
+    )
+    provider = _provider(index, inputs)
+
+    name = canonicalize_name("requires-simple-extra")
+    version = index.candidates(name)[-1].version
+    assert provider.get_dependencies(node, version)
+
+    simple = canonicalize_name("simple")
+    chosen = index.find(simple, Version("1.0"))
+    assert chosen is not None
+    dependency = index.pip_candidate(chosen, frozenset()).get_install_requirement()
+    assert dependency is not None
+    assert dependency.comes_from is not None
+    assert dependency.comes_from.from_path() == node
+
+
+def test_a_transitively_reached_extras_node_records_who_asked(
+    factory: Factory, yanking_finder: PackageFinder
+) -> None:
+    index = _index(factory, yanking_finder, ["simple"])
+    parent = install_req_from_line("parent==1.0")
+    index.note_node_requirement("pkg[ext]", "pkg[ext]>=1", parent)
+
+    recorded = index.node_requirement("pkg[ext]")
+    assert recorded is not None
+    assert recorded.from_path() == "pkg[ext]>=1->parent==1.0"
