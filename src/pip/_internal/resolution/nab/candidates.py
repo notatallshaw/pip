@@ -41,6 +41,7 @@ Three properties have to hold of the universe and each one is load-bearing:
 
 from __future__ import annotations
 
+import copy
 import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -163,6 +164,7 @@ class PipHostIndex:
         self._universe: dict[NormalizedName, Sequence[HostCandidate]] = {}
         self._binary_versions: dict[NormalizedName, frozenset[Version]] = {}
         self._templates: dict[NormalizedName, InstallRequirement] = {}
+        self._index_templates: dict[NormalizedName, InstallRequirement] = {}
         self._comes_from: dict[NormalizedName, InstallRequirement] = {}
         self._requested_as: dict[NormalizedName, str] = {}
         self._pip_candidates: dict[
@@ -254,7 +256,10 @@ class PipHostIndex:
         if cached is not None:
             return cached
 
-        template = self._template_for(candidate.project_name)
+        if candidate.explicit_link is None:
+            template = self._index_template_for(candidate.project_name)
+        else:
+            template = self._template_for(candidate.project_name)
         built: Candidate | None
         try:
             if candidate.installed_dist is not None:
@@ -635,6 +640,42 @@ class PipHostIndex:
             self._comes_from.get(project_name),
         )
         self._templates[project_name] = template
+        return template
+
+    def _index_template_for(self, project_name: NormalizedName) -> InstallRequirement:
+        """The template for a candidate that did not come from an explicit link.
+
+        A constraint may carry the ``--hash`` lines for a requirement that
+        carries none, and pip lets it: ``_iter_found_candidates`` copies the
+        constraint's hash options onto the template, and
+        ``make_install_req_from_link`` then writes the candidate's install
+        requirement as ``name==version`` instead of repeating the unpinned
+        requirement. That is what stops ``--require-hashes`` rejecting it as
+        ``HashUnpinned``.
+
+        Only the index path, because that is the only path pip does it on:
+        a requirement naming a link keeps the template it was written from.
+        The copy is what pip does too, and for the same reason: the
+        requirement being copied is a root ireq shared with the requirement
+        set, so setting the hash options on it would change the user's own
+        requirement.
+        """
+        cached = self._index_templates.get(project_name)
+        if cached is not None:
+            return cached
+        template = self._template_for(project_name)
+        constraint = self._inputs.constraints.get(project_name)
+        if (
+            constraint is not None
+            and not template.hash_options
+            and any(constraint.hash_options.values())
+        ):
+            template = copy.copy(template)
+            template.hash_options = {
+                algorithm: list(digests)
+                for algorithm, digests in constraint.hash_options.items()
+            }
+        self._index_templates[project_name] = template
         return template
 
 
