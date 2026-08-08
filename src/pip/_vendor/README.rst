@@ -98,16 +98,7 @@ Modifications
 * ``pkg_resources`` has been modified to import its dependencies from
   ``pip._vendor``, and to use the vendored copy of ``platformdirs``
   rather than ``appdirs``.
-* ``packaging`` is not a PyPI release here. It is the copy nab vendors:
-  ``pypa/packaging`` at commit
-  ``6f52c6b62e4d79551a2b99fb5a5ff99e12196ba4`` (which reports itself as
-  ``26.3.dev0`` and predates the ``26.3`` tag) plus nab's
-  ``tasks/vendoring/packaging.patch``, which adds the ``markersets`` and
-  ``_markersets`` modules and ``VersionRange.from_bounds``,
-  ``VersionRange.snap_bounds`` and ``VersionRange.release_intervals`` to
-  ``ranges.py``. Every other module is byte-identical to that commit apart
-  from the vendoring tool's ``packaging`` to ``pip._vendor.packaging``
-  rewrites. It has also been modified to import its dependencies from
+* ``packaging`` has been modified to import its dependencies from
   ``pip._vendor``.
 * ``CacheControl`` has been modified to import its dependencies from
   ``pip._vendor``.
