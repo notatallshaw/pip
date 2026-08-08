@@ -4,10 +4,11 @@ import contextlib
 import functools
 import logging
 import os
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from pip._vendor.packaging.utils import canonicalize_name
-from pip._vendor.resolvelib import BaseReporter, ResolutionImpossible, ResolutionTooDeep
+from pip._vendor.resolvelib import BaseReporter, ResolutionTooDeep
+from pip._vendor.resolvelib import ResolutionImpossible as RLResolutionImpossible
 from pip._vendor.resolvelib import Resolver as RLResolver
 from pip._vendor.resolvelib.structs import DirectedGraph
 
@@ -19,15 +20,19 @@ from pip._internal.req.constructors import install_req_extend_extras
 from pip._internal.req.req_install import InstallRequirement
 from pip._internal.req.req_set import RequirementSet
 from pip._internal.resolution.base import BaseResolver, InstallRequirementProvider
+from pip._internal.resolution.model.base import (
+    Candidate,
+    Requirement,
+    RequirementInformation,
+    ResolutionImpossible,
+)
+from pip._internal.resolution.model.factory import Factory
 from pip._internal.resolution.resolvelib.provider import PipProvider
 from pip._internal.resolution.resolvelib.reporter import (
     PipDebuggingReporter,
     PipReporter,
 )
 from pip._internal.utils.packaging import get_requirement
-
-from .base import Candidate, Requirement
-from .factory import Factory
 
 if TYPE_CHECKING:
     from pip._vendor.resolvelib.resolvers import Result as RLResult
@@ -36,6 +41,18 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+
+def _translate_impossible(
+    e: RLResolutionImpossible[Requirement, Candidate],
+) -> ResolutionImpossible:
+    """Restate resolvelib's failure in terms of pip's own model."""
+    return ResolutionImpossible(
+        [
+            RequirementInformation(requirement=cause.requirement, parent=cause.parent)
+            for cause in e.causes
+        ]
+    )
 
 
 class Resolver(BaseResolver):
@@ -104,9 +121,9 @@ class Resolver(BaseResolver):
                 collected.requirements, max_rounds=limit_how_complex_resolution_can_be
             )
 
-        except ResolutionImpossible as e:
+        except RLResolutionImpossible as e:
             error = self.factory.get_installation_error(
-                cast("ResolutionImpossible[Requirement, Candidate]", e),
+                _translate_impossible(e),
                 collected.constraints,
             )
             raise error from e

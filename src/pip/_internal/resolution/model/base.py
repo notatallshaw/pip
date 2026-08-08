@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass
-from typing import Optional
+from typing import NamedTuple, Optional
 
 from pip._vendor.packaging.specifiers import SpecifierSet
 from pip._vendor.packaging.utils import NormalizedName
@@ -162,3 +162,25 @@ class Candidate:
 
     def format_for_error(self) -> str:
         raise NotImplementedError("Subclass should override")
+
+
+class RequirementInformation(NamedTuple):
+    """A requirement, and the candidate that asked for it.
+
+    parent is None when the user asked for the requirement directly.
+    """
+
+    requirement: Requirement
+    parent: Candidate | None
+
+
+class ResolutionImpossible(Exception):
+    """No set of candidates satisfies every requirement.
+
+    causes holds the requirements that could not be satisfied together, and is
+    what the conflict report is rendered from.
+    """
+
+    def __init__(self, causes: Collection[RequirementInformation]) -> None:
+        super().__init__(causes)
+        self.causes = causes
