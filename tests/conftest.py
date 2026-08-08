@@ -72,8 +72,8 @@ def pytest_addoption(parser: Parser) -> None:
     parser.addoption(
         "--resolver",
         action="store",
-        default="resolvelib",
-        choices=["resolvelib", "legacy"],
+        default="nab",
+        choices=["nab", "legacy"],
         help="use given resolver in tests",
     )
     parser.addoption(
@@ -206,7 +206,6 @@ def resolver_variant(request: pytest.FixtureRequest) -> Iterator[str]:
     resolver = request.config.getoption("--resolver")
 
     # Handle the environment variables for this test.
-    features = set(os.environ.get("PIP_USE_FEATURE", "").split())
     deprecated_features = set(os.environ.get("PIP_USE_DEPRECATED", "").split())
 
     if resolver == "legacy":
@@ -215,7 +214,6 @@ def resolver_variant(request: pytest.FixtureRequest) -> Iterator[str]:
         deprecated_features.discard("legacy-resolver")
 
     env = {
-        "PIP_USE_FEATURE": " ".join(features),
         "PIP_USE_DEPRECATED": " ".join(deprecated_features),
     }
     with patch.dict(os.environ, env):

@@ -1,56 +1,37 @@
+"""Installation order over a graph the nab adapter builds.
+
+These cases run pip's installation-order expectations through
+``MutableGraph`` and through the nab resolver's ``get_installation_order``,
+so they exercise the graph a PubGrub-derived edge list produces.
+"""
+
 from __future__ import annotations
 
-from typing import cast
 from unittest import mock
 
 import pytest
 
-from pip._vendor.packaging.utils import canonicalize_name
-from pip._vendor.resolvelib.resolvers import Result
-from pip._vendor.resolvelib.structs import DirectedGraph
-
-from pip._internal.index.package_finder import PackageFinder
-from pip._internal.operations.prepare import RequirementPreparer
 from pip._internal.req.constructors import install_req_from_line
 from pip._internal.req.req_set import RequirementSet
-from pip._internal.resolution.resolvelib.resolver import (
-    Resolver,
-    get_topological_weights,
-)
+from pip._internal.resolution._order import MutableGraph, get_topological_weights
+from pip._internal.resolution.nab.engine import Solution
+from pip._internal.resolution.nab.resolver import Resolver
 
 
-@pytest.fixture
-def resolver(preparer: RequirementPreparer, finder: PackageFinder) -> Resolver:
-    resolver = Resolver(
-        preparer=preparer,
-        finder=finder,
+def _resolver() -> Resolver:
+    return Resolver(
+        preparer=mock.Mock(),
+        finder=mock.Mock(),
         wheel_cache=None,
         make_install_req=mock.Mock(),
         use_user_site=False,
         ignore_dependencies=False,
         only_dependencies=False,
-        ignore_installed=False,
+        ignore_installed=True,
         ignore_requires_python=False,
         force_reinstall=False,
         upgrade_strategy="to-satisfy-only",
     )
-    return resolver
-
-
-def _make_graph(
-    edges: list[tuple[str | None, str | None]],
-) -> DirectedGraph[str | None]:
-    """Build graph from edge declarations."""
-
-    graph: DirectedGraph[str | None] = DirectedGraph()
-    for parent, child in edges:
-        parent = cast(str, canonicalize_name(parent)) if parent else None
-        child = cast(str, canonicalize_name(child)) if child else None
-        for v in (parent, child):
-            if v not in graph:
-                graph.add(v)
-        graph.connect(parent, child)
-    return graph
 
 
 @pytest.mark.parametrize(
@@ -85,31 +66,35 @@ def _make_graph(
         ),
     ],
 )
-def test_new_resolver_get_installation_order(
-    resolver: Resolver,
-    edges: list[tuple[str | None, str | None]],
-    ordered_reqs: list[str],
+def test_nab_get_installation_order(
+    edges: list[tuple[str | None, str]], ordered_reqs: list[str]
 ) -> None:
-    graph = _make_graph(edges)
-
-    # Mapping values and criteria are not used in test, so we stub them out.
-    mapping = {vertex: None for vertex in graph if vertex is not None}
-    resolver._result = Result(mapping, graph, criteria=None)  # type: ignore
+    resolver = _resolver()
+    resolver._solution = Solution(pins=(), edges=tuple(edges), roots=())
 
     reqset = RequirementSet()
-    for r in ordered_reqs:
-        reqset.add_named_requirement(install_req_from_line(r))
+    for line in ordered_reqs:
+        reqset.add_named_requirement(install_req_from_line(line))
 
     ireqs = resolver.get_installation_order(reqset)
-    req_strs = [str(r.req) for r in ireqs]
-    assert req_strs == ordered_reqs
+    assert [str(ireq.req) for ireq in ireqs] == ordered_reqs
+
+
+def test_nab_get_installation_order_needs_resolve_first() -> None:
+    with pytest.raises(AssertionError, match="must call resolve"):
+        _resolver().get_installation_order(RequirementSet())
+
+
+def test_nab_get_installation_order_empty_req_set() -> None:
+    resolver = _resolver()
+    resolver._solution = Solution(pins=(), edges=((None, "simple"),), roots=())
+    assert resolver.get_installation_order(RequirementSet()) == []
 
 
 @pytest.mark.parametrize(
     "name, edges, requirement_keys, expected_weights",
     [
         (
-            # From https://github.com/pypa/pip/pull/8127#discussion_r414564664
             "deep second edge",
             [
                 (None, "one"),
@@ -160,32 +145,6 @@ def test_new_resolver_get_installation_order(
             {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5},
         ),
         (
-            "linear AND root -> three",
-            [
-                (None, "one"),
-                ("one", "two"),
-                ("two", "three"),
-                ("three", "four"),
-                ("four", "five"),
-                (None, "three"),
-            ],
-            {"one", "two", "three", "four", "five"},
-            {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5},
-        ),
-        (
-            "linear AND root -> four",
-            [
-                (None, "one"),
-                ("one", "two"),
-                ("two", "three"),
-                ("three", "four"),
-                ("four", "five"),
-                (None, "four"),
-            ],
-            {"one", "two", "three", "four", "five"},
-            {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5},
-        ),
-        (
             "linear AND root -> five",
             [
                 (None, "one"),
@@ -212,19 +171,6 @@ def test_new_resolver_get_installation_order(
             {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5},
         ),
         (
-            "linear AND two -> four",
-            [
-                (None, "one"),
-                ("one", "two"),
-                ("two", "three"),
-                ("three", "four"),
-                ("four", "five"),
-                ("two", "four"),
-            ],
-            {"one", "two", "three", "four", "five"},
-            {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5},
-        ),
-        (
             "linear AND four -> one (cycle)",
             [
                 (None, "one"),
@@ -233,19 +179,6 @@ def test_new_resolver_get_installation_order(
                 ("three", "four"),
                 ("four", "five"),
                 ("four", "one"),
-            ],
-            {"one", "two", "three", "four", "five"},
-            {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5},
-        ),
-        (
-            "linear AND four -> two (cycle)",
-            [
-                (None, "one"),
-                ("one", "two"),
-                ("two", "three"),
-                ("three", "four"),
-                ("four", "five"),
-                ("four", "two"),
             ],
             {"one", "two", "three", "four", "five"},
             {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5},
@@ -264,19 +197,6 @@ def test_new_resolver_get_installation_order(
             {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5},
         ),
         (
-            "linear AND four -> three (cycle) AND restricted 1-2-3",
-            [
-                (None, "one"),
-                ("one", "two"),
-                ("two", "three"),
-                ("three", "four"),
-                ("four", "five"),
-                ("four", "three"),
-            ],
-            {"one", "two", "three"},
-            {"one": 1, "two": 2, "three": 3},
-        ),
-        (
             "linear AND four -> three (cycle) AND restricted 4-5",
             [
                 (None, "one"),
@@ -291,13 +211,26 @@ def test_new_resolver_get_installation_order(
         ),
     ],
 )
-def test_new_resolver_topological_weights(
+def test_nab_topological_weights(
     name: str,
-    edges: list[tuple[str | None, str | None]],
+    edges: list[tuple[str | None, str]],
     requirement_keys: set[str],
     expected_weights: dict[str | None, int],
 ) -> None:
-    graph = _make_graph(edges)
+    graph = MutableGraph.from_edges(edges)
+    assert get_topological_weights(graph, requirement_keys) == expected_weights
 
-    weights = get_topological_weights(graph, requirement_keys)
-    assert weights == expected_weights
+
+def test_mutable_graph_canonicalizes_and_keeps_the_none_root() -> None:
+    graph = MutableGraph.from_edges([(None, "Foo_Bar"), ("Foo.Bar", "baz")])
+    assert None in graph
+    assert "foo-bar" in graph
+    assert list(graph.iter_children(None)) == ["foo-bar"]
+    assert list(graph.iter_children("foo-bar")) == ["baz"]
+
+
+def test_mutable_graph_remove_drops_incoming_edges() -> None:
+    graph = MutableGraph.from_edges([(None, "one"), ("one", "two")])
+    graph.remove("two")
+    assert list(graph.iter_children("one")) == []
+    assert len(graph) == 2

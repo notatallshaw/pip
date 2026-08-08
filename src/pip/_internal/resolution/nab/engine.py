@@ -1,0 +1,1185 @@
+"""The seam between the pip adapter and the nab engine.
+
+This is the only module in the adapter that imports nab. The other five
+are pure pip and are unit tested with no nab in the tree.
+
+What it binds to, and why that is narrower than it looks. nab ships two
+resolvers: ``nab_resolver``, a generic packaging-free PubGrub solver, and
+``nab_python``, the PyPI provider that drives it. ``nab_python``'s provider
+cannot be driven from here: ``Provider.__init__`` takes a
+``FetchCoordinator`` and reads eleven fields off a ``NabProjectConfig``,
+and under this arm pip owns the index, so neither object exists. The port
+that would let a host supply candidates is nab-side work that has not
+landed. So the seam binds to ``nab_resolver`` directly and this module
+supplies the provider: the candidate scan, the dependency expansion,
+extras as proxy packages, the decision priority and the range widening.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
+
+from pip._vendor.nab_resolver.errors import ResolutionError
+from pip._vendor.nab_resolver.resolver import Resolver as NabResolver
+from pip._vendor.nab_resolver.root import ROOT
+from pip._vendor.packaging.ranges import VersionRange
+from pip._vendor.packaging.requirements import InvalidRequirement
+from pip._vendor.packaging.specifiers import SpecifierSet
+from pip._vendor.packaging.utils import canonicalize_name
+
+from pip._internal.exceptions import InstallationError
+from pip._internal.models.link import links_equivalent
+from pip._internal.resolution.model.base import format_name
+from pip._internal.resolution.nab.candidates import CandidateUnavailable
+from pip._internal.resolution.nab.errors import FailureCause, causes_from_derivation
+from pip._internal.resolution.nab.inputs import is_pinned, split_key
+from pip._internal.utils.packaging import get_requirement
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
+
+    from pip._vendor.nab_resolver.types import Incompatibility, RangeProtocol
+    from pip._vendor.packaging.requirements import Requirement as PackagingRequirement
+    from pip._vendor.packaging.utils import NormalizedName
+    from pip._vendor.packaging.version import Version
+
+    from pip._internal.models.link import Link
+    from pip._internal.req.req_install import InstallRequirement
+    from pip._internal.resolution.nab.candidates import (
+        CandidateMetadata,
+        HostCandidate,
+        PipHostIndex,
+    )
+    from pip._internal.resolution.nab.inputs import ResolveInputs, RootRequirement
+    from pip._internal.resolution.nab.observer import NabReporter
+
+logger = logging.getLogger(__name__)
+
+# Mirrors nab's own thresholds (``nab_python/_provider/priority.py``). A
+# package the search keeps discarding is decided first inside its conflict
+# cluster; a runaway top culprit is decided last.
+_CONFLICT_THRESHOLD = 5
+_CULPRIT_DEMOTE_THRESHOLD = 5
+_TIER_AFFECTED = 0
+_TIER_NORMAL = 1
+_TIER_CULPRIT = 2
+
+# Stands in for the candidate count of a package whose index listing has not
+# been paid for yet, so an unlisted package sorts behind one the search
+# already knows. nab's own provider uses the same prior for a listing that is
+# still in flight (``nab_python/_provider/priority.py``).
+_NO_LISTING_PRIOR = 1000
+
+
+@dataclass(frozen=True)
+class ResolvedPin:
+    """One package the engine decided on.
+
+    ``key`` is the engine's key, which carries the ``[extras]`` part for an
+    extras node. pip needs the split because extras collapse back onto the
+    base requirement.
+    """
+
+    key: str
+    project_name: NormalizedName
+    extras: frozenset[NormalizedName]
+    version: Version
+
+
+@dataclass(frozen=True)
+class Solution:
+    """The engine's answer, in the shape pip consumes it.
+
+    ``edges`` are ``(parent_key, child_key)`` pairs with ``None`` for a
+    requirement the user asked for directly. That is the graph
+    ``get_topological_weights`` walks, and the ``None`` root is not optional:
+    the weighting starts from it.
+    """
+
+    pins: tuple[ResolvedPin, ...]
+    edges: tuple[tuple[str | None, str], ...]
+    roots: tuple[str, ...]
+
+
+class EngineFailure(Exception):
+    """The engine proved no solution exists.
+
+    Carries the causes pip's error renderer wants, already flattened out of
+    nab's derivation tree, plus nab's own message for the debug log.
+    """
+
+    def __init__(self, message: str, causes: Sequence[FailureCause]) -> None:
+        super().__init__(message)
+        self.causes = causes
+
+
+class YankPolicy:
+    """PEP 592, applied where the merged requirement is known.
+
+    pip's rule is that a yanked version is used only when every candidate
+    that satisfies the merged requirement is yanked and that requirement pins
+    a single version. Both halves are decided during the search, not before
+    it: the set of satisfying candidates depends on the range in play, and
+    the merged requirement includes transitive requirements the adapter never
+    sees.
+
+    So the policy is passed into the engine rather than applied to the
+    universe. The engine calls it once it knows both halves.
+    """
+
+    def __init__(self, pinned_on_command_line: frozenset[NormalizedName]) -> None:
+        self._pinned = pinned_on_command_line
+
+    def admits_yanked(
+        self,
+        project_name: NormalizedName,
+        *,
+        all_yanked: bool,
+        merged_specifier: SpecifierSet | None = None,
+    ) -> bool:
+        """May a yanked version of ``project_name`` be selected?
+
+        :param all_yanked: is every version left in the package's current
+            range yanked?
+        :param merged_specifier: the requirements merged for this package so
+            far. When the engine can supply it this is exactly pip's rule.
+            When it cannot, the command line pins are used instead, which
+            under-approximates: a pin that arises only from a transitive
+            ``==`` requirement is missed and the yanked version is refused
+            where pip would take it.
+        """
+        if not all_yanked:
+            return False
+        if merged_specifier is not None:
+            return is_pinned(merged_specifier)
+        return project_name in self._pinned
+
+
+class PipProvider:
+    """``nab_resolver.ResolverProvider`` over pip's candidate universe.
+
+    Package keys are pip's own: a canonical project name, or
+    ``name[extra1,extra2]`` for an extras node. An extras node ranges over
+    the same versions as its base and depends on the base at exactly the
+    version it chose, which is how extras stay a search decision rather than
+    a post-processing step.
+
+    Every version this provider hands back came out of ``PipHostIndex``, so
+    format control, wheel tags, ``--platform``, release control, hash
+    intersection and the built-wheel cache are all pip's and already
+    applied.
+    """
+
+    def __init__(
+        self,
+        *,
+        index: PipHostIndex,
+        inputs: ResolveInputs,
+        constraints: Mapping[str, VersionRange],
+        reporter: NabReporter,
+        yank_policy: YankPolicy,
+        python_version: Version,
+        ignore_requires_python: bool,
+        widening: bool,
+    ) -> None:
+        self._index = index
+        self._inputs = inputs
+        self._constraints = constraints
+        self._reporter = reporter
+        self._yank_policy = yank_policy
+        self._python_version = python_version
+        self._ignore_requires_python = ignore_requires_python
+        self._widening = widening
+
+        self._metadata: dict[tuple[NormalizedName, Version], CandidateMetadata] = {}
+        self._unusable: dict[tuple[NormalizedName, Version], str] = {}
+        self._requires_python_refused: dict[NormalizedName, dict[Version, SpecifierSet]]
+        self._requires_python_refused = {}
+        # Every dependency mapping handed to the resolver, so widening can
+        # compare neighbours and the error path can name the parent version a
+        # dependency clause came from.
+        self.deps_cache: dict[str, dict[Version, dict[str, VersionRange]]] = {}
+        self.dep_texts: dict[str, dict[Version, dict[str, str]]] = {}
+        self._widened: dict[tuple[str, Version], VersionRange] = {}
+        # One ``[version, +inf)`` range per neighbour bound widening asks for,
+        # keyed by the version as spelled. Adjacent versions of the same
+        # project share their bounds, so the specifier parse behind each one
+        # is paid once, and keying on the text keeps two equal versions that
+        # are spelled differently out of each other's entry.
+        self._floors: dict[str, VersionRange] = {}
+        self._positive_ranges: Mapping[str, RangeProtocol[Version]] = {}
+        # prioritize's candidate count, per project, per range. Nested rather
+        # than keyed on a (project, range) tuple so the hot path allocates
+        # nothing; this is the shape nab's own provider uses.
+        self._matching: dict[NormalizedName, dict[RangeProtocol[Version], int]] = {}
+        # has_satisfying_version must leave no trace: it runs the real scan.
+        self._probing = False
+
+    # ---------------------------------------------------------------- scan
+
+    def _versions(self, project_name: NormalizedName) -> Sequence[HostCandidate]:
+        """Every selectable version of ``project_name``, oldest first."""
+        return self._index.candidates(project_name)
+
+    def _metadata_for(
+        self, project_name: NormalizedName, candidate: HostCandidate
+    ) -> CandidateMetadata | None:
+        """Prepare ``candidate``, or return None and record why not."""
+        key = (project_name, candidate.version)
+        cached = self._metadata.get(key)
+        if cached is not None:
+            return cached
+        if key in self._unusable:
+            return None
+        try:
+            metadata = self._index.metadata(candidate)
+        except CandidateUnavailable as exc:
+            self._refuse(project_name, candidate.version, exc.reason)
+            return None
+        requires_python = metadata.requires_python
+        if (
+            requires_python is not None
+            and not self._ignore_requires_python
+            and not requires_python.contains(self._python_version, prereleases=True)
+        ):
+            self._requires_python_refused.setdefault(project_name, {})[
+                candidate.version
+            ] = requires_python
+            self._refuse(
+                project_name,
+                candidate.version,
+                f"requires a different Python: {self._python_version} not in "
+                f"{str(requires_python)!r}",
+            )
+            return None
+        self._metadata[key] = metadata
+        return metadata
+
+    def _refuse(
+        self, project_name: NormalizedName, version: Version, reason: str
+    ) -> None:
+        self._unusable[project_name, version] = reason
+        if not self._probing:
+            logger.debug("skipping %s %s: %s", project_name, version, reason)
+
+    def _ordered(
+        self,
+        project_name: NormalizedName,
+        version_range: RangeProtocol[Version],
+        requirement: RangeProtocol[Version] | None,
+    ) -> list[HostCandidate]:
+        """Candidates to try, best first, with the yank rule applied.
+
+        The universe carries yanked versions because PEP 592 makes one
+        selectable exactly when the merged requirement pins it, and that is
+        not knowable before the search. So the filter is here, where the
+        range in play is known.
+
+        This is also where ``--prefer-binary`` is applied, and it is the
+        only place it can be. pip puts ``binary_preference`` above the
+        version in ``CandidateEvaluator._sort_key``, so a 0.8 wheel is
+        preferred to a 1.0 sdist; the universe cannot carry that order
+        because it has to stay version-monotonic for widening to be sound.
+        Sorting here reproduces pip's order without touching the universe:
+        every version stays selectable and only the order they are tried in
+        moves.
+        """
+        in_range = self._admitted(project_name, version_range, requirement)
+        if not in_range:
+            return []
+        allowed = [candidate for candidate in in_range if not candidate.yanked]
+        if not allowed and self._yank_policy.admits_yanked(
+            project_name, all_yanked=True
+        ):
+            allowed = in_range
+        allowed.reverse()
+        if self._index.prefers_binary():
+            allowed.sort(key=lambda candidate: not candidate.is_binary)
+        preferred = self._index.preferred_version(project_name)
+        if preferred is not None:
+            allowed.sort(key=lambda candidate: candidate.version != preferred)
+        return allowed
+
+    def _admitted(
+        self,
+        project_name: NormalizedName,
+        version_range: RangeProtocol[Version],
+        requirement: RangeProtocol[Version] | None,
+    ) -> list[HostCandidate]:
+        """The candidates in ``version_range``, prereleases per PEP 440.
+
+        Two ranges, two jobs. ``requirement`` is what the merged requirement
+        asks for and it decides the prerelease question; ``version_range`` is
+        what the search has left and it decides membership. Filtering with the
+        first and testing membership in the second is the order pip resolves
+        in: ``_iter_found_candidates`` runs ``SpecifierSet.filter`` over the
+        whole listing, and only afterwards drops what the search ruled out.
+
+        Keeping them apart is the whole point. PEP 440 admits a prerelease
+        when no final satisfies *the version specifier*, and an exclusion the
+        conflict machinery learned is not part of any specifier. Filter the
+        narrowed range instead and backtracking manufactures the admission:
+        strip every final of ``numba<=0.60,>0.1`` by learned clause and the
+        buffering clause fires on what is left, offering eight release
+        candidates for a requirement whose ``prereleases`` flag is ``None``.
+
+        The requirement range still carries the real opt-in.
+        ``SpecifierSet.to_range`` records it as the range's pre-region, and
+        ``VersionRange.filter`` reads it: ``<6.0dev,>=5.26.1`` opts its whole
+        span in and admits ``5.29.0rc1`` alongside ``5.28.2``, while a plain
+        ``>=5.26.1`` buffers the release candidate out. That is what
+        ``SpecifierSet.filter`` does with the same requirement, and it is
+        what nab's own provider delegates to.
+
+        The prerelease decision cannot be applied to the universe instead.
+        ``rank_candidates`` deliberately does not run a specifier (that is
+        the prerelease trap: an empty ``SpecifierSet`` would strip the very
+        prereleases a ``>=1.0b1`` dependency asks for), so it keeps every
+        prerelease unless release control says otherwise. The requirement is
+        a range that only the search knows.
+
+        Release control is consulted first, because a user who says ``--pre``
+        outranks what the requirement asks for. Only its True side belongs
+        here: ``rank_candidates`` already dropped every prerelease from the
+        universe for False, which is the one place pip applies it, and
+        re-applying it here would also drop a prerelease named by a URL,
+        which pip installs.
+
+        The installed distribution is admitted on bounds alone, which is what
+        ``Factory._iter_found_candidates`` does for it
+        (``specifier.contains(installed_dist.version, prereleases=True)``).
+        Neither the buffering nor release control reaches it: pip asks only
+        whether what is already there still fits, so an installed
+        ``2.0rc1`` survives a plain ``pkg`` and falls to a ``pkg<2``.
+        """
+        assert isinstance(version_range, VersionRange)
+        if requirement is None:
+            requirement = version_range
+        prereleases = (
+            True if self._index.allows_prereleases(project_name) is True else None
+        )
+        candidates = self._versions(project_name)
+        admitted = set(
+            requirement.filter(
+                (candidate.version for candidate in candidates),
+                prereleases=prereleases,
+            )
+        )
+        return [
+            candidate
+            for candidate in candidates
+            if (candidate.version in admitted and candidate.version in version_range)
+            or (candidate.is_installed and candidate.version in version_range)
+        ]
+
+    # ------------------------------------------------- ResolverProvider
+
+    def choose_version(
+        self, package: str, version_range: RangeProtocol[Version]
+    ) -> Version | None:
+        """Pick the best usable version of ``package`` inside ``version_range``.
+
+        The base range steers which version an extras node picks and never
+        whether it picks one. It describes the current partial solution, so
+        answering None on its strength would have the resolver record a
+        ``NO_VERSIONS`` clause over ``version_range`` that outlives the
+        decisions the range came from, and rule out versions that are still
+        selectable once those decisions are undone.
+        """
+        return self._pick(package, version_range, self._requirement_range(package))
+
+    def _pick(
+        self,
+        package: str,
+        version_range: RangeProtocol[Version],
+        requirement: RangeProtocol[Version] | None,
+    ) -> Version | None:
+        """``choose_version`` over an explicit requirement range."""
+        project_name, extras = split_key(package)
+        if extras:
+            base = self._positive_ranges.get(project_name)
+            if base is not None:
+                alongside = self._first_usable(
+                    project_name,
+                    version_range & base,
+                    None if requirement is None else requirement & base,
+                )
+                if alongside is not None:
+                    return alongside
+        return self._first_usable(project_name, version_range, requirement)
+
+    def _requirement_range(self, package: str) -> RangeProtocol[Version] | None:
+        """What the merged requirement asks for, before the search narrowed it.
+
+        pip filters with ``constraint.specifier`` merged with every
+        ``InstallRequirement`` specifier for the identifier. Those two are
+        exactly the constraint range and the accumulated positive range, which
+        ``receive_partial_solution_hint`` hands over fresh each turn. None
+        means the search has no positive term to speak for, and then the range
+        it passes is the only requirement there is.
+        """
+        positive = self._positive_ranges.get(package)
+        if positive is None:
+            return None
+        constraint = self._constraints.get(package)
+        if constraint is None:
+            return positive
+        return positive & constraint
+
+    def _prefix(
+        self, project_name: NormalizedName, version_range: RangeProtocol[Version]
+    ) -> HostCandidate | None:
+        """The installed distribution, when pip would try it before the index.
+
+        pip's candidate sequence for a package is not a list, it is
+        ``FoundCandidates``: the installed distribution first, then a
+        generator over the index that only runs if the consumer walks past
+        it. Nothing that stops at the first element makes a request, which
+        is how ``pip install <something already satisfied>`` costs pip
+        nothing.
+
+        This is that first element, and the three tests are the three pip
+        applies to it. ``preferred_version`` is
+        ``not _eligible_for_upgrade``, which is what picks
+        ``_iter_built_with_prepended`` over ``_iter_built_with_inserted``.
+        ``installed`` is None when the package is pinned to a link, because
+        then the universe is the link. Membership is tested against the
+        search's range alone, which is what ``_iter_found_candidates`` does
+        for the installed distribution
+        (``specifier.contains(installed_dist.version, prereleases=True)``).
+
+        Returning it skips the listing and never changes the answer:
+        ``_ordered`` would have put this same record first anyway, since an
+        installed distribution is never yanked, always counts as binary, and
+        is exactly what the ``preferred_version`` sort promotes.
+        """
+        candidate = self._index.installed(project_name)
+        if candidate is None:
+            return None
+        if self._index.preferred_version(project_name) != candidate.version:
+            return None
+        if candidate.version not in version_range:
+            return None
+        return candidate
+
+    def _first_usable(
+        self,
+        project_name: NormalizedName,
+        version_range: RangeProtocol[Version],
+        requirement: RangeProtocol[Version] | None,
+    ) -> Version | None:
+        """The best version in ``version_range`` whose metadata reads."""
+        prefix = self._prefix(project_name, version_range)
+        if prefix is not None and self._metadata_for(project_name, prefix) is not None:
+            return prefix.version
+        for candidate in self._ordered(project_name, version_range, requirement):
+            if self._metadata_for(project_name, candidate) is not None:
+                return candidate.version
+        return None
+
+    def has_satisfying_version(
+        self, package: str, version_range: RangeProtocol[Version]
+    ) -> bool:
+        """Would ``choose_version`` answer, with nothing recorded?
+
+        The caller lifts the user constraint off ``version_range`` to ask
+        whether the constraint is what hid the version, so the requirement
+        range is taken unconstrained too. Leaving the constraint on it would
+        make this answer echo the constrained call, and no failure would ever
+        be blamed on a constraint.
+        """
+        was_probing = self._probing
+        self._probing = True
+        try:
+            positive = self._positive_ranges.get(package)
+            return self._pick(package, version_range, positive) is not None
+        finally:
+            self._probing = was_probing
+
+    def get_dependencies(
+        self, package: str, version: Version
+    ) -> Mapping[str, VersionRange]:
+        """What ``package`` at ``version`` needs, as resolver keys and ranges."""
+        cached = self.deps_cache.get(package, {}).get(version)
+        if cached is not None:
+            return cached
+        project_name, extras = split_key(package)
+        candidate = self._candidate(project_name, version)
+        metadata = self._metadata_for(project_name, candidate)
+        assert (
+            metadata is not None
+        ), f"the resolver decided {package} {version}, which has no usable metadata"
+
+        ranges: dict[str, VersionRange] = {}
+        texts: dict[str, str] = {}
+        if extras:
+            ranges[project_name] = VersionRange.singleton(version)
+            texts[project_name] = f"{project_name}=={version}"
+            self._warn_missing_extras(project_name, version, extras, metadata)
+        if not self._inputs.ignore_dependencies:
+            comes_from = self._parent_requirement(candidate, package, extras)
+            for requirement in self._requirements(metadata, extras):
+                self._add_dependency(requirement, ranges, texts, comes_from)
+
+        self.deps_cache.setdefault(package, {})[version] = ranges
+        self.dep_texts.setdefault(package, {})[version] = texts
+        return ranges
+
+    def begin_decision_scan(self) -> None:
+        """No state moves between scans: this provider is synchronous."""
+
+    def prioritize(
+        self,
+        package: str,
+        version_range: RangeProtocol[Version],
+        conflict_counts: Mapping[str, int],
+        culprit_counts: Mapping[str, int] | None = None,
+    ) -> tuple[int, int, bool]:
+        """``(tier, matching, is_base)``, lower first.
+
+        The same key nab's own provider builds. An extras node sorts before
+        its base at equal tier so it pins the base version directly instead
+        of provoking a backtrack storm.
+        """
+        project_name, extras = split_key(package)
+        affected = conflict_counts.get(project_name, 0)
+        culprit = 0 if culprit_counts is None else culprit_counts.get(project_name, 0)
+        tier = self._tier(project_name, affected, culprit, culprit_counts)
+        return (tier, self._matching_count(project_name, version_range), not extras)
+
+    def _matching_count(
+        self, project_name: NormalizedName, version_range: RangeProtocol[Version]
+    ) -> int:
+        """How many of ``project_name``'s versions fall inside ``version_range``.
+
+        Counted only from a universe some other call already bought. Asking
+        the index here would list every package still undecided before any
+        of them is decided, which pip does not do: its own ``get_preference``
+        reads the requirements it has been handed and never touches the
+        candidate sequence, so a listing is paid for when a package is
+        chosen, not when it is ranked. An unlisted package answers with
+        :data:`_NO_LISTING_PRIOR` instead and sorts behind the ones the
+        search already knows.
+
+        Memoised, because it is a pure function of the two arguments and the
+        search asks for it hundreds of thousands of times. Both halves of
+        that claim are load-bearing:
+
+        The universe is write-once. ``PipHostIndex.candidates`` builds it on
+        first ask and stores it, and nothing ever replaces or extends a
+        stored entry, so the set being counted cannot change under a live
+        memo. An explicit URL arriving late is refused rather than merged
+        for exactly this reason.
+
+        Range equality decides membership. ``VersionRange.__eq__`` compares
+        bounds, ``===`` literals and pre-release region, and equal ranges
+        therefore agree on ``contains`` for every version. Two ranges that
+        cover the same versions but compare unequal simply miss the memo and
+        are counted again, which costs time and never correctness.
+
+        The prior is deliberately not memoised: the listing arrives later in
+        the same resolve, and a later scan should then see the real count.
+        """
+        per_project = self._matching.get(project_name)
+        if per_project is not None:
+            cached = per_project.get(version_range)
+            if cached is not None:
+                return cached
+        if not self._index.is_listed(project_name):
+            return _NO_LISTING_PRIOR
+        matching = sum(
+            1
+            for candidate in self._versions(project_name)
+            if candidate.version in version_range
+        )
+        if per_project is None:
+            per_project = self._matching[project_name] = {}
+        per_project[version_range] = matching
+        return matching
+
+    @staticmethod
+    def _tier(
+        project_name: NormalizedName,
+        affected: int,
+        culprit: int,
+        culprit_counts: Mapping[str, int] | None,
+    ) -> int:
+        if affected >= _CONFLICT_THRESHOLD:
+            return _TIER_AFFECTED
+        if culprit_counts is None or culprit < _CULPRIT_DEMOTE_THRESHOLD:
+            return _TIER_NORMAL
+        second = max(
+            (count for other, count in culprit_counts.items() if other != project_name),
+            default=0,
+        )
+        if culprit - second >= _CULPRIT_DEMOTE_THRESHOLD:
+            return _TIER_CULPRIT
+        return _TIER_NORMAL
+
+    def is_ready(self, package: str) -> bool:
+        """Always: this provider fetches on demand, in the calling thread."""
+        return True
+
+    def receive_partial_solution_hint(
+        self,
+        positive_ranges: Mapping[str, RangeProtocol[Version]],
+        decisions: Mapping[str, Version],
+    ) -> None:
+        """Keep the base ranges, so an extras node cannot outrun its base.
+
+        An extras node and its base are two packages to the search but one
+        distribution in the answer, and the node's only dependency on the
+        base is ``base == chosen``. Picking a version the base's own range
+        has already ruled out therefore guarantees a conflict on the next
+        propagation. pip does not pay that: the extra rides on a candidate
+        that was picked once. Reading the base's accumulated range here
+        costs nothing and removes the whole class of wasted decision.
+        """
+        self._positive_ranges = positive_ranges
+
+    def consume_pending_clauses(self) -> list[Incompatibility[str, Version]]:
+        """No clauses are queued: this provider has no look-ahead."""
+        return []
+
+    def consume_force_backtrack_targets(self) -> list[str]:
+        """No force-backtrack signal: this provider has no look-ahead."""
+        return []
+
+    def widen_decision(self, package: str, version: Version) -> VersionRange | None:
+        """The widened stand-in for ``version`` in dependency clauses.
+
+        A dependency clause names the parent by a range rather than by one
+        version, so one clause can rule out a whole run of versions that
+        declare the same dependencies. The span runs over adjacent listed
+        versions whose recorded dependency maps are equal, then out to the
+        open gap around that span, which is what keeps every selectable
+        version inside carrying exactly the dependencies being recorded.
+        """
+        if not self._widening:
+            return None
+        project_name, extras = split_key(package)
+        if not self._index.is_listed(project_name):
+            # Decided from the installed distribution with no listing bought.
+            # Finding the neighbours to widen towards would have to buy one,
+            # and widening is a speed and message optimisation, so the clause
+            # keeps the exact version instead.
+            return None
+        universe = [candidate.version for candidate in self._versions(project_name)]
+        if not universe:
+            return None
+        key = (package, version)
+        cached = self._widened.get(key)
+        if cached is not None:
+            return cached
+        try:
+            index = universe.index(version)
+        except ValueError:  # pragma: no cover - a decided version is listed
+            return None
+        below = index
+        above = index + 1
+        if not extras:
+            # Extras nodes keep the plain neighbour gap: their dependency
+            # set is per-extra-context, so equality with a neighbour's base
+            # map says nothing.
+            recorded = self.deps_cache.get(package, {})
+            deps = recorded.get(version)
+            if deps is not None:
+                while below and recorded.get(universe[below - 1]) == deps:
+                    below -= 1
+                while above < len(universe) and recorded.get(universe[above]) == deps:
+                    above += 1
+        lower = universe[below - 1] if below else None
+        upper = universe[above] if above < len(universe) else None
+        if (lower is not None and lower.local is not None) or (
+            upper is not None and upper.local is not None
+        ):
+            # A cut inside a version's local family cannot be named: PEP 440
+            # allows a local segment only on ``==`` and ``!=``, both of which
+            # land on the version itself, and a label has no least neighbour
+            # below it, so no run of exclusions walks down to one. Keep the
+            # exact singleton rather than a bound that is not the gap.
+            return None
+        widened = self._open_gap(lower, upper)
+        self._widened[key] = widened
+        return widened
+
+    def narrow_for_display(
+        self, package: object, constraint: RangeProtocol[Version]
+    ) -> RangeProtocol[Version]:
+        """Return the constraint unchanged.
+
+        Pulling a range's ends in onto versions that exist needs
+        ``VersionRange.snap_bounds``, which released packaging does not have.
+        Widening already picks its ends from the listed neighbours of the
+        span, so an unnarrowed range is one whose ends are versions of the
+        project, and the protocol lets a provider return its input.
+        """
+        return constraint
+
+    # --------------------------------------------------------- internals
+
+    def _at_or_above(self, version: Version) -> VersionRange:
+        """The bare order interval ``[version, +inf)``.
+
+        ``>=`` is the one PEP 440 operator whose range is a plain cut: it
+        admits the version, its local versions and its post-releases, so
+        ``SpecifierSet.to_range`` hands back the interval itself rather than
+        a filtered form of it.
+        """
+        text = str(version)
+        cached = self._floors.get(text)
+        if cached is None:
+            cached = SpecifierSet(f">={text}").to_range()
+            self._floors[text] = cached
+        return cached
+
+    def _open_gap(self, lower: Version | None, upper: Version | None) -> VersionRange:
+        """The open interval ``(lower, upper)``, either end ``None`` for open.
+
+        Named by its complement and inverted, rather than built end by end.
+        Everything at or below ``lower`` is the union of ``lower``'s own
+        singleton with the complement of ``[lower, +inf)``, everything at or
+        above ``upper`` is ``[upper, +inf)``, and what neither covers is the
+        gap. Going through the complement also drops the pre-release opt-in
+        region a ``>=`` on a pre-release would otherwise carry in, which is
+        what makes the result the gap and nothing else.
+        """
+        outside = VersionRange.empty()
+        if lower is not None:
+            outside = (
+                self._at_or_above(lower)
+                .complement()
+                .union(VersionRange.singleton(lower))
+            )
+        if upper is not None:
+            outside = outside.union(self._at_or_above(upper))
+        return outside.complement()
+
+    def _candidate(
+        self, project_name: NormalizedName, version: Version
+    ) -> HostCandidate:
+        candidate = self._index.find(project_name, version)
+        if candidate is None:
+            raise AssertionError(
+                f"the engine decided {project_name} {version}, which is not in the "
+                "candidate universe pip supplied"
+            )
+        return candidate
+
+    def _parent_requirement(
+        self,
+        candidate: HostCandidate,
+        package: str,
+        extras: frozenset[NormalizedName],
+    ) -> InstallRequirement | None:
+        """The requirement pip credits this node's dependencies to.
+
+        For a base node that is the candidate's own install requirement, and
+        the chain reads back through its ``comes_from``. For an extras node
+        it is the requirement spelled with the extras: pip builds its
+        ``ExtrasCandidate`` from the ireq that carried them and hands that
+        one to every dependency the node yields, which is what makes the
+        annotation read ``(from pkg[ext])``.
+
+        Reading the extras candidate instead would print nothing at all.
+        ``ExtrasCandidate.get_install_requirement`` returns None by design,
+        because the extras node installs nothing of its own; the base does.
+        """
+        if not extras:
+            return self._index.pip_candidate(
+                candidate, frozenset()
+            ).get_install_requirement()
+        named = self._index.node_requirement(package)
+        if named is not None:
+            return named
+        return self._index.pip_candidate(
+            candidate, frozenset()
+        ).get_install_requirement()
+
+    def _requirements(
+        self, metadata: CandidateMetadata, extras: frozenset[NormalizedName]
+    ) -> list[PackagingRequirement]:
+        """The dependencies that apply, with pip's own marker semantics.
+
+        ``BaseDistribution.iter_dependencies`` cannot be reused (it drops
+        every ``; extra == "x"`` line), but its marker rule is copied here
+        verbatim: the base node evaluates against ``extra == ""`` and an
+        extras node against one context per requested extra. A line the base
+        already carries is left to the base, because the extras node depends
+        on the base at its exact version.
+        """
+        contexts = [{"extra": extra} for extra in sorted(extras)]
+        applicable: list[PackagingRequirement] = []
+        for text in metadata.raw_dependencies:
+            try:
+                requirement = get_requirement(text.strip())
+            except InvalidRequirement as exc:
+                raise InstallationError(
+                    f"{metadata.project_name} {metadata.version} declares an "
+                    f"invalid dependency {text.strip()!r}: {exc}"
+                ) from exc
+            marker = requirement.marker
+            if not extras:
+                if marker is None or marker.evaluate({"extra": ""}):
+                    applicable.append(requirement)
+                continue
+            if marker is None or marker.evaluate({"extra": ""}):
+                continue
+            if any(marker.evaluate(context) for context in contexts):
+                applicable.append(requirement)
+        return applicable
+
+    def _add_dependency(
+        self,
+        requirement: PackagingRequirement,
+        ranges: dict[str, VersionRange],
+        texts: dict[str, str],
+        comes_from: InstallRequirement | None,
+    ) -> None:
+        name = canonicalize_name(requirement.name)
+        extras = frozenset(canonicalize_name(extra) for extra in requirement.extras)
+        self._index.note_requested_by(name, requirement.name, comes_from)
+        if requirement.url is not None:
+            # PEP 508 forbids a specifier alongside a URL, so the link is the
+            # whole universe and the range is unbounded.
+            if not self._index.register_explicit(str(requirement), comes_from):
+                raise InstallationError(
+                    f"Cannot install {requirement}: {name} was already "
+                    "resolved from the index before this direct URL "
+                    "requirement was reached."
+                )
+            term = VersionRange.full(admit_arbitrary=False)
+        else:
+            term = (
+                requirement.specifier.to_range()
+                if requirement.specifier
+                else VersionRange.full(admit_arbitrary=False)
+            )
+        previous = ranges.get(name)
+        ranges[name] = term if previous is None else previous & term
+        texts[name] = str(requirement)
+        if extras:
+            key = format_name(name, extras)
+            ranges.setdefault(key, VersionRange.full(admit_arbitrary=False))
+            texts[key] = str(requirement)
+            self._index.note_node_requirement(key, str(requirement), comes_from)
+
+    def _warn_missing_extras(
+        self,
+        project_name: NormalizedName,
+        version: Version,
+        extras: frozenset[NormalizedName],
+        metadata: CandidateMetadata,
+    ) -> None:
+        for extra in sorted(extras - metadata.provided_extras):
+            logger.warning(
+                "%s %s does not provide the extra '%s'", project_name, version, extra
+            )
+
+    # ------------------------------------------------------- error path
+
+    def requirement_text(self, parent_key: str, dep_key: str) -> str | None:
+        """The dependency as written, for the clause naming ``dep_key``."""
+        for texts in self.dep_texts.get(parent_key, {}).values():
+            text = texts.get(dep_key)
+            if text is not None:
+                return text
+        return None
+
+    def root_causes(self, dep_key: str) -> Sequence[FailureCause]:
+        """The user requests pip should report for a blamed root node.
+
+        The engine folds every request on a package into one range before the
+        solve, so its proof names one clause however many times the user
+        asked. pip's report is built from the set of requirements recorded
+        against the node, and that count is what makes
+        ``Factory.get_installation_error`` print ``The conflict is caused by:``
+        rather than the single-requirement sentence, so the requests are read
+        back off pip's own record.
+
+        Not all of them, though: pip's previous resolver adds requirements one
+        at a time and stops at the first that leaves the node with no
+        candidate, so its causes are the requests up to and including that
+        one. ``_recorded_roots`` replays that.
+        """
+        node = self._reported_node(dep_key)
+        return [
+            FailureCause(
+                requirement=root.text,
+                explicit_root=root.ireq if root.link is not None else None,
+                node_key=node,
+            )
+            for root in self._recorded_roots(node)
+        ]
+
+    def _reported_node(self, dep_key: str) -> str:
+        """The node whose requirements the message is about.
+
+        Blame can land on an extras proxy rather than on its base. The proxy
+        is not a distribution: its candidates are the base's, and a URL or a
+        specifier is recorded against the base, so the base is the node pip
+        names. A proxy whose base carries no root requirement of its own is
+        what the user typed directly, ``pip install foo[bar]`` with no
+        specifier and no link, and it stays the node.
+        """
+        project_name, extras = split_key(dep_key)
+        if not extras:
+            return dep_key
+        if self._inputs.roots_for(project_name):
+            return project_name
+        return dep_key
+
+    def _recorded_roots(self, node: str) -> list[RootRequirement]:
+        """Requests on ``node``, up to the one that empties it.
+
+        pip's previous resolver never reports every root either. It merges
+        them one at a time and raises at the first that leaves the criterion
+        with no candidate, so a lock file pinning ``simplewheel==2.0`` against
+        a command line ``simplewheel<2`` reports only the command line half
+        and keeps pip's lock-file sentence. Two requests are told apart from
+        two contradictory ones by the candidates, not by the ranges: ``<2``
+        and ``>1`` are both non-empty.
+
+        A URL is the one thing the candidate list cannot answer, because a
+        package named by two different URLs is deliberately left with an
+        empty universe. A second distinct URL ends the walk on its own.
+        """
+        roots = self._inputs.roots_for(node)
+        if len(roots) < 2:
+            return roots
+        project_name, _ = split_key(node)
+        reported: list[RootRequirement] = []
+        links: list[Link] = []
+        accumulated = SpecifierSet()
+        for root in roots:
+            reported.append(root)
+            if root.link is not None:
+                if any(not links_equivalent(root.link, seen) for seen in links):
+                    break
+                links.append(root.link)
+                continue
+            accumulated &= root.specifier
+            if not any(
+                accumulated.contains(candidate.version, prereleases=True)
+                for candidate in self._versions(project_name)
+            ):
+                break
+        return reported
+
+    def parent_versions(
+        self, parent_key: str, parent_range: RangeProtocol[Version]
+    ) -> Sequence[Version]:
+        """Every version of ``parent_key`` a clause over ``parent_range`` covers.
+
+        A widened dependency clause names a range rather than one version,
+        and the resolver merges clauses that declare the same dependency, so
+        one clause can stand for several versions that were each tried. pip
+        names each of them, so the versions are recovered here from what was
+        actually asked about; a version nothing was recorded for was never
+        tried and has nothing to say.
+        """
+        recorded = sorted(
+            version
+            for version in self.deps_cache.get(parent_key, {})
+            if version in parent_range
+        )
+        if recorded:
+            return recorded
+        project_name, _ = split_key(parent_key)
+        listed = [
+            candidate.version
+            for candidate in self._versions(project_name)
+            if candidate.version in parent_range
+        ]
+        return listed[-1:]
+
+    def requires_python_refusal(self, package: str) -> SpecifierSet | None:
+        """The Requires-Python that removed every candidate of ``package``."""
+        project_name, _ = split_key(package)
+        refused = self._requires_python_refused.get(project_name)
+        if not refused:
+            return None
+        return refused[max(refused)]
+
+
+def solve(
+    *,
+    inputs: ResolveInputs,
+    index: PipHostIndex,
+    reporter: NabReporter,
+    yank_policy: YankPolicy,
+    python_version: Version,
+    ignore_requires_python: bool = False,
+    widening: bool = True,
+) -> Solution:
+    """Run the engine over ``inputs``, sourcing versions from ``index``.
+
+    :param widening: keep nab's range widening on. It is worth 13 to 15
+        percent of resolve time and it can change which of several valid
+        solutions is returned, so it is a behaviour switch and not only a
+        performance one.
+    :raises EngineFailure: no solution exists. The exception carries the
+        causes pip's own error renderer wants.
+    """
+    constraints = _constraint_ranges(inputs)
+    provider = PipProvider(
+        index=index,
+        inputs=inputs,
+        constraints=constraints,
+        reporter=reporter,
+        yank_policy=yank_policy,
+        python_version=python_version,
+        ignore_requires_python=ignore_requires_python,
+        widening=widening,
+    )
+    requirements = _root_ranges(inputs)
+    resolver: NabResolver[str, Version] = NabResolver(
+        provider,
+        observer=_Observer(reporter),
+        range_type=VersionRange,
+        root_version="0",
+    )
+    try:
+        solution = resolver.solve(requirements, constraints)
+    except ResolutionError as exc:
+        raise _failure(exc, provider) from exc
+
+    pins = tuple(_pin(key, version) for key, version in solution.pins.items())
+    edges: list[tuple[str | None, str]] = [(None, root) for root in solution.roots]
+    edges.extend(solution.edges)
+    return Solution(pins=pins, edges=tuple(edges), roots=solution.roots)
+
+
+def _pin(key: str, version: Version) -> ResolvedPin:
+    project_name, extras = split_key(key)
+    return ResolvedPin(
+        key=key, project_name=project_name, extras=extras, version=version
+    )
+
+
+def _root_ranges(inputs: ResolveInputs) -> dict[str, VersionRange]:
+    """One range per root key, in command line order."""
+    ranges: dict[str, VersionRange] = {}
+    for requirement in inputs.requirements:
+        term = (
+            requirement.specifier.to_range()
+            if requirement.specifier
+            else VersionRange.full(admit_arbitrary=False)
+        )
+        previous = ranges.get(requirement.key)
+        ranges[requirement.key] = term if previous is None else previous & term
+    return ranges
+
+
+def _constraint_ranges(inputs: ResolveInputs) -> dict[str, VersionRange]:
+    """Constraint ranges, copied onto the extras nodes of the same package.
+
+    A constraint restricts a package without requiring it, and the resolver
+    looks it up by the key it is deciding, so an extras node needs its own
+    entry to stay on the constraint attribution path.
+    """
+    ranges: dict[str, VersionRange] = {}
+    for project_name, constraint in inputs.constraints.items():
+        if not constraint.specifier:
+            continue
+        ranges[project_name] = constraint.specifier.to_range()
+    for requirement in inputs.requirements:
+        if requirement.key == requirement.project_name:
+            continue
+        constrained = ranges.get(requirement.project_name)
+        if constrained is not None:
+            ranges[requirement.key] = constrained
+    return ranges
+
+
+def _failure(exc: ResolutionError, provider: PipProvider) -> EngineFailure:
+    causes = causes_from_derivation(
+        exc.incompatibility,
+        root_sentinel=ROOT,
+        requirement_text=provider.requirement_text,
+        root_causes=provider.root_causes,
+        parent_versions=provider.parent_versions,
+        requires_python=provider.requires_python_refusal,
+    )
+    if not causes:
+        # Nothing in the derivation names a requirement pip can rebuild, which
+        # is the iteration-limit and stall path. Report nab's own sentence
+        # rather than an empty conflict.
+        raise InstallationError(str(exc)) from exc
+    return EngineFailure(str(exc), causes)
+
+
+class _Observer:
+    """Forwards nab's resolver events to pip's reporter.
+
+    ``PIP_RESOLVER_DEBUG`` is decided once here rather than per event, so a
+    run without it builds no argument tuples.
+
+    The 1st, 8th and 13th backtracking messages are driven from the conflict
+    loop, not from a version being unusable. pip prints them from
+    ``rejecting_candidate``, which fires when a candidate that was already
+    pinned is discarded because of a conflict. The PubGrub event with that
+    meaning is a conflict step whose satisfier is a decision: that decision
+    is about to be undone. A candidate skipped because its metadata could
+    not be read is not that event, and pip does not count one either.
+    """
+
+    def __init__(self, reporter: NabReporter) -> None:
+        self._reporter = reporter
+        self._debug = reporter.event_enabled()
+        self._decided: dict[str, Version] = {}
+        self._counted: dict[str, Version] = {}
+
+    def on_decision(self, package: str, version: Version, level: int) -> None:
+        self._decided[package] = version
+        if self._debug:
+            self._reporter.event("adding_requirement", package, version, level)
+
+    def on_derivation(self, package: str, *, positive: bool, cause: Any) -> None:
+        if self._debug:
+            self._reporter.event("derivation", package, positive)
+
+    def on_conflict(self, incompatibility: Any) -> None:
+        if self._debug:
+            self._reporter.event("resolving_conflicts", incompatibility)
+
+    def on_learned(self, incompatibility: Any) -> None:
+        if self._debug:
+            self._reporter.event("learned", incompatibility)
+
+    def on_backjump(self, from_level: int, to_level: int) -> None:
+        if self._debug:
+            self._reporter.event("backtracking", from_level, to_level)
+
+    def on_no_versions(
+        self, package: str, version_range: RangeProtocol[Version]
+    ) -> None:
+        logger.debug("no version of %s left in %s", package, version_range)
+        if self._debug:
+            self._reporter.event("no_versions", package, str(version_range))
+
+    def on_conflict_step(
+        self,
+        incompatibility: Any,
+        *,
+        satisfier_package: str,
+        satisfier_is_decision: bool,
+        satisfier_level: int,
+        previous_level: int,
+        can_backjump: bool,
+    ) -> None:
+        if satisfier_is_decision:
+            self._count_rejection(satisfier_package)
+        if self._debug:
+            self._reporter.event("conflict_step", satisfier_package, satisfier_level)
+
+    def _count_rejection(self, package: str) -> None:
+        """One pinned candidate is about to be discarded."""
+        version = self._decided.get(package)
+        if version is None or self._counted.get(package) == version:
+            return
+        self._counted[package] = version
+        project_name, _ = split_key(package)
+        self._reporter.rejecting_version(project_name, f"{package} {version}")

@@ -8,7 +8,7 @@ and this article is intended to help readers understand what is happening
 ```{note}
 This document is a work in progress. The details included are accurate (at the
 time of writing), but there is additional information, in particular around
-pip's interface with resolvelib, which has not yet been included.
+pip's provider, which has not yet been included.
 
 Contributions to improve this document are welcome.
 ```
@@ -116,38 +116,36 @@ over older versions, for example.
 
 ## The resolver algorithm
 
-The resolver itself is based on a separate package, [resolvelib](https://pypi.org/project/resolvelib/).
-This implements an abstract backtracking resolution algorithm, in a way that is
-independent of the specifics of Python packages - those specifics are abstracted
-away by pip before calling the resolver.
+The resolver itself is [nab](https://pypi.org/project/nab-resolver/), a
+PubGrub implementation. PubGrub does not try candidate versions one at a
+time and undo the last choice on failure. It records each requirement as an
+incompatibility over version ranges, propagates those to derive the choices
+they force, and on a contradiction derives a new incompatibility that
+explains it, then jumps back to the decision that incompatibility implicates.
+A range that has been ruled out is never revisited, and the same
+incompatibilities are the proof pip renders when resolution fails.
 
-Pip's interface to resolvelib is in the form of a "provider", which is the
-interface between pip's model of packages and the resolution algorithm. The
-provider deals in "candidates" and "requirements" and implements the following
-operations:
+nab knows nothing about Python packaging. Everything specific to Python is
+supplied by pip through a provider:
 
-* `identify` - implements identity for candidates and requirements. It is this
-  operation that implements the rule that candidates are identified by their
-  name and version, for example.
-* `get_preference` - this provides information to the resolver to help it choose
-  which requirement to look at "next" when working through the resolution
-  process.
-* `narrow_requirement_selection` - this provides a way to limit the number of
-  identifiers passed to `get_preference`.
-* `find_matches` - given a set of constraints, determine what candidates exist
-  that satisfy them. This is essentially where the finder interacts with the
-  resolver.
-* `is_satisfied_by` - checks if a candidate satisfies a requirement. This is
-  basically the implementation of what a requirement means.
-* `get_dependencies` - get the dependency metadata for a candidate. This is
-  the implementation of the process of getting and reading package metadata.
+* `choose_version` - given a package and the range still allowed for it,
+  return the version to decide on. This is where the finder interacts with
+  the resolver, and where yanked releases and prereleases are ruled on.
+* `has_satisfying_version` - is there any usable version in this range? Asked
+  without committing to one.
+* `get_dependencies` - read a chosen version's metadata and return each
+  dependency as a range. This is the implementation of getting and reading
+  package metadata.
+* `prioritize` - which undecided package to decide next. The heuristic that
+  guides the search.
+* `widen_decision` - after a version is ruled out, report the whole range
+  that is ruled out for the same reason, so one derivation covers many
+  versions instead of one.
 
-Of these methods, the only non-trivial ones are the `get_preference` and
-`narrow_requirement_selection` methods. These implement heuristics used
-to guide the resolution, telling it which requirement to try to satisfy next.
-It's these methods that are responsible for trying to guess which route through
-the dependency tree will be most productive. As noted above, it's doing this
-with limited information. See the following diagram:
+Of these, `prioritize` is the one carrying the search heuristic. It orders
+by how constrained a package is, so that packages with few remaining
+candidates are decided before packages with many. As noted above, it is
+doing this with limited information. See the following diagram:
 
 ![](deps.png)
 
@@ -155,32 +153,15 @@ When the provider is asked to choose between the red requirements (A->B and
 A->C) it doesn't know anything about the dependencies of B or C (i.e., the
 grey parts of the graph).
 
-Pip's current implementation of the provider implements
-`narrow_requirement_selection` as follows:
+## Pinning and backtracking
 
-* If Requires-Python is present only consider that
-* If there are causes of resolution conflict (backtrack causes) then
-    only consider them until there are no longer any resolution conflicts
-* If any identifiers have appeared unresolved in backtrack causes at
-    least 5 times, only consider those so they get pinned before other
-    packages pick a version
+The resolver decides a version for one package at a time. Each decision
+narrows what is left, and propagation may then force further versions
+without a decision at all. When a decision leads to a contradiction, the
+conflict is analysed rather than merely undone: the versions responsible are
+recorded as an incompatibility, so the same dead end is not re-entered by
+another route.
 
-Pip's current implementation of the provider implements `get_preference`
-for known requirements with the following preferences in the following order:
-
-* Any requirement that has appeared in repeated conflicts (see
-    ``narrow_requirement_selection`` above).
-* Any requirement that is "direct", e.g., points to an explicit URL.
-* Any requirement that is "pinned", i.e., contains the operator ``===``
-    or ``==`` without a wildcard.
-* Any requirement that imposes an upper version limit, i.e., contains the
-    operator ``<``, ``<=``, ``~=``, or ``==`` with a wildcard. Because
-    pip prioritizes the latest version, preferring explicit upper bounds
-    can rule out infeasible candidates sooner. This does not imply that
-    upper bounds are good practice; they can make dependency management
-    and resolution harder.
-* Order user-specified requirements as they are specified, placing
-    other requirements afterward.
-* Any "non-free" requirement, i.e., one that contains at least one
-    operator, such as ``>=`` or ``!=``.
-* Alphabetical order for consistency (aids debuggability).
+This is what pip is doing when it reports that it is looking at multiple
+versions of a package: the search has found a conflict and is working out
+which earlier decision caused it.

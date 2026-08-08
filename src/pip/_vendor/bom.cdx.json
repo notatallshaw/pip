@@ -50,6 +50,13 @@
       "version": "1.2.1"
     },
     {
+      "bom-ref": "pkg:pypi/nab-resolver@0.0.13.dev0",
+      "name": "nab-resolver",
+      "purl": "pkg:pypi/nab-resolver@0.0.13.dev0",
+      "type": "library",
+      "version": "0.0.13.dev0"
+    },
+    {
       "bom-ref": "pkg:pypi/packaging@26.3",
       "name": "packaging",
       "purl": "pkg:pypi/packaging@26.3",
@@ -83,13 +90,6 @@
       "purl": "pkg:pypi/requests@2.34.2",
       "type": "library",
       "version": "2.34.2"
-    },
-    {
-      "bom-ref": "pkg:pypi/resolvelib@1.2.1",
-      "name": "resolvelib",
-      "purl": "pkg:pypi/resolvelib@1.2.1",
-      "type": "library",
-      "version": "1.2.1"
     },
     {
       "bom-ref": "pkg:pypi/rich@14.2.0",
@@ -143,12 +143,12 @@
         "pkg:pypi/distro@1.9.0",
         "pkg:pypi/idna@3.18",
         "pkg:pypi/msgpack@1.2.1",
+        "pkg:pypi/nab-resolver@0.0.13.dev0",
         "pkg:pypi/packaging@26.3",
         "pkg:pypi/platformdirs@4.11.0",
         "pkg:pypi/pygments@2.20.0",
         "pkg:pypi/pyproject-hooks@1.2.0",
         "pkg:pypi/requests@2.34.2",
-        "pkg:pypi/resolvelib@1.2.1",
         "pkg:pypi/rich@14.2.0",
         "pkg:pypi/setuptools@70.3.0",
         "pkg:pypi/tomli@2.4.1",
@@ -177,6 +177,9 @@
       "ref": "pkg:pypi/msgpack@1.2.1"
     },
     {
+      "ref": "pkg:pypi/nab-resolver@0.0.13.dev0"
+    },
+    {
       "ref": "pkg:pypi/packaging@26.3"
     },
     {
@@ -190,9 +193,6 @@
     },
     {
       "ref": "pkg:pypi/requests@2.34.2"
-    },
-    {
-      "ref": "pkg:pypi/resolvelib@1.2.1"
     },
     {
       "ref": "pkg:pypi/rich@14.2.0"
@@ -222,7 +222,7 @@
     "tools": [
       {
         "name": "vendoring",
-        "version": "1.4.0"
+        "version": "1.2.1.dev0"
       }
     ]
   },

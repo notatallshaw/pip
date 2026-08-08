@@ -93,6 +93,7 @@ such as OS packages.
 Modifications
 =============
 
+* ``nab-resolver``: no modifications.
 * ``setuptools`` is completely stripped to only keep ``pkg_resources``.
 * ``pkg_resources`` has been modified to import its dependencies from
   ``pip._vendor``, and to use the vendored copy of ``platformdirs``

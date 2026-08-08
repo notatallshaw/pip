@@ -1090,6 +1090,182 @@ def test_new_resolver_build_directory_error_zazo_19(script: PipTestEnvironment) 
     script.assert_installed(pkg_a="3.0.0", pkg_b="1.0.0")
 
 
+def test_new_resolver_extra_after_base_is_chosen(script: PipTestEnvironment) -> None:
+    """An extra must stay solvable after its own package has been chosen.
+
+    ``base`` is reached both through ``dep``'s plain ``base>=1`` and through
+    the ``base[x]`` requested twice, and the plain requirement admits fewer
+    versions, so ``base`` is chosen before ``base[x]``. ``base[x]`` then has
+    to move below that choice, which is only possible by revisiting ``base``.
+    A resolver that treats "no version of ``base[x]`` fits alongside the
+    current ``base``" as "no version of ``base[x]`` fits at all" reports a
+    conflict where ``base 2.0`` resolves everything.
+    """
+    for version in ("0.1", "0.2", "0.3", "0.4", "0.5", "1.0", "2.0"):
+        create_basic_wheel_for_package(
+            script, "base", version, extras={"x": ["helper>=1,<2"]}
+        )
+    create_basic_wheel_for_package(script, "base", "3.0", extras={"x": ["helper>=3"]})
+    create_basic_wheel_for_package(
+        script,
+        "dep",
+        "1.0",
+        depends=["base>=1"],
+        extras={"x": ["helper>=1,<2", "base[x]"]},
+    )
+    create_basic_wheel_for_package(script, "helper", "1.0")
+    create_basic_wheel_for_package(script, "helper", "3.0")
+
+    script.pip(
+        "install",
+        "--no-cache-dir",
+        "--no-index",
+        "--find-links",
+        script.scratch_path,
+        "base[x]",
+        "dep[x]==1.0",
+    )
+    script.assert_installed(base="2.0", dep="1.0", helper="1.0")
+
+
+def test_new_resolver_prerelease_bound_admits_prerelease(
+    script: PipTestEnvironment,
+) -> None:
+    """A pre-release bound opts the whole requirement in, per PEP 440.
+
+    ``opted<3.0dev,>=1.0`` names a pre-release in one of its bounds, so
+    ``SpecifierSet.prereleases`` is True for it and every in-range
+    pre-release is admitted, not just one that nothing else can replace.
+    ``plain>=1.0`` names none, so its pre-release stays buffered behind the
+    final. This is the real shape of ``grpcio-status`` asking for
+    ``protobuf<6.0dev,>=5.26.1``.
+    """
+    for name in ("opted", "plain"):
+        create_basic_wheel_for_package(script, name, "1.0")
+        create_basic_wheel_for_package(script, name, "2.0rc1")
+    create_basic_wheel_for_package(
+        script, "dep", "1.0", depends=["opted<3.0dev,>=1.0", "plain>=1.0"]
+    )
+
+    script.pip(
+        "install",
+        "--no-cache-dir",
+        "--no-index",
+        "--find-links",
+        script.scratch_path,
+        "dep",
+    )
+    script.assert_installed(dep="1.0", opted="2.0rc1", plain="1.0")
+
+
+def test_new_resolver_backtracking_does_not_admit_prerelease(
+    script: PipTestEnvironment,
+) -> None:
+    """Backtracking must not manufacture a pre-release admission.
+
+    ``base`` is asked for by name alone, so PEP 440 buffers ``2.0rc1``
+    behind the two finals. Both finals then lose to ``pin==2.0`` on their
+    own dependency. That is an exclusion the search learned, not a
+    specifier on ``base``, so it cannot open the buffer: pip filters the
+    listing with the merged specifier, and no learned exclusion is in it.
+
+    The resolve has no answer once the buffer stays shut, which is the
+    point. Only the refusal is asserted, not which refusal: the two
+    resolvers reach it by different routes and word it differently.
+    """
+    create_basic_wheel_for_package(script, "pin", "1.0")
+    create_basic_wheel_for_package(script, "pin", "2.0")
+    create_basic_wheel_for_package(script, "base", "1.0", depends=["pin==1.0"])
+    create_basic_wheel_for_package(script, "base", "1.5", depends=["pin==1.0"])
+    create_basic_wheel_for_package(script, "base", "2.0rc1", depends=["pin==2.0"])
+
+    script.pip(
+        "install",
+        "--no-cache-dir",
+        "--no-index",
+        "--find-links",
+        script.scratch_path,
+        "base",
+        "pin==2.0",
+        expect_error=True,
+        expect_stderr=True,
+    )
+
+    script.assert_not_installed("base")
+
+
+def test_new_resolver_backtracking_keeps_opted_in_prerelease(
+    script: PipTestEnvironment,
+) -> None:
+    """An opted-in pre-release still wins the versions conflict removed.
+
+    ``base<3.0dev,>=1.0rc1`` names a pre-release, so the requirement admits
+    ``1.0rc1`` outright. The two finals are tried first and both lose to
+    ``pin==2.0``; the pre-release is what is left, and it is a version the
+    requirement asked for all along. Narrowing the buffering decision back
+    to the requirement must not cost this.
+    """
+    create_basic_wheel_for_package(script, "pin", "1.0")
+    create_basic_wheel_for_package(script, "pin", "2.0")
+    create_basic_wheel_for_package(script, "base", "1.0rc1", depends=["pin==2.0"])
+    create_basic_wheel_for_package(script, "base", "1.0", depends=["pin==1.0"])
+    create_basic_wheel_for_package(script, "base", "1.5", depends=["pin==1.0"])
+
+    script.pip(
+        "install",
+        "--no-cache-dir",
+        "--no-index",
+        "--find-links",
+        script.scratch_path,
+        "base<3.0dev,>=1.0rc1",
+        "pin==2.0",
+    )
+    script.assert_installed(base="1.0rc1", pin="2.0")
+
+
+def test_new_resolver_keeps_installed_prerelease(script: PipTestEnvironment) -> None:
+    """An installed pre-release is kept while the requirement's bounds hold.
+
+    pip admits the installed distribution on bounds alone, with
+    ``prereleases=True``, so a plain ``pip install pkg`` over an installed
+    ``2.0rc1`` is already satisfied and must not walk back to ``1.0``. The
+    pre-release buffering that governs index candidates does not reach the
+    installed one. Bounds that exclude it still do.
+    """
+    create_basic_wheel_for_package(script, "pkg", "1.0")
+    create_basic_wheel_for_package(script, "pkg", "2.0rc1")
+
+    script.pip(
+        "install",
+        "--no-cache-dir",
+        "--no-index",
+        "--find-links",
+        script.scratch_path,
+        "pkg==2.0rc1",
+    )
+    script.assert_installed(pkg="2.0rc1")
+
+    script.pip(
+        "install",
+        "--no-cache-dir",
+        "--no-index",
+        "--find-links",
+        script.scratch_path,
+        "pkg",
+    )
+    script.assert_installed(pkg="2.0rc1")
+
+    script.pip(
+        "install",
+        "--no-cache-dir",
+        "--no-index",
+        "--find-links",
+        script.scratch_path,
+        "pkg<2",
+    )
+    script.assert_installed(pkg="1.0")
+
+
 def test_new_resolver_upgrade_same_version(script: PipTestEnvironment) -> None:
     create_basic_wheel_for_package(script, "pkg", "2")
     create_basic_wheel_for_package(script, "pkg", "1")
@@ -2408,12 +2584,12 @@ def test_new_resolver_dont_backtrack_on_conflicting_constraints_on_extras(
     assert (
         "pkg-2.0" not in result.stdout or "pkg-1.0" not in result.stdout
     ), "Should only try one of 1.0, 2.0 depending on order"
-    assert "Reporter.starting()" in result.stdout, (
+    assert "Resolver.derivation(" in result.stdout, (
         "This should never fail unless the debug reporting format has changed,"
         " in which case the other assertions in this test need to be reviewed."
     )
     assert (
-        "Reporter.rejecting_candidate" not in result.stdout
+        "Resolver.adding_requirement(" not in result.stdout
     ), "Should be able to conclude conflict before even selecting a candidate"
     assert (
         "conflict is caused by" in result.stdout
