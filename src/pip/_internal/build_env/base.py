@@ -31,6 +31,8 @@ class Prefix:
         self.bin_dir = scheme.scripts
         self.lib_dirs = _dedup(scheme.purelib, scheme.platlib)
         self.venv_executable = venv_executable
+        # Environment overrides for the pip subprocess that installs into this prefix.
+        self.child_environ: dict[str, str] = {}
 
 
 class BuildEnvironmentInstaller(Protocol):

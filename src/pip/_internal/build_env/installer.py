@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import sys
 import textwrap
@@ -140,6 +141,26 @@ class SubprocessBuildEnvironmentInstaller:
         args.append("--")
         args.extend(requirements)
 
+        extra_environ = {
+            "_PIP_IN_BUILD_IGNORE_CONSTRAINTS": "1",
+            **prefix.child_environ,
+        }
+
+        # Imported here so that commands which never touch the network do not
+        # pay for loading it.
+        from pip._internal.network.auth import BUILD_ENV_CREDENTIALS_ENV_VAR
+
+        # The child cannot always work out its own credentials. Only reach for
+        # keyring when it runs the build venv's interpreter, which has none
+        # installed.
+        session = finder._link_collector.session
+        credentials = session.auth.credentials_for(
+            [*index_urls, *finder.find_links],
+            allow_keyring=prefix.venv_executable is not None,
+        )
+        if credentials:
+            extra_environ[BUILD_ENV_CREDENTIALS_ENV_VAR] = json.dumps(credentials)
+
         identify_requirement = (
             f" for {for_req.name}" if for_req and for_req.name else ""
         )
@@ -148,7 +169,7 @@ class SubprocessBuildEnvironmentInstaller:
                 args,
                 command_desc=f"installing {kind}{identify_requirement}",
                 spinner=spinner,
-                extra_environ={"_PIP_IN_BUILD_IGNORE_CONSTRAINTS": "1"},
+                extra_environ=extra_environ,
             )
 
 

@@ -9,12 +9,16 @@ import subprocess
 import sys
 from collections.abc import Generator, Iterable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 import pip._internal.network.auth
-from pip._internal.network.auth import MultiDomainBasicAuth
+from pip._internal.network.auth import (
+    BUILD_ENV_CREDENTIALS_ENV_VAR,
+    MultiDomainBasicAuth,
+)
 
 from tests.lib.requests_mocks import MockConnection, MockRequest, MockResponse
 
@@ -25,6 +29,13 @@ def reset_keyring() -> Iterable[None]:
     # Reset the state of the module between tests
     pip._internal.network.auth.KEYRING_DISABLED = False
     pip._internal.network.auth.get_keyring_provider.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def reset_inherited_credentials() -> Iterable[None]:
+    pip._internal.network.auth._inherited_credentials.cache_clear()
+    yield None
+    pip._internal.network.auth._inherited_credentials.cache_clear()
 
 
 @pytest.mark.parametrize(
@@ -795,3 +806,110 @@ def test_handle_401_extracts_credentials_embedded_in_url(
     scheme, _, encoded = sent_headers["Authorization"].partition(" ")
     assert scheme == "Basic"
     assert base64.b64decode(encoded).decode() == "user:pass"
+
+
+class TestCredentialsFor:
+    def test_returns_credentials_already_known(self) -> None:
+        auth = MultiDomainBasicAuth()
+        auth.passwords["private.example.com"] = ("user", "hunter2")
+
+        assert auth.credentials_for(["https://private.example.com/simple"]) == {
+            "private.example.com": ("user", "hunter2")
+        }
+
+    def test_skips_urls_with_no_credentials(self) -> None:
+        auth = MultiDomainBasicAuth()
+
+        assert auth.credentials_for(["https://example.com/simple"]) == {}
+
+    def test_skips_local_find_links(self, tmp_path: Path) -> None:
+        auth = MultiDomainBasicAuth()
+
+        assert auth.credentials_for([os.fspath(tmp_path)]) == {}
+
+    def test_leaves_keyring_alone_by_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        keyring = KeyringModuleV2()
+        monkeypatch.setitem(sys.modules, "keyring", keyring)
+        auth = MultiDomainBasicAuth(keyring_provider="import")
+
+        with keyring.add_credential("private.example.com", "user", "hunter2"):
+            assert auth.credentials_for(["https://private.example.com/simple"]) == {}
+
+    def test_consults_keyring_when_asked(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        keyring = KeyringModuleV2()
+        monkeypatch.setitem(sys.modules, "keyring", keyring)
+        auth = MultiDomainBasicAuth(keyring_provider="import")
+
+        with keyring.add_credential("private.example.com", "user", "hunter2"):
+            found = auth.credentials_for(
+                ["https://private.example.com/simple"], allow_keyring=True
+            )
+
+        assert found == {"private.example.com": ("user", "hunter2")}
+
+    def test_remembers_what_keyring_answered(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        keyring = KeyringModuleV2()
+        monkeypatch.setitem(sys.modules, "keyring", keyring)
+        auth = MultiDomainBasicAuth(keyring_provider="import")
+        urls = ["https://private.example.com/simple"]
+
+        with keyring.add_credential("private.example.com", "user", "hunter2"):
+            first = auth.credentials_for(urls, allow_keyring=True)
+        second = auth.credentials_for(urls, allow_keyring=True)
+
+        assert first == second == {"private.example.com": ("user", "hunter2")}
+
+    def test_respects_a_disabled_keyring(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        keyring = KeyringModuleV2()
+        monkeypatch.setitem(sys.modules, "keyring", keyring)
+        auth = MultiDomainBasicAuth(prompting=False, keyring_provider="auto")
+
+        with keyring.add_credential("private.example.com", "user", "hunter2"):
+            found = auth.credentials_for(
+                ["https://private.example.com/simple"], allow_keyring=True
+            )
+
+        assert found == {}
+
+
+class TestInheritedCredentials:
+    def test_seed_the_passwords_and_leave_the_environment_clean(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(
+            BUILD_ENV_CREDENTIALS_ENV_VAR,
+            json.dumps({"private.example.com": ["user", "hunter2"]}),
+        )
+
+        auth = MultiDomainBasicAuth()
+
+        assert auth.passwords == {"private.example.com": ("user", "hunter2")}
+        assert BUILD_ENV_CREDENTIALS_ENV_VAR not in os.environ
+
+    def test_are_not_shared_between_sessions(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(
+            BUILD_ENV_CREDENTIALS_ENV_VAR,
+            json.dumps({"private.example.com": ["user", "hunter2"]}),
+        )
+
+        MultiDomainBasicAuth().passwords["other.example.com"] = ("user", "hunter3")
+
+        assert MultiDomainBasicAuth().passwords == {
+            "private.example.com": ("user", "hunter2")
+        }
+
+    @pytest.mark.parametrize(
+        "value", ["", "not json", "[]", '{"host": "user"}', '{"host": null}']
+    )
+    def test_are_ignored_when_malformed(
+        self, monkeypatch: pytest.MonkeyPatch, value: str
+    ) -> None:
+        monkeypatch.setenv(BUILD_ENV_CREDENTIALS_ENV_VAR, value)
+
+        assert MultiDomainBasicAuth().passwords == {}

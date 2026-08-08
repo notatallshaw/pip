@@ -15,6 +15,7 @@ import sysconfig
 import typing
 import urllib.parse
 from abc import ABC, abstractmethod
+from collections.abc import Iterable
 from functools import cache
 from os.path import commonpath
 from pathlib import Path
@@ -40,6 +41,30 @@ if typing.TYPE_CHECKING:
 logger = getLogger(__name__)
 
 KEYRING_DISABLED = False
+
+# Carries credentials to a pip subprocess installing build dependencies, which
+# may have no way of looking them up itself.
+BUILD_ENV_CREDENTIALS_ENV_VAR = "_PIP_BUILD_ENV_CREDENTIALS"
+
+
+@cache
+def _inherited_credentials() -> dict[str, AuthInfo]:
+    """Read the credentials passed down by a parent pip process.
+
+    The variable is taken out of the environment so that processes started
+    later, build backends in particular, do not inherit it.
+    """
+    raw = os.environ.pop(BUILD_ENV_CREDENTIALS_ENV_VAR, None)
+    if not raw:
+        return {}
+    try:
+        return {
+            str(netloc): (str(username), str(password))
+            for netloc, (username, password) in json.loads(raw).items()
+        }
+    except (AttributeError, TypeError, ValueError):
+        logger.debug("Ignoring malformed inherited credentials")
+        return {}
 
 
 class Credentials(NamedTuple):
@@ -249,7 +274,11 @@ class MultiDomainBasicAuth(AuthBase):
         self.prompting = prompting
         self.index_urls = index_urls
         self.keyring_provider = keyring_provider
-        self.passwords: dict[str, AuthInfo] = {}
+        self.passwords: dict[str, AuthInfo] = dict(_inherited_credentials())
+        # Credentials looked up for a subprocess, misses included, so a build
+        # with several sdists does not query keyring again for every one. Kept
+        # out of passwords, which is offered to every request.
+        self._child_credentials: dict[str, AuthInfo] = {}
         # When the user is prompted to enter credentials and keyring is
         # available, we will offer to save them. If the user accepts,
         # this value is set to the credentials they entered. After the
@@ -408,6 +437,36 @@ class MultiDomainBasicAuth(AuthBase):
                 return kr_auth
 
         return username, password
+
+    def credentials_for(
+        self, urls: Iterable[str], *, allow_keyring: bool = False
+    ) -> dict[str, AuthInfo]:
+        """Return the credentials known for ``urls``, keyed by netloc.
+
+        Only what a subprocess cannot work out for itself is returned: it reads
+        the same netrc and gets the same index URLs, so credentials from those
+        are left to it. Nothing here prompts, and keyring is left alone unless
+        the caller asks for it, since a lookup can be slow or itself ask the
+        user to unlock a store.
+        """
+        allow_keyring = allow_keyring and self.use_keyring
+        found: dict[str, AuthInfo] = {}
+        for url in urls:
+            netloc = split_auth_netloc_from_url(url)[1]
+            if not netloc or netloc in found:
+                continue
+
+            username, password = self.passwords.get(netloc, (None, None))
+            if not (username and password) and allow_keyring:
+                if netloc not in self._child_credentials:
+                    self._child_credentials[netloc] = self._get_new_credentials(
+                        url, allow_netrc=False, allow_keyring=True
+                    )
+                username, password = self._child_credentials[netloc]
+
+            if username and password:
+                found[netloc] = (username, password)
+        return found
 
     def _get_url_and_credentials(
         self, original_url: str
