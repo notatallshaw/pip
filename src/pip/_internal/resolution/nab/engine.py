@@ -203,6 +203,12 @@ class PipProvider:
         self.deps_cache: dict[str, dict[Version, dict[str, VersionRange]]] = {}
         self.dep_texts: dict[str, dict[Version, dict[str, str]]] = {}
         self._widened: dict[tuple[str, Version], VersionRange] = {}
+        # One ``[version, +inf)`` range per neighbour bound widening asks for,
+        # keyed by the version as spelled. Adjacent versions of the same
+        # project share their bounds, so the specifier parse behind each one
+        # is paid once, and keying on the text keeps two equal versions that
+        # are spelled differently out of each other's entry.
+        self._floors: dict[str, VersionRange] = {}
         self._positive_ranges: Mapping[str, RangeProtocol[Version]] = {}
         # prioritize's candidate count, per project, per range. Nested rather
         # than keyed on a (project, range) tuple so the hot path allocates
@@ -686,9 +692,16 @@ class PipProvider:
                     above += 1
         lower = universe[below - 1] if below else None
         upper = universe[above] if above < len(universe) else None
-        widened = VersionRange.from_bounds(
-            lower, upper, include_lower=False, include_upper=False
-        )
+        if (lower is not None and lower.local is not None) or (
+            upper is not None and upper.local is not None
+        ):
+            # A cut inside a version's local family cannot be named: PEP 440
+            # allows a local segment only on ``==`` and ``!=``, both of which
+            # land on the version itself, and a label has no least neighbour
+            # below it, so no run of exclusions walks down to one. Keep the
+            # exact singleton rather than a bound that is not the gap.
+            return None
+        widened = self._open_gap(lower, upper)
         self._widened[key] = widened
         return widened
 
@@ -712,6 +725,43 @@ class PipProvider:
         return constraint.snap_bounds(universe)
 
     # --------------------------------------------------------- internals
+
+    def _at_or_above(self, version: Version) -> VersionRange:
+        """The bare order interval ``[version, +inf)``.
+
+        ``>=`` is the one PEP 440 operator whose range is a plain cut: it
+        admits the version, its local versions and its post-releases, so
+        ``SpecifierSet.to_range`` hands back the interval itself rather than
+        a filtered form of it.
+        """
+        text = str(version)
+        cached = self._floors.get(text)
+        if cached is None:
+            cached = SpecifierSet(f">={text}").to_range()
+            self._floors[text] = cached
+        return cached
+
+    def _open_gap(self, lower: Version | None, upper: Version | None) -> VersionRange:
+        """The open interval ``(lower, upper)``, either end ``None`` for open.
+
+        Named by its complement and inverted, rather than built end by end.
+        Everything at or below ``lower`` is the union of ``lower``'s own
+        singleton with the complement of ``[lower, +inf)``, everything at or
+        above ``upper`` is ``[upper, +inf)``, and what neither covers is the
+        gap. Going through the complement also drops the pre-release opt-in
+        region a ``>=`` on a pre-release would otherwise carry in, which is
+        what makes the result the gap and nothing else.
+        """
+        outside = VersionRange.empty()
+        if lower is not None:
+            outside = (
+                self._at_or_above(lower)
+                .complement()
+                .union(VersionRange.singleton(lower))
+            )
+        if upper is not None:
+            outside = outside.union(self._at_or_above(upper))
+        return outside.complement()
 
     def _candidate(
         self, project_name: NormalizedName, version: Version
