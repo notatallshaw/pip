@@ -2,7 +2,7 @@ CacheControl==0.14.4
 distlib==0.4.3
 distro==1.9.0
 msgpack==1.2.1
-packaging==26.3
+packaging==26.3.dev0  # nab's fork: pypa/packaging @ 6f52c6b plus nab's vendoring patch
 platformdirs==4.11.0
 pyproject-hooks==1.2.0
 requests==2.34.2
@@ -11,8 +11,9 @@ requests==2.34.2
     urllib3==2.7.0
 rich==14.2.0
     pygments==2.20.0
-resolvelib==1.2.1
 setuptools==70.3.0
 tomli==2.4.1
 tomli-w==1.2.0
 truststore==0.10.4
+nab-provider==0.0.13.dev0
+nab-resolver==0.0.13.dev0
