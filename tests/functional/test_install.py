@@ -2048,6 +2048,36 @@ def test_double_install(script: PipTestEnvironment) -> None:
     assert msg not in result.stderr
 
 
+def test_install_already_satisfied_does_not_query_the_index(
+    script: PipTestEnvironment,
+) -> None:
+    """
+    Installing a requirement that the environment already satisfies makes no
+    request to the index. The installed distribution is offered to the
+    resolver first, and the index listing behind it is only fetched if the
+    resolver asks for a second candidate.
+    """
+    create_basic_wheel_for_package(script, "pkg", "1.0")
+    script.pip(
+        "install",
+        "--no-index",
+        "--find-links",
+        script.scratch_path,
+        "pkg",
+    )
+
+    # Stock the index so that a stray request still resolves and the request
+    # count is the only thing left to fail on.
+    server = make_mock_server()
+    server.mock.side_effect = [package_page({})]
+    url = f"http://{server.host}:{server.port}/simple/"
+    with server_running(server):
+        result = script.pip("install", "--index-url", url, "pkg")
+
+    assert "Requirement already satisfied: pkg" in result.stdout, str(result)
+    assert server.mock.call_count == 0, server.mock.call_args_list
+
+
 def test_double_install_fail(
     script: PipTestEnvironment, data: TestData, resolver_variant: ResolverVariant
 ) -> None:
