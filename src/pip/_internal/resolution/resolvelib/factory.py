@@ -767,20 +767,11 @@ class Factory:
 
         return DistributionNotFound(f"No matching distribution found for {req}")
 
-    def _has_any_candidates(self, project_name: str) -> bool:
+    def _has_any_candidates(self, project_name: NormalizedName) -> bool:
         """
-        Check if there are any candidates available for the project name.
+        Check if there are any distributions available for the project name.
         """
-        return any(
-            self.find_candidates(
-                project_name,
-                requirements={project_name: []},
-                incompatibilities={},
-                constraint=Constraint.empty(),
-                prefers_installed=True,
-                is_satisfied_by=lambda r, c: True,
-            )
-        )
+        return bool(self._finder.find_all_candidates(project_name))
 
     def get_installation_error(
         self,
@@ -867,12 +858,21 @@ class Factory:
             constraint_text = f"{key}{constraints[key].format_for_error()}"
             msg += f"\n    The user requested (constraint) {constraint_text}"
 
-        # Check for causes that had no candidates
-        causes = set()
+        # Point out any project in the conflict that has no distributions at
+        # all. A requirement that names its candidate directly, such as a
+        # direct URL or the running interpreter, is not looked up on an index.
+        conflicting_projects = set()
+        directly_named = set()
         for req, _ in e.causes:
-            causes.add(req.name)
+            conflicting_projects.add(req.project_name)
+            if req.get_candidate_lookup()[0] is not None:
+                directly_named.add(req.project_name)
 
-        no_candidates = {c for c in causes if not self._has_any_candidates(c)}
+        no_candidates = {
+            project
+            for project in conflicting_projects - directly_named
+            if not self._has_any_candidates(project)
+        }
         if no_candidates:
             msg = (
                 msg

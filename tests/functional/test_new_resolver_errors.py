@@ -193,3 +193,56 @@ def test_new_resolver_no_versions_available_hint(script: PipTestEnvironment) -> 
         "matching distributions available for your environment:\n"
         "    incompatible-dep\n" in result.stdout
     ), str(result)
+
+
+def test_new_resolver_no_versions_available_hint_not_shown(
+    script: PipTestEnvironment,
+) -> None:
+    """
+    The no-distributions hint is not shown when every conflicting package
+    does have distributions available.
+    """
+    create_basic_wheel_for_package(script, "pkg", "1.0")
+    create_basic_wheel_for_package(script, "pkg", "2.0")
+
+    result = script.pip(
+        "install",
+        "--no-cache-dir",
+        "--no-index",
+        "--find-links",
+        script.scratch_path,
+        "pkg[ext]>1",
+        "pkg==1.0",
+        expect_error=True,
+    )
+
+    assert "ResolutionImpossible" in result.stderr, str(result)
+    assert (
+        "Additionally, some packages in these conflicts have no "
+        "matching distributions available for your environment"
+    ) not in result.stdout, str(result)
+
+
+def test_new_resolver_no_versions_available_hint_skips_direct_url(
+    script: PipTestEnvironment,
+) -> None:
+    """
+    A requirement that names a distribution directly is not looked up on an
+    index, so it is never reported as having no distributions.
+    """
+    wheel = create_basic_wheel_for_package(script, "pkg", "1.0")
+
+    result = script.pip(
+        "install",
+        "--no-cache-dir",
+        "--no-index",
+        f"pkg @ {wheel.as_uri()}",
+        "pkg==2.0",
+        expect_error=True,
+    )
+
+    assert "ResolutionImpossible" in result.stderr, str(result)
+    assert (
+        "Additionally, some packages in these conflicts have no "
+        "matching distributions available for your environment"
+    ) not in result.stdout, str(result)

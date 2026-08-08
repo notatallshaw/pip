@@ -1,0 +1,3 @@
+Only show the "no matching distributions available for your environment" hint
+for packages that really have no distributions, instead of on every dependency
+conflict with more than one cause.
