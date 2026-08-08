@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import itertools
 import math
-from collections.abc import Iterable, Sequence
-from typing import TYPE_CHECKING
+from collections.abc import Iterable, Iterator, Sequence
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -292,3 +293,36 @@ def test_conflict_promoted_get_preference(provider: PipProvider) -> None:
     pref_other = provider.get_preference("normal-pkg", {}, {}, info, [])
 
     assert pref < pref_other
+
+
+class UnvisitableCandidates(Sequence[Candidate]):
+    """A candidate sequence that refuses to be visited.
+
+    ``FoundCandidates`` fetches, extracts and builds distributions as it is
+    walked, so it is only cheap for as long as nobody walks it.
+    """
+
+    def __getitem__(self, index: Any) -> Any:
+        raise AssertionError("the candidate sequence was indexed")
+
+    def __iter__(self) -> Iterator[Candidate]:
+        raise AssertionError("the candidate sequence was iterated")
+
+    def __len__(self) -> int:
+        raise AssertionError("the candidate sequence was measured")
+
+
+def test_get_preference_does_not_visit_candidates(provider: PipProvider) -> None:
+    """Ranking a package looks only at the requirements pointing at it.
+
+    Visiting the candidates of every package under consideration would mean
+    downloading and building the world before the resolver picks anything.
+    """
+    # resolvelib hands the provider a chain over the criterion's candidates,
+    # so the sequence itself is only touched if the provider consumes it.
+    candidates = {"pkg": itertools.chain(UnvisitableCandidates())}
+    information = {"pkg": [build_req_info("pkg>=1.0")]}
+
+    preference = provider.get_preference("pkg", {}, candidates, information, [])
+
+    assert preference == (True, True, True, True, math.inf, False, "pkg")
