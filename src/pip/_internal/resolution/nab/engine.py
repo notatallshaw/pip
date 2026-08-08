@@ -708,21 +708,15 @@ class PipProvider:
     def narrow_for_display(
         self, package: object, constraint: RangeProtocol[Version]
     ) -> RangeProtocol[Version]:
-        """Map a widened range back onto versions that exist, for the message."""
-        if not isinstance(package, str):
-            return constraint
-        project_name, _ = split_key(package)
-        if not self._index.is_listed(project_name):
-            # Nothing widened a package that was never listed, so there is
-            # nothing to map back, and asking would buy a request to render
-            # a message.
-            return constraint
-        universe = [candidate.version for candidate in self._versions(project_name)]
-        if not universe or not isinstance(constraint, VersionRange):
-            return constraint
-        if all(version in constraint for version in universe):
-            return VersionRange.full(admit_arbitrary=False)
-        return constraint.snap_bounds(universe)
+        """Return the constraint unchanged.
+
+        Pulling a range's ends in onto versions that exist needs
+        ``VersionRange.snap_bounds``, which released packaging does not have.
+        Widening already picks its ends from the listed neighbours of the
+        span, so an unnarrowed range is one whose ends are versions of the
+        project, and the protocol lets a provider return its input.
+        """
+        return constraint
 
     # --------------------------------------------------------- internals
 
