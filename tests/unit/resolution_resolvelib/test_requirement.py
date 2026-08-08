@@ -5,8 +5,8 @@ import pytest
 
 from pip._vendor.resolvelib import BaseReporter, Resolver
 
-from pip._internal.resolution.resolvelib.base import Candidate, Constraint, Requirement
-from pip._internal.resolution.resolvelib.factory import Factory
+from pip._internal.resolution.model.base import Candidate, Constraint, Requirement
+from pip._internal.resolution.model.factory import Factory
 from pip._internal.resolution.resolvelib.provider import PipProvider
 
 from tests.lib import TestData

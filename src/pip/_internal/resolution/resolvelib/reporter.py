@@ -7,7 +7,7 @@ from typing import Any
 
 from pip._vendor.resolvelib.reporters import BaseReporter
 
-from .base import Candidate, Constraint, Requirement
+from pip._internal.resolution.model.base import Candidate, Constraint, Requirement
 
 logger = getLogger(__name__)
 

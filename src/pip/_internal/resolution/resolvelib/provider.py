@@ -12,11 +12,10 @@ from typing import (
 from pip._vendor.resolvelib.providers import AbstractProvider
 
 from pip._internal.req.req_install import InstallRequirement
-
-from .base import Candidate, Constraint, Requirement
-from .candidates import REQUIRES_PYTHON_IDENTIFIER
-from .factory import Factory
-from .requirements import ExplicitRequirement
+from pip._internal.resolution.model.base import Candidate, Constraint, Requirement
+from pip._internal.resolution.model.candidates import REQUIRES_PYTHON_IDENTIFIER
+from pip._internal.resolution.model.factory import Factory
+from pip._internal.resolution.model.requirements import ExplicitRequirement
 
 if TYPE_CHECKING:
     from pip._vendor.resolvelib.providers import Preference

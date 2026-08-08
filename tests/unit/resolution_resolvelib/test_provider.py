@@ -9,22 +9,22 @@ import pytest
 from pip._vendor.resolvelib.resolvers import RequirementInformation
 
 from pip._internal.req.constructors import install_req_from_req_string
-from pip._internal.resolution.resolvelib.base import Candidate
-from pip._internal.resolution.resolvelib.candidates import REQUIRES_PYTHON_IDENTIFIER
-from pip._internal.resolution.resolvelib.factory import Factory
+from pip._internal.resolution.model.base import Candidate
+from pip._internal.resolution.model.candidates import REQUIRES_PYTHON_IDENTIFIER
+from pip._internal.resolution.model.factory import Factory
+from pip._internal.resolution.model.requirements import (
+    ExplicitRequirement,
+    SpecifierRequirement,
+)
 from pip._internal.resolution.resolvelib.provider import (
     _CONFLICT_PRIORITY_THRESHOLD,
     PipProvider,
-)
-from pip._internal.resolution.resolvelib.requirements import (
-    ExplicitRequirement,
-    SpecifierRequirement,
 )
 
 if TYPE_CHECKING:
     from pip._vendor.resolvelib.providers import Preference
 
-    from pip._internal.resolution.resolvelib.base import Candidate, Requirement
+    from pip._internal.resolution.model.base import Candidate, Requirement
 
     PreferenceInformation = RequirementInformation[Requirement, Candidate]
 

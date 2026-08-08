@@ -19,15 +19,14 @@ from pip._internal.req.constructors import install_req_extend_extras
 from pip._internal.req.req_install import InstallRequirement
 from pip._internal.req.req_set import RequirementSet
 from pip._internal.resolution.base import BaseResolver, InstallRequirementProvider
+from pip._internal.resolution.model.base import Candidate, Requirement
+from pip._internal.resolution.model.factory import Factory
 from pip._internal.resolution.resolvelib.provider import PipProvider
 from pip._internal.resolution.resolvelib.reporter import (
     PipDebuggingReporter,
     PipReporter,
 )
 from pip._internal.utils.packaging import get_requirement
-
-from .base import Candidate, Requirement
-from .factory import Factory
 
 if TYPE_CHECKING:
     from pip._vendor.resolvelib.resolvers import Result as RLResult
