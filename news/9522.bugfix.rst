@@ -1,0 +1,3 @@
+Offer the already-installed distribution to the resolver once during an
+upgrade, instead of once for every older version on the index, which made pip
+report backtracking that was not happening.

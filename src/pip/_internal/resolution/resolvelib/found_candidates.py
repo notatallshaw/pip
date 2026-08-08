@@ -92,12 +92,14 @@ def _iter_built_with_inserted(
     equivalent candidates, or after all other candidates if they are all newer.
     """
     versions_found: set[_BaseVersion] = set()
+    installed_yielded = False
     for version, func in infos:
         if version in versions_found:
             continue
         # If the installed candidate is better, yield it first.
-        if installed.version >= version:
+        if not installed_yielded and installed.version >= version:
             yield installed
+            installed_yielded = True
             versions_found.add(installed.version)
         candidate = func()
         if candidate is None:
@@ -106,7 +108,7 @@ def _iter_built_with_inserted(
         versions_found.add(version)
 
     # If the installed candidate is older than all other candidates.
-    if installed.version not in versions_found:
+    if not installed_yielded:
         yield installed
 
 
