@@ -12,7 +12,7 @@ import os
 from collections.abc import Callable
 from functools import partial
 from optparse import Values
-from typing import Any, TypeVar
+from typing import Any, Literal, TypeVar
 
 from pip._internal.build_env import (
     BuildEnvironmentInstaller,
@@ -61,6 +61,8 @@ from pip._internal.utils.temp_dir import (
 )
 
 logger = logging.getLogger(__name__)
+
+ResolverVariant = Literal["resolvelib", "legacy"]
 
 
 def should_ignore_regular_constraints() -> bool:
@@ -147,7 +149,7 @@ class RequirementCommand(IndexGroupCommand):
         self.cmd_opts.add_option(cmdoptions.no_clean())
 
     @staticmethod
-    def determine_resolver_variant(options: Values) -> str:
+    def determine_resolver_variant(options: Values) -> ResolverVariant:
         """Determines which resolver should be used, based on the given options."""
         if "legacy-resolver" in options.deprecated_features_enabled:
             return "legacy"
@@ -176,7 +178,14 @@ class RequirementCommand(IndexGroupCommand):
         legacy_resolver = False
 
         resolver_variant = cls.determine_resolver_variant(options)
-        if resolver_variant == "resolvelib":
+        if resolver_variant == "legacy":
+            legacy_resolver = True
+            lazy_wheel = False
+            if "fast-deps" in options.features_enabled:
+                logger.warning(
+                    "fast-deps has no effect when used with the legacy resolver."
+                )
+        else:
             lazy_wheel = "fast-deps" in options.features_enabled
             if lazy_wheel:
                 logger.warning(
@@ -185,13 +194,6 @@ class RequirementCommand(IndexGroupCommand):
                     "This experimental feature is enabled through "
                     "--use-feature=fast-deps and it is not ready for "
                     "production."
-                )
-        else:
-            legacy_resolver = True
-            lazy_wheel = False
-            if "fast-deps" in options.features_enabled:
-                logger.warning(
-                    "fast-deps has no effect when used with the legacy resolver."
                 )
 
         # Handle build constraints

@@ -30,6 +30,7 @@ from pip._internal.cli import cmdoptions
 from pip._internal.cli.cmdoptions import make_target_python
 from pip._internal.cli.req_command import (
     RequirementCommand,
+    ResolverVariant,
     with_cleanup,
 )
 from pip._internal.cli.status_codes import ERROR, SUCCESS
@@ -668,7 +669,7 @@ class InstallCommand(RequirementCommand):
             return None
 
     def _warn_about_conflicts(
-        self, conflict_details: ConflictDetails, resolver_variant: str
+        self, conflict_details: ConflictDetails, resolver_variant: ResolverVariant
     ) -> None:
         package_set, (missing, conflicting) = conflict_details
         if not missing and not conflicting:
@@ -711,7 +712,7 @@ class InstallCommand(RequirementCommand):
                     requirement=req,
                     dep_name=dep_name,
                     dep_version=dep_version,
-                    you=("you" if resolver_variant == "resolvelib" else "you'll"),
+                    you=("you'll" if resolver_variant == "legacy" else "you"),
                 )
                 parts.append(message)
 

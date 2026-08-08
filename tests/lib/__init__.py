@@ -17,7 +17,7 @@ from hashlib import sha256
 from io import BytesIO, StringIO
 from pathlib import Path
 from textwrap import dedent
-from typing import Any, AnyStr, Literal, Protocol, cast
+from typing import Any, AnyStr, Protocol, cast
 from urllib.request import pathname2url
 from zipfile import ZipFile
 
@@ -27,6 +27,7 @@ from scripttest import FoundDir, FoundFile, ProcResult, TestFileEnvironment
 from pip._vendor.packaging.utils import canonicalize_name
 
 from pip._internal.cli.main import main as pip_entry_point
+from pip._internal.cli.req_command import ResolverVariant as ResolverVariant
 from pip._internal.index.collector import LinkCollector
 from pip._internal.index.package_finder import PackageFinder
 from pip._internal.locations import get_major_minor_version
@@ -40,8 +41,6 @@ from pip._internal.network.session import PipSession
 from tests.lib.filesystem import create_file
 from tests.lib.venv import VirtualEnvironment
 from tests.lib.wheel import make_wheel
-
-ResolverVariant = Literal["resolvelib", "legacy"]
 
 DATA_DIR = pathlib.Path(__file__).parent.parent.joinpath("data").resolve()
 SRC_DIR = pathlib.Path(__file__).resolve().parent.parent.parent
