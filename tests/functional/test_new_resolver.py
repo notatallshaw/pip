@@ -1195,6 +1195,39 @@ def test_new_resolver_prefers_installed_in_upgrade_if_latest(
     script.assert_installed(pkg="2")
 
 
+@pytest.mark.parametrize("with_extra", [False, True], ids=["base", "extra"])
+def test_new_resolver_does_not_report_backtracking_for_direct_candidate(
+    script: PipTestEnvironment,
+    with_extra: bool,
+) -> None:
+    if with_extra:
+        wheel = create_basic_wheel_for_package(
+            script,
+            "base",
+            "1.0",
+            extras={"extra": ["missing"]},
+        )
+        requirement = f"{wheel}[extra]"
+    else:
+        wheel = create_basic_wheel_for_package(
+            script,
+            "base",
+            "1.0",
+            depends=["missing"],
+        )
+        requirement = str(wheel)
+
+    result = script.pip(
+        "install",
+        "--no-cache-dir",
+        "--no-index",
+        requirement,
+        expect_error=True,
+    )
+
+    assert "looking at multiple versions of base" not in result.stdout
+
+
 @pytest.mark.parametrize("N", [2, 10, 20])
 def test_new_resolver_presents_messages_when_backtracking_a_lot(
     script: PipTestEnvironment, N: int
