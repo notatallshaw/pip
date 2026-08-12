@@ -1,6 +1,7 @@
 import errno
+import importlib
 import sys
-import warnings
+from pathlib import Path
 from unittest import mock
 
 import pytest
@@ -10,10 +11,10 @@ from pip._vendor.requests.exceptions import InvalidProxyURL
 from pip._internal.commands import install
 from pip._internal.commands.install import (
     _prevent_further_imports,
+    _reify_lazy_imports,
     create_os_error_message,
     decide_user_install,
 )
-from pip._internal.utils.deprecation import PipDeprecationWarning
 
 
 class TestDecideUserInstall:
@@ -191,11 +192,11 @@ def test_create_os_error_message(
     assert msg == expected
 
 
-def test_prevent_further_imports_warns_on_import() -> None:
+def test_prevent_further_imports_blocks_import() -> None:
     """
-    An import issued after _prevent_further_imports() has run must emit a
-    deprecation warning via the registered audit hook, except when the
-    imported module lives in the standard library.
+    An import issued after _prevent_further_imports() has run must raise
+    ImportError via the registered audit hook, except when the imported
+    module lives in the standard library.
     """
     captured_hooks: list[mock.Mock] = []
 
@@ -206,19 +207,63 @@ def test_prevent_further_imports_warns_on_import() -> None:
     assert len(captured_hooks) == 1, "Expected exactly one audit hook to be registered"
     audit_hook = captured_hooks[0]
 
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
+    with pytest.raises(ImportError, match="unknown_module") as exc_info:
         audit_hook("import", ("unknown_module",))
+    assert "before installation starts" in str(exc_info.value)
 
-    assert len(caught) == 1
-    assert "unknown_module" in str(caught[0].message)
-    assert issubclass(caught[0].category, PipDeprecationWarning)
+    # A module recorded as missing raises a plain ImportError, as a real
+    # import attempt would have.
+    with mock.patch.object(install, "_MISSING_MODULES", {"ghost_module"}):
+        with pytest.raises(ImportError, match="No module named 'ghost_module'"):
+            audit_hook("import", ("ghost_module",))
 
-    # Standard library imports must not emit a warning: pip cannot shadow
-    # them with a freshly installed distribution.
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        audit_hook("import", ("os",))
-        audit_hook("import", ("encodings.iso8859_15",))
+    # Standard library imports must not be blocked: pip cannot shadow them
+    # with a freshly installed distribution.
+    audit_hook("import", ("os",))
+    audit_hook("import", ("encodings.iso8859_15",))
 
-    assert caught == []
+    # Non-import audit events pass through.
+    audit_hook("open", ("unknown_module",))
+
+
+def test_reify_lazy_imports_is_a_safe_no_op() -> None:
+    """Without pending lazy imports there is nothing to import."""
+    _reify_lazy_imports()
+
+
+@pytest.mark.skipif(sys.version_info < (3, 15), reason="needs PEP 810 lazy imports")
+def test_reify_lazy_imports_resolves_pending(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Pending lazy imports must all be imported, including ones only
+    registered by importing another (here: inner, via outer). A lazy import
+    of a missing module must be recorded, not raised, and one whose body
+    raises must not abort the sweep.
+    """
+    (tmp_path / "reify_outer.py").write_text(
+        "lazy import reify_inner\n"
+        "lazy import reify_missing\n"
+        "lazy import reify_broken\n"
+    )
+    (tmp_path / "reify_inner.py").write_text("lazy import reify_innermost\n")
+    (tmp_path / "reify_innermost.py").write_text("VALUE = 1\n")
+    (tmp_path / "reify_broken.py").write_text("raise ValueError('boom')\n")
+    monkeypatch.syspath_prepend(tmp_path)
+
+    missing_modules: set[str] = set()
+    with mock.patch.object(install, "_MISSING_MODULES", missing_modules):
+        try:
+            importlib.import_module("reify_outer")
+            assert "reify_inner" not in sys.modules
+
+            _reify_lazy_imports()
+
+            assert "reify_inner" in sys.modules
+            assert sys.modules["reify_innermost"].VALUE == 1
+            assert "reify_missing" not in sys.modules
+            assert "reify_missing" in missing_modules
+            assert "reify_broken" not in missing_modules
+        finally:
+            for name in ("reify_outer", "reify_inner", "reify_innermost"):
+                sys.modules.pop(name, None)
