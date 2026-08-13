@@ -236,17 +236,24 @@ def test_reify_lazy_imports_resolves_pending(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """
-    Pending lazy imports must all be imported, including ones only
-    registered by importing another (here: inner, via outer). A lazy import
-    of a missing module must be recorded, not raised, and one whose body
-    raises must not abort the sweep.
+    Pending non-stdlib lazy imports must all be imported, including ones
+    only registered by importing another (here: inner, via outer). Stdlib
+    targets and lazy attributes of non-packages stay pending, a missing
+    module is recorded rather than raised, and a module whose body raises
+    must not abort the sweep.
     """
+    stdlib_pending = next(
+        name for name in ("netrc", "colorsys", "mailbox") if name not in sys.modules
+    )
     (tmp_path / "reify_outer.py").write_text(
         "lazy import reify_inner\n"
         "lazy import reify_missing\n"
         "lazy import reify_broken\n"
+        f"lazy import {stdlib_pending}\n"
     )
-    (tmp_path / "reify_inner.py").write_text("lazy import reify_innermost\n")
+    (tmp_path / "reify_inner.py").write_text(
+        "lazy import reify_innermost\nlazy from reify_innermost import VALUE\n"
+    )
     (tmp_path / "reify_innermost.py").write_text("VALUE = 1\n")
     (tmp_path / "reify_broken.py").write_text("raise ValueError('boom')\n")
     monkeypatch.syspath_prepend(tmp_path)
@@ -264,6 +271,12 @@ def test_reify_lazy_imports_resolves_pending(
             assert "reify_missing" not in sys.modules
             assert "reify_missing" in missing_modules
             assert "reify_broken" not in missing_modules
+
+            # The audit hook permits stdlib imports, so stdlib targets are
+            # left pending, and a lazy attribute of a non-package is not a
+            # module to import at all.
+            assert stdlib_pending not in sys.modules
+            assert "reify_innermost.VALUE" not in missing_modules
         finally:
             for name in ("reify_outer", "reify_inner", "reify_innermost"):
                 sys.modules.pop(name, None)

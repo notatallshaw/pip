@@ -118,11 +118,13 @@ def _eagerly_import_modules() -> None:
 
 
 def _reify_lazy_imports() -> None:
-    """Import every module registered as lazily imported (PEP 810, 3.15+),
-    so no pending lazy import can trigger a real import mid-installation.
+    """Import pending lazy imports (PEP 810, 3.15+) that the audit hook
+    would otherwise block mid-installation.
 
-    Importing a module can register new lazy imports, so sweep
-    sys.lazy_modules until nothing new turns up.
+    Standard library targets stay pending: the hook permits stdlib imports,
+    so resolving them during installation is harmless. Importing a module
+    can register new lazy imports, so sweep sys.lazy_modules until nothing
+    new turns up.
     """
     lazy_modules = getattr(sys, "lazy_modules", None)
     if lazy_modules is None:  # Python < 3.15
@@ -130,11 +132,22 @@ def _reify_lazy_imports() -> None:
 
     attempted: set[str] = set()
     while True:
-        pending = [module for module in lazy_modules if module not in attempted]
+        pending = lazy_modules - attempted
         if not pending:
             return
-        attempted.update(pending)
-        for module in pending:
+        attempted |= pending
+        # Parents first, so a name like pkg.attr sees pkg already loaded.
+        for module in sorted(pending, key=lambda name: name.count(".")):
+            if module.partition(".")[0] in _STDLIB_MODULE_NAMES:
+                continue
+            if module in sys.modules:
+                continue
+            parent = module.rpartition(".")[0]
+            parent_module = sys.modules.get(parent) if parent else None
+            if parent_module is not None and not hasattr(parent_module, "__path__"):
+                # A dotted name under a non-package is a lazy attribute
+                # from `lazy from`, not a module.
+                continue
             try:
                 __import__(module)
             except ImportError:
