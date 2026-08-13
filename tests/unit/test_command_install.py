@@ -236,10 +236,10 @@ def test_reify_lazy_imports_resolves_pending(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """
-    Pending lazy imports must all be imported, including ones only
-    registered by importing another (here: inner, via outer). A lazy import
-    of a missing module must be recorded, not raised, and one whose body
-    raises must not abort the sweep.
+    Pending lazy imports must all be resolved, including ones only
+    registered by resolving another (here: inner, via outer). A lazy
+    import of a missing module or of a module whose body raises must not
+    abort the sweep.
     """
     (tmp_path / "reify_outer.py").write_text(
         "lazy import reify_inner\n"
@@ -251,19 +251,15 @@ def test_reify_lazy_imports_resolves_pending(
     (tmp_path / "reify_broken.py").write_text("raise ValueError('boom')\n")
     monkeypatch.syspath_prepend(tmp_path)
 
-    missing_modules: set[str] = set()
-    with mock.patch.object(install, "_MISSING_MODULES", missing_modules):
-        try:
-            importlib.import_module("reify_outer")
-            assert "reify_inner" not in sys.modules
+    try:
+        importlib.import_module("reify_outer")
+        assert "reify_inner" not in sys.modules
 
-            _reify_lazy_imports()
+        _reify_lazy_imports()
 
-            assert "reify_inner" in sys.modules
-            assert sys.modules["reify_innermost"].VALUE == 1
-            assert "reify_missing" not in sys.modules
-            assert "reify_missing" in missing_modules
-            assert "reify_broken" not in missing_modules
-        finally:
-            for name in ("reify_outer", "reify_inner", "reify_innermost"):
-                sys.modules.pop(name, None)
+        assert "reify_inner" in sys.modules
+        assert sys.modules["reify_innermost"].VALUE == 1
+        assert "reify_missing" not in sys.modules
+    finally:
+        for name in ("reify_outer", "reify_inner", "reify_innermost"):
+            sys.modules.pop(name, None)

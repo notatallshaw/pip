@@ -8,6 +8,7 @@ import os
 import shutil
 import site
 import sys
+import types
 from collections.abc import Iterator
 from optparse import SUPPRESS_HELP, Values
 from pathlib import Path
@@ -118,29 +119,39 @@ def _eagerly_import_modules() -> None:
 
 
 def _reify_lazy_imports() -> None:
-    """Import every module registered as lazily imported (PEP 810, 3.15+),
-    so no pending lazy import can trigger a real import mid-installation.
+    """Resolve pending lazy imports (PEP 810, 3.15+) so none can trigger a
+    real import mid-installation.
 
-    Importing a module can register new lazy imports, so sweep
-    sys.lazy_modules until nothing new turns up.
+    getattr on the owning module resolves a proxy and rebinds the name.
+    Resolving can create new pending lazy imports, but only in modules the
+    resolution itself added, so each round scans only modules no earlier
+    round has seen.
     """
-    lazy_modules = getattr(sys, "lazy_modules", None)
-    if lazy_modules is None:  # Python < 3.15
+    lazy_import_type = getattr(types, "LazyImportType", None)
+    if lazy_import_type is None:  # Python < 3.15
         return
 
-    attempted: set[str] = set()
+    seen: set[str] = set()
     while True:
-        pending = [module for module in lazy_modules if module not in attempted]
+        pending = []
+        for module_name in list(sys.modules):
+            if module_name in seen:
+                continue
+            seen.add(module_name)
+            namespace = getattr(sys.modules.get(module_name), "__dict__", None)
+            if not isinstance(namespace, dict):
+                continue
+            for name, value in list(namespace.items()):
+                if isinstance(value, lazy_import_type):
+                    pending.append((sys.modules[module_name], name))
         if not pending:
             return
-        attempted.update(pending)
-        for module in pending:
+        for module, name in pending:
+            # A failed resolution leaves the binding lazy, and its module
+            # is never rescanned, so this cannot loop.
             try:
-                __import__(module)
-            except ImportError:
-                _MISSING_MODULES.add(module)
+                getattr(module, name)
             except Exception:
-                # Importing executes arbitrary code, which can raise anything.
                 pass
 
 
