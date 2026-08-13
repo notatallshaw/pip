@@ -621,6 +621,7 @@ class TestReleaseControlOptions:
 
         # After transformation
         assert ":all:" in options.release_control.all_releases
+        assert options.release_control.get_ordered_args() == [("all_releases", ":all:")]
 
     def test_check_release_control_exclusive_with_pre_and_all_releases(self) -> None:
         """Test that check raises CommandError when --pre used with --all-releases."""

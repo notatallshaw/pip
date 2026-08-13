@@ -449,6 +449,27 @@ def test_build_env_console_scripts_use_venv_python(
     assert result.stdout == "hello, world\n"
 
 
+@mock.patch("pip._internal.build_env.installer.call_subprocess")
+def test_subprocess_installer_forwards_pre_release_control(
+    mock_call_subprocess: mock.Mock, tmp_path: Path
+) -> None:
+    finder = make_test_finder()
+    assert finder.release_control is not None
+    finder.release_control.allow_all_releases()
+    installer = SubprocessBuildEnvironmentInstaller(finder)
+
+    installer.install(
+        requirements=["setuptools"],
+        prefix=Prefix(str(tmp_path)),
+        kind="build dependencies",
+        for_req=None,
+    )
+
+    args = mock_call_subprocess.call_args.args[0]
+    option_index = args.index("--all-releases")
+    assert args[option_index : option_index + 2] == ["--all-releases", ":all:"]
+
+
 class TestProxyPassthrough:
     @mock.patch("pip._internal.build_env.installer.call_subprocess")
     def test_install_forwards_no_proxy_env(

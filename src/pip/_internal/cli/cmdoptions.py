@@ -795,7 +795,7 @@ def check_release_control_exclusive(options: Values) -> None:
         raise CommandError("--pre cannot be used with --all-releases or --only-final.")
 
     # Transform --pre into --all-releases :all:
-    release_control.all_releases.add(":all:")
+    release_control.allow_all_releases()
 
 
 platforms: Callable[..., Option] = partial(

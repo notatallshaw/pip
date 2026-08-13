@@ -270,7 +270,7 @@ def handle_option_line(
         if opts.pre:
             if not opts.release_control:
                 opts.release_control = ReleaseControl()
-            opts.release_control.all_releases.add(":all:")
+            opts.release_control.allow_all_releases()
 
         if opts.release_control:
             if not finder.release_control:

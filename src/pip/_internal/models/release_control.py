@@ -71,6 +71,15 @@ class ReleaseControl:
         """
         return self._order[:]
 
+    def allow_all_releases(self) -> None:
+        """Allow all release types for every package and record the option."""
+        self.handle_mutual_excludes(
+            ":all:",
+            self.all_releases,
+            self.only_final,
+            "all_releases",
+        )
+
     def allows_prereleases(self, canonical_name: NormalizedName) -> bool | None:
         """
         Determine if pre-releases are allowed for a package.
