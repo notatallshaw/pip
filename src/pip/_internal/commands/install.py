@@ -122,6 +122,8 @@ def _reify_lazy_imports() -> None:
     """Resolve pending lazy imports (PEP 810, 3.15+) so none can trigger a
     real import mid-installation.
 
+    Namespaces owned by stdlib modules are skipped: stdlib code only
+    lazy-imports the stdlib, which the audit hook permits mid-install.
     getattr on the owning module resolves a proxy and rebinds the name.
     Resolving can create new pending lazy imports, but only in modules the
     resolution itself added, so each round scans only modules no earlier
@@ -138,6 +140,12 @@ def _reify_lazy_imports() -> None:
             if module_name in seen:
                 continue
             seen.add(module_name)
+            # __main__ is in stdlib_module_names but holds user code.
+            if (
+                module_name != "__main__"
+                and module_name.partition(".")[0] in _STDLIB_MODULE_NAMES
+            ):
+                continue
             namespace = getattr(sys.modules.get(module_name), "__dict__", None)
             if not isinstance(namespace, dict):
                 continue

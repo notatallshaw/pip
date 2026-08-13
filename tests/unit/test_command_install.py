@@ -1,6 +1,7 @@
 import errno
 import importlib
 import sys
+import types
 from pathlib import Path
 from unittest import mock
 
@@ -262,4 +263,40 @@ def test_reify_lazy_imports_resolves_pending(
         assert "reify_missing" not in sys.modules
     finally:
         for name in ("reify_outer", "reify_inner", "reify_innermost"):
+            sys.modules.pop(name, None)
+
+
+@pytest.mark.skipif(sys.version_info < (3, 15), reason="needs PEP 810 lazy imports")
+def test_reify_lazy_imports_skips_stdlib_owners(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    A proxy owned by a stdlib module stays pending, since the audit hook
+    permits its mid-install resolution, while __main__ holds user code and
+    must be resolved despite its stdlib-registered name.
+    """
+    (tmp_path / "reify_skipped.py").write_text("VALUE = 1\n")
+    (tmp_path / "reify_resolved.py").write_text("VALUE = 2\n")
+    monkeypatch.syspath_prepend(tmp_path)
+
+    stdlib_owner = types.ModuleType("netrc")
+    exec(
+        compile("lazy import reify_skipped\n", "<test>", "exec"),
+        stdlib_owner.__dict__,
+    )
+    main_owner = types.ModuleType("__main__")
+    exec(
+        compile("lazy import reify_resolved\n", "<test>", "exec"),
+        main_owner.__dict__,
+    )
+    monkeypatch.setitem(sys.modules, "netrc", stdlib_owner)
+    monkeypatch.setitem(sys.modules, "__main__", main_owner)
+
+    try:
+        _reify_lazy_imports()
+
+        assert "reify_skipped" not in sys.modules
+        assert "reify_resolved" in sys.modules
+    finally:
+        for name in ("reify_skipped", "reify_resolved"):
             sys.modules.pop(name, None)
