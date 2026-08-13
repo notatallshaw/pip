@@ -525,6 +525,9 @@ class TestProcessLine:
         # --pre should add :all: to release_control.all_releases
         assert finder._candidate_prefs.release_control is not None
         assert ":all:" in finder._candidate_prefs.release_control.all_releases
+        assert finder._candidate_prefs.release_control.get_ordered_args() == [
+            ("all_releases", ":all:")
+        ]
 
     def test_set_finder_all_releases(
         self, line_processor: LineProcessor, finder: PackageFinder
