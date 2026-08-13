@@ -26,7 +26,7 @@ from pip._internal.resolution.resolvelib.reporter import (
 )
 from pip._internal.utils.packaging import get_requirement
 
-from .base import Candidate, Requirement
+from .base import Candidate, Requirement, split_name
 from .factory import Factory
 
 if TYPE_CHECKING:
@@ -187,7 +187,7 @@ class Resolver(BaseResolver):
 
         if self.only_dependencies:
             for requested in collected.user_requested:
-                project_name = requested.partition("[")[0]
+                project_name, _ = split_name(requested)
                 req_set.requirements.pop(project_name, None)
 
         return req_set

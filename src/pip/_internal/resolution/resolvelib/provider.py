@@ -13,7 +13,7 @@ from pip._vendor.resolvelib.providers import AbstractProvider
 
 from pip._internal.req.req_install import InstallRequirement
 
-from .base import Candidate, Constraint, Requirement
+from .base import Candidate, Constraint, Requirement, split_name
 from .candidates import REQUIRES_PYTHON_IDENTIFIER
 from .factory import Factory
 from .requirements import ExplicitRequirement
@@ -67,13 +67,8 @@ def _get_with_identifier(
     """
     if identifier in mapping:
         return mapping[identifier]
-    # HACK: Theoretically we should check whether this identifier is a valid
-    # "NAME[EXTRAS]" format, and parse out the name part with packaging or
-    # some regular expression. But since pip's resolver only spits out three
-    # kinds of identifiers: normalized PEP 503 names, normalized names plus
-    # extras, and Requires-Python, we can cheat a bit here.
-    name, open_bracket, _ = identifier.partition("[")
-    if open_bracket and name in mapping:
+    name, _ = split_name(identifier)
+    if name in mapping:
         return mapping[name]
     return default
 
