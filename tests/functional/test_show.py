@@ -444,6 +444,28 @@ def test_show_populate_homepage_from_project_urls(
     assert "Home-page: https://example.com" in lines
 
 
+def test_show_skips_malformed_homepage_project_url(
+    script: PipTestEnvironment,
+) -> None:
+    dist_info = script.site_packages_path / "broken_project_url-1.0.dist-info"
+    dist_info.mkdir()
+    (dist_info / "METADATA").write_text(
+        "Metadata-Version: 2.1\n"
+        "Name: broken-project-url\n"
+        "Version: 1.0\n"
+        "Project-URL: Homepage\n"
+        "Project-URL: Homepage, https://valid.example/\n",
+        encoding="utf-8",
+    )
+
+    result = script.pip("show", "--verbose", "broken-project-url")
+    lines = result.stdout.splitlines()
+
+    assert "Home-page: https://valid.example/" in lines
+    assert "  Homepage" in lines
+    assert "  Homepage, https://valid.example/" in lines
+
+
 def test_show_license_expression(script: PipTestEnvironment, data: TestData) -> None:
     """
     Show License-Expression if present in metadata >= 2.4.

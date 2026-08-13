@@ -149,8 +149,10 @@ def search_packages_info(
         if not homepage:
             # It's common that there is a "homepage" Project-URL, but Home-page
             # remains unset (especially as PEP 621 doesn't surface the field).
-            for url in project_urls:
-                url_label, url = url.split(",", maxsplit=1)
+            for project_url in project_urls:
+                url_label, separator, url = project_url.partition(",")
+                if not separator:
+                    continue
                 normalized_label = normalize_project_url_label(url_label)
                 if normalized_label == "homepage":
                     homepage = url.strip()
