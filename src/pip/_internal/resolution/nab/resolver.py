@@ -155,17 +155,13 @@ class Resolver(BaseResolver):
         result = self._result = self._resolve(collected)
 
         req_set = RequirementSet(check_supported_wheels=check_supported_wheels)
-        # process candidates with extras last to ensure their base equivalent is
-        # already in the req_set if appropriate.
-        # Python's sort is stable so using a binary key function keeps relative order
-        # within both subsets.
+        # Base requirements must exist before their extras can be merged.
         for candidate in sorted(
             result.mapping.values(), key=lambda c: c.name != c.project_name
         ):
             ireq = candidate.get_install_requirement()
             if ireq is None:
                 if candidate.name != candidate.project_name:
-                    # extend existing req's extras
                     with contextlib.suppress(KeyError):
                         req = req_set.get_requirement(candidate.project_name)
                         req_set.add_named_requirement(
@@ -175,26 +171,19 @@ class Resolver(BaseResolver):
                         )
                 continue
 
-            # Check if there is already an installation under the same name,
-            # and set a flag for later stages to uninstall it, if needed.
             installed_dist = self.factory.get_dist_to_uninstall(candidate)
             if installed_dist is None:
-                # There is no existing installation -- nothing to uninstall.
                 ireq.should_reinstall = False
             elif self.factory.force_reinstall:
-                # The --force-reinstall flag is set -- reinstall.
                 ireq.should_reinstall = True
             elif installed_dist.version != candidate.version:
-                # The installation is different in version -- reinstall.
                 ireq.should_reinstall = True
             elif candidate.is_editable or installed_dist.editable:
-                # The incoming distribution is editable, or different in
-                # editable-ness to installation -- reinstall.
+                # A matching version does not establish unchanged editable source.
                 ireq.should_reinstall = True
             elif candidate.source_link and candidate.source_link.is_file:
-                # The incoming distribution is under file://
                 if candidate.source_link.is_wheel:
-                    # is a local wheel -- do nothing.
+                    # Use --force-reinstall to replace a same-version local wheel.
                     logger.info(
                         "%s is already installed with the same version as the "
                         "provided wheel. Use --force-reinstall to force an "
@@ -203,7 +192,6 @@ class Resolver(BaseResolver):
                     )
                     continue
 
-                # is a local sdist or path -- reinstall
                 ireq.should_reinstall = True
             else:
                 continue
@@ -234,22 +222,13 @@ class Resolver(BaseResolver):
     def get_installation_order(
         self, req_set: RequirementSet
     ) -> list[InstallRequirement]:
-        """Get order for installation of requirements in RequirementSet.
+        """Order dependencies first, with arbitrary ordering when cycles remain.
 
-        The returned list contains a requirement before another that depends on
-        it. This helps ensure that the environment is kept consistent as they
-        get installed one-by-one.
-
-        The current implementation creates a topological ordering of the
-        dependency graph, giving more weight to packages with less
-        or no dependencies, while breaking any cycles in the graph at
-        arbitrary points. We make no guarantees about where the cycle
-        would be broken, other than it *would* be broken.
+        Weight calculation prunes leaves from the stored result graph in place.
         """
         assert self._result is not None, "must call resolve() first"
 
         if not req_set.requirements:
-            # Nothing is left to install, so we do not need an order.
             return []
 
         graph = self._result.graph
@@ -266,51 +245,28 @@ class Resolver(BaseResolver):
 def get_topological_weights(
     graph: DependencyGraph, requirement_keys: set[str]
 ) -> dict[str | None, int]:
-    """Assign weights to each node based on how "deep" they are.
+    """Weight installation keys by leaf layer, then recorded path depths.
 
-    This implementation may change at any point in the future without prior
-    notice.
+    Prune leaves in place; each layer uses the graph's current non-root node count.
 
-    We first simplify the dependency graph by pruning any leaves and giving them
-    the highest weight: a package without any dependencies should be installed
-    first. This is done again and again in the same way, giving ever less weight
-    to the newly found leaves. The loop stops when no leaves are left: all
-    remaining packages have at least one dependency left in the graph.
+    The remaining graph uses the largest recorded depth from the None root.
+    Each path excludes repeated nodes.
 
-    Then we continue with the remaining graph, by taking the length for the
-    longest path to any node from root, ignoring any paths that contain a single
-    node twice (i.e. cycles). This is done through a depth-first search through
-    the graph, while keeping track of the path to the node.
-
-    Cycles in the graph result would result in node being revisited while also
-    being on its own path. In this case, take no action. This helps ensure we
-    don't get stuck in a cycle.
-
-    When assigning weight, the longer path (i.e. larger length) is preferred.
-
-    We are only interested in the weights of packages that are in the
-    requirement_keys.
+    Stop traversing installation keys after five recorded depths.
+    Other nodes have no recorded-depth limit.
     """
     path: set[str | None] = set()
     weights: dict[str | None, list[int]] = {}
 
     def visit(node: str | None) -> None:
         if node in path:
-            # We hit a cycle, so we'll break it here.
             return
 
-        # The walk is exponential and for pathologically connected graphs (which
-        # are the ones most likely to contain cycles in the first place) it can
-        # take until the heat-death of the universe. To counter this we limit
-        # the number of attempts to visit (i.e. traverse through) any given
-        # node. We choose a value here which gives decent enough coverage for
-        # fairly well behaved graphs, and still limits the walk complexity to be
-        # linear in nature.
+        # Only installation keys accumulate depths in weights.
         cur_weights = weights.get(node, [])
         if len(cur_weights) >= 5:
             return
 
-        # Time to visit the children!
         path.add(node)
         for child in graph[node]:
             visit(child)
@@ -322,49 +278,37 @@ def get_topological_weights(
         cur_weights.append(len(path))
         weights[node] = cur_weights
 
-    # Simplify the graph, pruning leaves that have no dependencies. This is
-    # needed for large graphs (say over 200 packages) because the `visit`
-    # function is slower for large/densely connected graphs, taking minutes.
-    # See https://github.com/pypa/pip/issues/10557
-    # We repeat the pruning step until we have no more leaves to remove.
     while True:
         leaves = set()
         for key in graph:
             if key is None:
                 continue
             for _child in graph[key]:
-                # This means we have at least one child
                 break
             else:
-                # No child.
                 leaves.add(key)
+
         if not leaves:
-            # We are done simplifying.
             break
-        # Calculate the weight for the leaves.
+
         weight = len(graph) - 1
         for leaf in leaves:
             if leaf not in requirement_keys:
                 continue
             weights[leaf] = [weight]
-        # Remove the leaves from the graph, making it simpler.
+
         for leaf in leaves:
             del graph[leaf]
         for children in graph.values():
             children.difference_update(leaves)
 
-    # Visit the remaining graph, this will only have nodes to handle if the
-    # graph had a cycle in it, which the pruning step above could not handle.
     # None is the virtual root joining all requested packages.
     visit(None)
 
-    # Sanity check: all requirement keys should be in the weights,
-    # and no other keys should be in the weights.
+    # Only installation keys may have weights.
     difference = set(weights.keys()).difference(requirement_keys)
     assert not difference, difference
 
-    # Now give back all the weights, choosing the largest ones from what we
-    # accumulated.
     return {node: max(wgts) for (node, wgts) in weights.items()}
 
 
@@ -372,12 +316,7 @@ def _req_set_item_sorter(
     item: tuple[str, InstallRequirement],
     weights: dict[str | None, int],
 ) -> tuple[int, str]:
-    """Key function used to sort install requirements for installation.
-
-    Based on the "weight" mapping calculated in ``get_installation_order()``.
-    The canonical package name is returned as the second member as a tie-
-    breaker to ensure the result is predictable, which is useful in tests.
-    """
+    """Break equal installation weights by canonical package name."""
     name = canonicalize_name(item[0])
     return weights[name], name
 
