@@ -12,9 +12,9 @@ exists.
 
 .. testsetup::
 
-    from pip._vendor.packaging.ranges import VersionRange
-    from pip._vendor.packaging.specifiers import SpecifierSet
-    from pip._vendor.packaging.version import Version
+    from packaging.ranges import VersionRange
+    from packaging.specifiers import SpecifierSet
+    from packaging.version import Version
 """
 
 from __future__ import annotations
@@ -24,8 +24,8 @@ import typing
 from typing import (
     TYPE_CHECKING,
     Any,
+    Literal,
     TypeVar,
-    Union,
 )
 
 from ._ranges import (
@@ -55,11 +55,41 @@ if TYPE_CHECKING:
     from .specifiers import SpecifierSet
 
 
-__all__ = ["VersionRange"]
+__all__ = ["RangeRelation", "SortedOrder", "VersionRange"]
 
 T = TypeVar("T")
-UnparsedVersion = Union[Version, str]
+UnparsedVersion = Version | str
 UnparsedVersionVar = TypeVar("UnparsedVersionVar", bound=UnparsedVersion)
+SortedOrder = Literal["ascending", "descending"]
+
+
+class RangeRelation(enum.Enum):
+    """How one range's members sit against another's.
+
+    The four members partition the ``(is_subset, is_disjoint)`` space: both
+    hold together only for an empty range, which is a subset of everything
+    and shares a member with nothing.
+    """
+
+    EMPTY = (True, True)
+    SUBSET = (True, False)
+    DISJOINT = (False, True)
+    OVERLAPPING = (False, False)
+
+    def __init__(self, is_subset: bool, is_disjoint: bool) -> None:
+        self.is_subset = is_subset
+        self.is_disjoint = is_disjoint
+
+    def __repr__(self) -> str:
+        return f"RangeRelation.{self.name}"
+
+
+# Bound once so the hot return paths load a module global instead of a class
+# attribute.
+_EMPTY_REL = RangeRelation.EMPTY
+_SUBSET_REL = RangeRelation.SUBSET
+_DISJOINT_REL = RangeRelation.DISJOINT
+_OVERLAPPING_REL = RangeRelation.OVERLAPPING
 
 #: The most ``!=`` exclusion fragments (``!=V`` points or ``!=P.*`` prefixes)
 #: that :meth:`VersionRange.to_specifier_set` will materialize to spell a
@@ -142,6 +172,97 @@ def _union_ranges(
             merged.append((lower, upper))
 
     return merged
+
+
+def _relate_bounds(
+    left: Sequence[Interval],
+    right: Sequence[Interval],
+) -> RangeRelation:
+    """Return the :class:`RangeRelation` for two sorted interval lists.
+
+    One two-pointer merge answers both without building the intersection or the
+    complement. The lists are canonical (sorted, non-overlapping, and
+    non-touching, since :func:`_union_ranges` merges across empty gaps), so a
+    covered left interval sits wholly inside one right interval rather than
+    spanning two: ``left`` is a subset when every one of its intervals is
+    covered, and the two are disjoint when no overlap is found at all. A partial
+    overlap rules out both, so the walk stops there.
+    """
+    matched = 0
+    left_index = right_index = 0
+    disjoint = True
+    while left_index < len(left) and right_index < len(right):
+        left_lower, left_upper = left[left_index]
+        right_lower, right_upper = right[right_index]
+
+        # ``max`` and ``min`` return their first argument on a tie, so both cuts
+        # are the left ones exactly when the overlap is the whole left interval.
+        lower = max(left_lower, right_lower)
+        upper = min(left_upper, right_upper)
+
+        if not range_is_empty(lower, upper):
+            if lower is left_lower and upper is left_upper:
+                matched += 1
+            else:
+                return _OVERLAPPING_REL
+            disjoint = False
+
+        # Advance whichever side has the smaller upper bound.
+        if left_upper < right_upper:
+            left_index += 1
+        else:
+            right_index += 1
+
+    if matched == len(left):
+        return _EMPTY_REL if disjoint else _SUBSET_REL
+    return _DISJOINT_REL if disjoint else _OVERLAPPING_REL
+
+
+def _subset_bounds(left: Sequence[Interval], right: Sequence[Interval]) -> bool:
+    """Return whether every version in ``left`` is also in ``right``.
+
+    The canonical lists let one two-pointer walk decide containment: skip the
+    right intervals that end too early, then check that the surviving one starts
+    early enough.
+    """
+    right_index = 0
+    right_len = len(right)
+    for left_lower, left_upper in left:
+        # A right interval ending below this one cannot cover it, and the left
+        # list ascends, so it cannot cover any later one either.
+        while right_index < right_len and right[right_index][1] < left_upper:
+            right_index += 1
+        if right_index == right_len:
+            return False
+        if right[right_index][0] > left_lower:
+            return False
+    return True
+
+
+def _disjoint_bounds(left: Sequence[Interval], right: Sequence[Interval]) -> bool:
+    """Return whether no version lies in both ``left`` and ``right``.
+
+    A two-pointer merge that stops at the first overlap.
+    """
+    left_index = right_index = 0
+    left_len = len(left)
+    right_len = len(right)
+    while left_index < left_len and right_index < right_len:
+        left_lower, left_upper = left[left_index]
+        right_lower, right_upper = right[right_index]
+
+        lower = max(left_lower, right_lower)
+        upper = min(left_upper, right_upper)
+        if not range_is_empty(lower, upper):
+            return False
+
+        # Advance whichever side has the smaller upper bound.
+        if left_upper < right_upper:
+            left_index += 1
+        else:
+            right_index += 1
+
+    return True
 
 
 def _complement_ranges(ranges: Sequence[Interval]) -> list[Interval]:
@@ -291,6 +412,142 @@ def _struct_admits(
         return admit_arbitrary and bounds == FULL_RANGE
 
     return matches_bounds_only(bounds, parsed)
+
+
+def _bisect_predicate(
+    items: Sequence[Any],
+    predicate: Callable[[Version], bool],
+    project: Callable[[Any], Version] | None = None,
+) -> int:
+    """First index whose ``predicate`` is true over an ascending list.
+
+    The predicate must be monotonic (false runs then true runs). Equivalent to
+    ``bisect.bisect_left`` on the mapped booleans, done by hand because the
+    ``key`` parameter for :mod:`bisect` only exists on Python 3.10 and later.
+    ``project`` maps a probed item to the version it sorts by; ``None`` means
+    the items are already :class:`~packaging.version.Version` instances.
+    """
+    low, high = 0, len(items)
+    while low < high:
+        mid = (low + high) // 2
+        item = items[mid]
+        if predicate(item if project is None else project(item)):
+            high = mid
+        else:
+            low = mid + 1
+    return low
+
+
+def _partition_indexes(
+    items: Sequence[Any],
+    lower: LowerBound,
+    upper: UpperBound,
+    project: Callable[[Any], Version] | None = None,
+    *,
+    descending: bool = False,
+) -> tuple[int, int]:
+    """Locate one interval's entries in a version-ordered list.
+
+    Returns the half-open index pair bounding the entries the interval
+    contains, so ``items[start:stop]`` are those entries in list order. On an
+    ascending list ``lower`` cuts the start and ``upper`` cuts the stop; a
+    descending list swaps which bound cuts which end. Both bound predicates
+    are monotonic over a version-ordered list either way, so each cut is one
+    bisection. ``project`` maps an item to the version it sorts by.
+    """
+    above = lower._above
+    below = upper._below
+    start_bound, stop_bound = (below, above) if descending else (above, below)
+
+    start = 0 if start_bound is None else _bisect_predicate(items, start_bound, project)
+    if stop_bound is None:
+        stop = len(items)
+    else:
+        stop = _bisect_predicate(items, lambda v: not stop_bound(v), project)
+    return start, stop
+
+
+def _make_project(
+    key: Callable[[Any], Version | str] | None,
+) -> Callable[[Any], Version]:
+    """Build the item-to-:class:`~packaging.version.Version` map for a sorted walk.
+
+    The bisections compare against bound predicates that only accept a
+    :class:`~packaging.version.Version`, so every probed item is coerced. An
+    item that does not parse cannot sit in version order at all, which is a
+    broken precondition rather than a non-match, so this raises rather than
+    dropping the item the way :meth:`VersionRange.filter` drops it.
+    """
+
+    def project(item: Any) -> Version:  # noqa: ANN401
+        raw: Version | str = item if key is None else key(item)
+        parsed = raw if isinstance(raw, Version) else coerce_version(raw)
+        if parsed is None:
+            raise ValueError(
+                f"{raw!r} does not parse as a version, so the given sequence "
+                f"is not in version order"
+            )
+        return parsed
+
+    return project
+
+
+def _check_order(
+    items: Sequence[Any], project: Callable[[Any], Version], *, descending: bool
+) -> None:
+    """Reject a sequence whose endpoints contradict the declared order.
+
+    One comparison of the two ends, which catches a list handed over in the
+    opposite order to the one named. It cannot prove the whole sequence is
+    ordered, and equal endpoints are accepted under either order.
+    """
+    if len(items) < 2:
+        return
+    first = project(items[0])
+    last = project(items[-1])
+    if last < first if not descending else first < last:
+        expected = "descending" if descending else "ascending"
+        raise ValueError(
+            f"assume_sorted={expected!r} but the sequence runs from {first} to {last}"
+        )
+
+
+def _lattice_release(version: Version, parts: int, *, above: bool) -> Version:
+    """The nearest ``parts``-component release to ``version`` on the lattice.
+
+    Truncates ``version``'s release to ``parts`` components, padding a shorter
+    release with zeros, to land on a lattice point at or below it. With
+    ``above`` the result must be strictly greater than ``version``, so a
+    truncation that lands at or below it is rounded up by one; otherwise a
+    truncation equal to ``version`` is kept and only a strictly smaller one is
+    rounded up.
+    """
+    release = version.release[:parts]
+    padded = (*release, *((0,) * (parts - len(release))))
+    candidate = Version.from_parts(epoch=version.epoch, release=padded)
+    if candidate > version or (not above and candidate == version):
+        return candidate
+    bumped = (*padded[:-1], padded[-1] + 1)
+    return Version.from_parts(epoch=version.epoch, release=bumped)
+
+
+def _release_boundary_point(
+    value: BoundaryVersion | Version | None, parts: int
+) -> Version | None:
+    """The lattice release one interval edge transitions membership at.
+
+    ``None`` for an unbounded (``-inf`` / ``+inf``) edge. A boundary sentinel
+    reports the smallest lattice release strictly above the version it sits
+    over (its final release when that version is a pre-release). A plain
+    version reports its own release projected onto the lattice: the release
+    itself when it is a lattice point, otherwise the smallest lattice release
+    above it.
+    """
+    if value is None:
+        return None
+    if isinstance(value, BoundaryVersion):
+        return _lattice_release(value.version, parts, above=True)
+    return _lattice_release(Version(value.base_version), parts, above=False)
 
 
 # Repr helpers:
@@ -905,7 +1162,8 @@ class VersionRange:
     :class:`~packaging.specifiers.SpecifierSet`.
 
     Construct via :meth:`~packaging.specifiers.SpecifierSet.to_range`, or with
-    the :meth:`full`, :meth:`empty`, and :meth:`singleton` class methods.
+    the :meth:`full`, :meth:`empty`, :meth:`singleton`, and :meth:`from_bounds`
+    class methods.
     Compose with :meth:`intersection`, :meth:`union`, :meth:`complement`, and
     :meth:`difference` (or the ``&`` / ``|`` / ``~`` / ``-`` operators). Test
     membership with ``in`` or :meth:`contains`, filter an iterable with
@@ -920,9 +1178,9 @@ class VersionRange:
     that opt-in scoped to those versions, so unrelated pre-releases are not
     admitted wholesale.
 
-    :meth:`intersection`, :meth:`union`, :meth:`difference`, and the
-    :meth:`is_subset` / :meth:`is_superset` / :meth:`is_disjoint` predicates
-    require both operands to share the same configured policy.
+    :meth:`intersection`, :meth:`union`, :meth:`difference`, :meth:`relation`,
+    and the :meth:`is_subset` / :meth:`is_superset` / :meth:`is_disjoint`
+    predicates require both operands to share the same configured policy.
 
     >>> r = SpecifierSet(">=1.0,<2.0").to_range()
     >>> "1.5" in r
@@ -998,7 +1256,8 @@ class VersionRange:
         raise TypeError(
             "cannot create 'VersionRange' instances directly; use "
             "SpecifierSet.to_range(), VersionRange.full(), "
-            "VersionRange.empty(), or VersionRange.singleton() instead"
+            "VersionRange.empty(), VersionRange.singleton(), or "
+            "VersionRange.from_bounds() instead"
         )
 
     @classmethod
@@ -1187,6 +1446,73 @@ class VersionRange:
         # ``0.dev0`` singleton is ``(-inf, 0.dev0]`` in canonical form.
         return cls._build(
             _canonical_floor(((lower, upper),)),
+            prereleases_configured=prereleases,
+        )
+
+    @classmethod
+    def from_bounds(
+        cls,
+        lower: Version | str | None = None,
+        upper: Version | str | None = None,
+        *,
+        include_lower: bool = True,
+        include_upper: bool = True,
+        prereleases: bool | None = None,
+    ) -> VersionRange:
+        """Return the raw version-order interval from ``lower`` to ``upper``.
+
+        A single interval in the PEP 440 total order. The bounds are pure order
+        cuts, not specifier semantics: ``None`` on a side is unbounded there.
+        Both ends are inclusive by default, so ``from_bounds(v, v)`` is
+        :meth:`singleton`; pass ``include_lower=False`` or ``include_upper=False``
+        for a half-open interval.
+
+        >>> "2.0" in VersionRange.from_bounds("1.0", "2.0")
+        True
+        >>> "2.0" in VersionRange.from_bounds("1.0", "2.0", include_upper=False)
+        False
+        >>> VersionRange.from_bounds("1.5", "1.5") == VersionRange.singleton("1.5")
+        True
+
+        Membership is decided by the bounds alone, so pre-releases, post-releases,
+        and locals inside them are members even where the matching specifier
+        would exclude them:
+
+        >>> "1.0.post1" in VersionRange.from_bounds("1.0", "2.0", include_lower=False)
+        True
+        >>> "1.0.post1" in SpecifierSet(">1.0,<2.0").to_range()
+        False
+        >>> "2.0rc1" in VersionRange.from_bounds("1.0", "2.0")
+        True
+        >>> "2.0rc1" in SpecifierSet(">=1.0,<2.0").to_range()
+        False
+
+        An inverted pair, or an equal pair with either end exclusive, is the
+        empty range; an unbounded pair is the versions-only full range.
+
+        >>> VersionRange.from_bounds("2.0", "1.0").is_empty
+        True
+        >>> VersionRange.from_bounds() == VersionRange.full(admit_arbitrary=False)
+        True
+
+        :raises packaging.version.InvalidVersion: if ``lower`` or ``upper`` is a
+            string that does not parse as a PEP 440 version.
+        """
+        if lower is not None and not isinstance(lower, Version):
+            lower = Version(lower)
+        if upper is not None and not isinstance(upper, Version):
+            upper = Version(upper)
+
+        if lower is not None and upper is not None:
+            closed = include_lower and include_upper
+            if lower > upper or (lower == upper and not closed):
+                return cls.empty(prereleases=prereleases)
+
+        lower_bound = NEG_INF if lower is None else LowerBound(lower, include_lower)
+        upper_bound = POS_INF if upper is None else UpperBound(upper, include_upper)
+
+        return cls._build(
+            _canonical_floor(((lower_bound, upper_bound),)),
             prereleases_configured=prereleases,
         )
 
@@ -1470,6 +1796,15 @@ class VersionRange:
         False
         >>> VersionRange.empty().is_subset(outer)
         True
+
+        A range with an exclusion is a subset of its span, but the span is not a
+        subset of it:
+
+        >>> punctured = SpecifierSet(">=1.0,<2.0,!=1.5").to_range()
+        >>> punctured.is_subset(outer)
+        True
+        >>> outer.is_subset(punctured)
+        False
         """
         self._check_policy_compat(other)
 
@@ -1480,11 +1815,51 @@ class VersionRange:
 
         # Plain ranges: subset reduces to bounds containment, no algebra needed.
         if self._is_plain() and other._is_plain():
-            return not intersect_ranges(self._bounds, _complement_ranges(other._bounds))
+            return _subset_bounds(self._bounds, other._bounds)
 
         # difference (unlike intersection with the one-way complement) resolves
         # ``===`` literals against both operands, so it stays correct for them.
         return self.difference(other).is_empty
+
+    def relation(self, other: VersionRange) -> RangeRelation:
+        """Return the :class:`RangeRelation` of ``self`` against ``other``.
+
+        :attr:`~RangeRelation.SUBSET` is containment,
+        :attr:`~RangeRelation.DISJOINT` is separation,
+        :attr:`~RangeRelation.OVERLAPPING` is neither, and
+        :attr:`~RangeRelation.EMPTY` is an empty ``self``, which is a subset
+        of everything and shares a member with nothing.
+
+        Both operands must share the same configured pre-release policy;
+        otherwise :exc:`ValueError` is raised.
+
+        >>> inner = SpecifierSet(">=1.5,<1.8").to_range()
+        >>> outer = SpecifierSet(">=1.0,<2.0").to_range()
+        >>> inner.relation(outer)
+        RangeRelation.SUBSET
+        >>> outer.relation(SpecifierSet(">=5.0").to_range())
+        RangeRelation.DISJOINT
+        >>> VersionRange.empty().relation(outer)
+        RangeRelation.EMPTY
+        """
+        # Identity settles both answers and the policy check with it.
+        if self is other:
+            return _EMPTY_REL if self.is_empty else _SUBSET_REL
+
+        self._check_policy_compat(other)
+
+        if self._is_plain() and other._is_plain():
+            # On plain ranges the bounds decide membership, so equal bounds
+            # settle both answers without a walk.
+            if self._bounds == other._bounds:
+                return _SUBSET_REL if self._bounds else _EMPTY_REL
+            return _relate_bounds(self._bounds, other._bounds)
+
+        # Literals, a live arbitrary admission, or a pre-release-excluding
+        # policy all put members outside the bounds, so defer to the algebra.
+        if self.is_subset(other):
+            return _EMPTY_REL if self.is_disjoint(other) else _SUBSET_REL
+        return _DISJOINT_REL if self.is_disjoint(other) else _OVERLAPPING_REL
 
     def is_superset(self, other: VersionRange) -> bool:
         """Return whether every member of other is also a member of self.
@@ -1516,12 +1891,19 @@ class VersionRange:
         True
         >>> a.is_disjoint(SpecifierSet(">=1.5,<2.5").to_range())
         False
+
+        A range pinned to a version the other excludes is disjoint from it:
+
+        >>> SpecifierSet("==1.5").to_range().is_disjoint(
+        ...     SpecifierSet(">=1.0,<2.0,!=1.5").to_range()
+        ... )
+        True
         """
         self._check_policy_compat(other)
 
         # Plain ranges: disjointness is an empty bounds intersection.
         if self._is_plain() and other._is_plain():
-            return not intersect_ranges(self._bounds, other._bounds)
+            return _disjoint_bounds(self._bounds, other._bounds)
         return self.intersection(other).is_empty
 
     def _same_releases(self, other: VersionRange) -> bool:
@@ -1540,6 +1922,8 @@ class VersionRange:
         iterable: Iterable[UnparsedVersionVar],
         prereleases: bool | None = None,
         key: None = ...,
+        *,
+        assume_sorted: None = None,
     ) -> Iterator[UnparsedVersionVar]: ...
 
     @typing.overload
@@ -1548,6 +1932,28 @@ class VersionRange:
         iterable: Iterable[T],
         prereleases: bool | None = None,
         key: Callable[[T], UnparsedVersion] = ...,
+        *,
+        assume_sorted: None = None,
+    ) -> Iterator[T]: ...
+
+    @typing.overload
+    def filter(
+        self,
+        iterable: Sequence[UnparsedVersionVar],
+        prereleases: bool | None = None,
+        key: None = ...,
+        *,
+        assume_sorted: SortedOrder,
+    ) -> Iterator[UnparsedVersionVar]: ...
+
+    @typing.overload
+    def filter(
+        self,
+        iterable: Sequence[T],
+        prereleases: bool | None = None,
+        key: Callable[[T], UnparsedVersion] = ...,
+        *,
+        assume_sorted: SortedOrder,
     ) -> Iterator[T]: ...
 
     def filter(
@@ -1555,6 +1961,8 @@ class VersionRange:
         iterable: Iterable[Any],
         prereleases: bool | None = None,
         key: Callable[[Any], Version | str] | None = None,
+        *,
+        assume_sorted: SortedOrder | None = None,
     ) -> Iterator[Any]:
         """Yield items from iterable whose version falls inside the range.
 
@@ -1565,13 +1973,56 @@ class VersionRange:
         ``prereleases=True`` would yield it). A flushed buffer comes after
         every in-place yield, so the output is not version-sorted.
 
-        The signature mirrors
+        ``assume_sorted`` names the version order ``iterable`` is already in,
+        and ``iterable`` must then be a sequence in that order whose every entry
+        parses as a version. Each interval's matching entries form one
+        contiguous slice of an ordered sequence, so two bisections per interval
+        locate them and the pre-release policy runs over those alone; that is
+        ``O(intervals * log(len(iterable)))`` plus the matches, rather than a
+        bound test per entry. The yielded items, and their order, are the same
+        either way. A sequence not in the named order gives a wrong answer, in
+        the way :func:`itertools.groupby` does on unsorted input; only a
+        contradiction between the two end entries is caught. A range carrying
+        ``===`` literals decides membership for strings the bounds do not
+        describe, so it falls back to a test per entry and ignores
+        ``assume_sorted``.
+
+        The signature otherwise mirrors
         :meth:`~packaging.specifiers.SpecifierSet.filter`.
 
         >>> r = SpecifierSet(">=1.0,<2.0").to_range()
         >>> list(r.filter(["0.9", "1.5", "2.0"]))
         ['1.5']
+
+        The same listing, newest first, filtered by bisection:
+
+        >>> listing = [Version(v) for v in ("3.0", "2.0", "1.5", "1.0")]
+        >>> list(r.filter(listing, assume_sorted="descending"))
+        [<Version('1.5')>, <Version('1.0')>]
+
+        ``key`` reaches the version inside a richer entry, on either path:
+
+        >>> files = [("1.5", "b.whl"), ("1.0", "a.whl")]
+        >>> list(r.filter(files, key=lambda f: f[0], assume_sorted="descending"))
+        [('1.5', 'b.whl'), ('1.0', 'a.whl')]
+
+        :raises ValueError: if ``assume_sorted`` is neither ``"ascending"`` nor
+            ``"descending"``, or if the two end entries contradict it; both come
+            from the call rather than the iterator. An entry the walk coerces
+            that does not parse as a version raises as it is reached.
+
+        .. versionchanged:: 26.4
+            Added the ``assume_sorted`` keyword.
         """
+        if assume_sorted is not None and assume_sorted not in (
+            "ascending",
+            "descending",
+        ):
+            raise ValueError(
+                f"assume_sorted must be 'ascending' or 'descending', "
+                f"not {assume_sorted!r}"
+            )
+
         region: tuple[Interval, ...] = ()
         if prereleases is None:
             # The region applies only under the autodetect default; a configured
@@ -1579,18 +2030,92 @@ class VersionRange:
             prereleases = self._prereleases_configured
             region = self._pre_region
 
+        # A region spanning the whole bounds force-admits every in-bounds
+        # pre-release, i.e. ``prereleases=True``; take the cheaper no-buffer
+        # path. (Confined to the no-literal branches: the admission path orders
+        # arbitrary strings differently under True than under the region.)
+        whole_region = bool(region) and region == self._bounds
+
+        if assume_sorted is not None and not self._admit and not self._reject:
+            # Arbitrary admission needs no gate: it only concerns strings that
+            # do not parse as a version, which ``_make_project`` rejects.
+            descending = assume_sorted == "descending"
+            sequence = typing.cast("Sequence[Any]", iterable)
+            project = _make_project(key)
+            _check_order(sequence, project, descending=descending)
+
+            if whole_region:
+                return self._filter_sorted(
+                    sequence, project, key, True, (), descending=descending
+                )
+            return self._filter_sorted(
+                sequence, project, key, prereleases, region, descending=descending
+            )
+
         arbitrary_active = self._arbitrary_active()
         if not self._admit and not self._reject and not arbitrary_active:
-            # A region spanning the whole bounds force-admits every in-bounds
-            # pre-release, i.e. ``prereleases=True``; take the cheaper no-buffer
-            # path. (Confined to this branch: the admission path orders arbitrary
-            # strings differently under True than under the region.)
-            if region and region == self._bounds:
+            if whole_region:
                 return filter_by_ranges(self._bounds, iterable, key, True)
             return filter_by_ranges(self._bounds, iterable, key, prereleases, region)
         return self._filter_with_admission(
             iterable, key, prereleases, arbitrary_active, region
         )
+
+    def _filter_sorted(
+        self,
+        versions: Sequence[Any],
+        project: Callable[[Any], Version],
+        key: Callable[[Any], Version | str] | None,
+        prereleases: bool | None,
+        region: tuple[Interval, ...],
+        *,
+        descending: bool,
+    ) -> Iterator[Any]:
+        """Filter a version-ordered sequence by bisecting each interval.
+
+        The bounds ascend, so a descending sequence walks them backwards; either
+        way the located slices concatenate in sequence order, which is what
+        :meth:`filter` yields. An interval is located only once the previous one
+        is exhausted, so a caller taking a prefix pays for the prefix.
+        """
+        bounds = tuple(reversed(self._bounds)) if descending else self._bounds
+
+        if prereleases is True:
+            for lower, upper in bounds:
+                start, stop = _partition_indexes(
+                    versions, lower, upper, project, descending=descending
+                )
+                for index in range(start, stop):
+                    yield versions[index]
+            return
+
+        exclude_prereleases = prereleases is False
+        plain = key is None
+        buffered: list[Any] = []
+        found_final = False
+
+        for lower, upper in bounds:
+            start, stop = _partition_indexes(
+                versions, lower, upper, project, descending=descending
+            )
+            for index in range(start, stop):
+                item = versions[index]
+                parsed = item if plain and item.__class__ is Version else project(item)
+                if not parsed.is_prerelease:
+                    found_final = True
+                    yield item
+                elif exclude_prereleases:
+                    continue
+                # PEP 440 default, mirroring ``filter_by_ranges``: buffer
+                # pre-releases and flush only if no final matches. One inside
+                # the opt-in region is force-admitted in place.
+                elif region and matches_bounds_only(region, parsed):
+                    yield item
+                elif not found_final:
+                    buffered.append(item)
+
+        if not found_final:
+            yield from buffered
 
     def _filter_with_admission(
         self,
@@ -1678,6 +2203,123 @@ class VersionRange:
 
         if not found_final:
             yield from all_nonfinal
+
+    def snap_bounds(self, versions: Iterable[Version | str]) -> VersionRange:
+        """Snap each finite bound inward onto the given versions.
+
+        Returns a subset of self that agrees with self on membership of every
+        given version: each finite segment end moves inward onto the outermost
+        given version its segment contains, and a bound with no given version
+        to land on is unchanged, as are unbounded ends.
+
+        Solver arithmetic and set algebra leave bounds at versions nobody
+        released; snapping them onto real versions yields the range a human
+        would write, and the subset guarantee means the snapped range never
+        admits a version the original excluded, even if the given list was
+        stale.
+
+        ``versions`` may be any iterable of versions or version strings, in any
+        order; it is sorted internally. ``snap_bounds([])`` returns an equal
+        range.
+
+        >>> r = SpecifierSet(">=1.0,<2.0").to_range()
+        >>> r.snap_bounds(["1.2", "1.5", "1.8"])
+        <VersionRange '[1.2, 1.8]'>
+        >>> SpecifierSet(">=1.0").to_range().snap_bounds(["1.2", "1.5"])
+        <VersionRange '[1.2, +inf)'>
+        >>> r.snap_bounds([]) == r
+        True
+
+        A version-order gap round-trips to the singleton it surrounds:
+
+        >>> versions = [Version("1.0"), Version("2.0"), Version("3.0")]
+        >>> gap = VersionRange.from_bounds(
+        ...     "1.0", "3.0", include_lower=False, include_upper=False
+        ... )
+        >>> gap.snap_bounds(versions) == VersionRange.singleton("2.0")
+        True
+
+        :raises packaging.version.InvalidVersion: if a string does not parse as a
+            PEP 440 version.
+        """
+        anchors = sorted(v if isinstance(v, Version) else Version(v) for v in versions)
+        if not self._bounds:
+            return self
+
+        simplified: list[Interval] = []
+        for lower, upper in self._bounds:
+            first_inside, first_above = _partition_indexes(anchors, lower, upper)
+            if first_inside >= first_above:
+                simplified.append((lower, upper))
+                continue
+            new_lower = (
+                lower
+                if lower.version is None
+                else LowerBound(anchors[first_inside], True)
+            )
+            new_upper = (
+                upper
+                if upper.version is None
+                else UpperBound(anchors[first_above - 1], True)
+            )
+            simplified.append((new_lower, new_upper))
+
+        return self._build(
+            _canonical_floor(tuple(simplified)),
+            admit=self._admit,
+            reject=self._reject,
+            admit_arbitrary=self._admit_arbitrary,
+            pre_region=self._pre_region,
+            prereleases_configured=self._prereleases_configured,
+        )
+
+    def release_intervals(
+        self, parts: int
+    ) -> tuple[tuple[Version | None, Version | None], ...]:
+        """The half-open release intervals on which this range is satisfied.
+
+        Projects the range onto the lattice of releases with ``parts`` numeric
+        components and returns the maximal ``[lower, upper)`` intervals it covers,
+        as ``(lower, upper)`` release pairs. ``None`` on a side is unbounded there.
+        Structure finer than the lattice, such as prereleases or posts between two
+        releases, is not represented.
+
+        >>> SpecifierSet(">=3.11.4").to_range().release_intervals(3)
+        ((<Version('3.11.4')>, None),)
+        >>> SpecifierSet("==3.11.4").to_range().release_intervals(3)
+        ((<Version('3.11.4')>, <Version('3.11.5')>),)
+
+        :raises ValueError: if ``parts`` is less than 1.
+        """
+        if parts < 1:
+            raise ValueError(f"parts must be at least 1, got {parts}")
+
+        intervals: list[tuple[Version | None, Version | None]] = []
+        for lower, upper in self._bounds:
+            lower_point = _release_boundary_point(lower.version, parts)
+            upper_point = _release_boundary_point(upper.version, parts)
+            if (
+                lower_point is not None
+                and upper_point is not None
+                and lower_point >= upper_point
+            ):
+                continue
+            if intervals:
+                prev_lower, prev_upper = intervals[-1]
+                if (
+                    prev_upper is not None
+                    and lower_point is not None
+                    and prev_upper >= lower_point
+                ):
+                    merged_upper = (
+                        None
+                        if upper_point is None
+                        else max(prev_upper, upper_point)
+                    )
+                    intervals[-1] = (prev_lower, merged_upper)
+                    continue
+            intervals.append((lower_point, upper_point))
+        return tuple(intervals)
 
     @classmethod
     def _from_specifier_set(cls, specifier_set: SpecifierSet) -> VersionRange:

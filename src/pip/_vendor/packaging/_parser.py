@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import ast
 from collections.abc import Sequence
-from typing import Literal, NamedTuple, Union
+from typing import Literal, NamedTuple, TypeAlias
 
 from ._tokenizer import DEFAULT_RULES, ParserSyntaxError, Tokenizer
 
@@ -86,10 +86,10 @@ class Op(Node):
 
 
 MarkerLogical = Literal["and", "or"]
-MarkerVar = Union[Variable, Value]
+MarkerVar = Variable | Value
 MarkerItem = tuple[MarkerVar, Op, MarkerVar]
-MarkerAtom = Union[MarkerItem, Sequence["MarkerAtom"]]
-MarkerList = list[Union["MarkerList", MarkerAtom, MarkerLogical]]
+MarkerAtom = MarkerItem | Sequence["MarkerAtom"]
+MarkerList: TypeAlias = 'list["MarkerList" | MarkerAtom | MarkerLogical]'
 
 
 class ParsedRequirement(NamedTuple):
@@ -394,8 +394,15 @@ def process_env_var(env_var: str) -> Variable:
 
 
 def process_python_str(python_str: str) -> Value:
-    value = ast.literal_eval(python_str)
-    return Value(str(value))
+    # QUOTED_STRING admits no prefix and no embedded delimiter, so an ASCII body
+    # holding no backslash, line break or NUL is what the literal parse returns.
+    # The rest keeps that parse, for the escapes it expands and the bodies it rejects.
+    body = python_str[1:-1]
+    if body.isascii() and not (
+        "\\" in body or "\n" in body or "\r" in body or "\0" in body
+    ):
+        return Value(body)
+    return Value(str(ast.literal_eval(python_str)))
 
 
 def _parse_marker_op(tokenizer: Tokenizer) -> Op:

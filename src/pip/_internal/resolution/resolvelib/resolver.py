@@ -27,7 +27,7 @@ from pip._internal.resolution.resolvelib.reporter import (
 from pip._internal.utils.packaging import get_requirement
 
 from .base import Candidate, Requirement
-from .factory import Factory
+from .factory import CollectedRootRequirements, Factory
 
 if TYPE_CHECKING:
     from pip._vendor.resolvelib.resolvers import Result as RLResult
@@ -76,10 +76,7 @@ class Resolver(BaseResolver):
         self.upgrade_strategy = upgrade_strategy
         self._result: Result | None = None
 
-    def resolve(
-        self, root_reqs: list[InstallRequirement], check_supported_wheels: bool
-    ) -> RequirementSet:
-        collected = self.factory.collect_root_requirements(root_reqs)
+    def _resolve(self, collected: CollectedRootRequirements) -> Result:
         provider = PipProvider(
             factory=self.factory,
             constraints=collected.constraints,
@@ -100,7 +97,7 @@ class Resolver(BaseResolver):
 
         try:
             limit_how_complex_resolution_can_be = 200000
-            result = self._result = resolver.resolve(
+            return resolver.resolve(
                 collected.requirements, max_rounds=limit_how_complex_resolution_can_be
             )
 
@@ -112,6 +109,12 @@ class Resolver(BaseResolver):
             raise error from e
         except ResolutionTooDeep:
             raise ResolutionTooDeepError from None
+
+    def resolve(
+        self, root_reqs: list[InstallRequirement], check_supported_wheels: bool
+    ) -> RequirementSet:
+        collected = self.factory.collect_root_requirements(root_reqs)
+        result = self._result = self._resolve(collected)
 
         req_set = RequirementSet(check_supported_wheels=check_supported_wheels)
         # process candidates with extras last to ensure their base equivalent is
