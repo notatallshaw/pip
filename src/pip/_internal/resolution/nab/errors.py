@@ -9,16 +9,12 @@ from pip._vendor.nab_resolver.candidate_provider import CandidateProvider
 from pip._vendor.nab_resolver.errors import ResolutionError
 from pip._vendor.nab_resolver.root import ROOT
 from pip._vendor.nab_resolver.types import Incompatibility
-from pip._vendor.resolvelib.resolvers import (
-    RequirementInformation,
-    ResolutionImpossible,
-)
 
 from pip._internal.exceptions import InstallationError
+from pip._internal.resolution.nab.base import Constraint, Requirement, RequirementCause
+from pip._internal.resolution.nab.factory import Factory
 from pip._internal.resolution.nab.host import NativeHost, Request
 from pip._internal.resolution.nab.ranges import CandidateKey
-from pip._internal.resolution.resolvelib.base import Constraint, Requirement
-from pip._internal.resolution.resolvelib.factory import Factory
 
 
 def installation_error(
@@ -27,9 +23,22 @@ def installation_error(
     factory: Factory,
     constraints: dict[str, Constraint],
 ) -> Exception:
+    """Render native conflict causes, or the solver error when no causes survive."""
     if error.incompatibility is None:
         return InstallationError(str(error))
+
     clauses = _external_clauses(error.incompatibility)
+    selected = _select_requested_pairs(clauses)
+    records = _native_causes(provider, clauses, selected)
+    if not records:
+        return InstallationError(str(error))
+    return factory.get_installation_error(records, constraints)
+
+
+def _select_requested_pairs(
+    clauses: list[Incompatibility[Any, Any]],
+) -> list[tuple[str | None, str, Any]]:
+    """Choose representative requests from absence and contradictory dependencies."""
     blamed = _unavailable_packages(clauses)
     requested = [
         pair
@@ -47,17 +56,28 @@ def installation_error(
             not term.is_positive() and term.constraint.is_empty for term in clause.terms
         )
     }
+
     upstream = {parent for parent, child, _ in impossible if parent != child}
     selected = [
         pair
         for pair in requested
         if pair in impossible or (pair[1] in blamed and pair[1] not in upstream)
     ]
+
     if not selected:
         counts = Counter(package for _, package, _ in requested)
         selected = [
             pair for pair in requested if counts[pair[1]] == max(counts.values())
         ]
+    return selected
+
+
+def _native_causes(
+    provider: CandidateProvider[str, CandidateKey],
+    clauses: list[Incompatibility[Any, Any]],
+    selected: list[tuple[str | None, str, Any]],
+) -> list[RequirementCause]:
+    """Recover native parents from the proof and deduplicate by object identity."""
     root_origins = {
         id(clause.origin) for clause in clauses if clause.cause.name == "ROOT"
     }
@@ -79,12 +99,8 @@ def installation_error(
             key = id(request.requirement), id(request.parent)
             if key not in seen:
                 seen.add(key)
-                records.append(
-                    RequirementInformation(request.requirement, request.parent)
-                )
-    if not records:
-        return InstallationError(str(error))
-    return factory.get_installation_error(ResolutionImpossible(records), constraints)
+                records.append(RequirementCause(request.requirement, request.parent))
+    return records
 
 
 def _unavailable_packages(clauses: list[Incompatibility[Any, Any]]) -> set[str]:
@@ -100,6 +116,8 @@ def _unavailable_packages(clauses: list[Incompatibility[Any, Any]]) -> set[str]:
         elif clause.cause.name in {"NO_VERSIONS", "CONTEXTUAL_NO_VERSIONS"}:
             bounds = clause.terms[0].constraint
             unavailable[package] = unavailable.get(package, bounds) | bounds
+
+    # Guarded absence leaves guide diagnostics; they do not prove global absence.
     for clause in clauses:
         if clause.cause.name not in {"ROOT", "DEPENDENCY"}:
             continue
@@ -127,10 +145,7 @@ def _root_causes(
         requirements.setdefault(package, []).append(
             cast(Request, cause.origin).requirement
         )
-        if (
-            next(iter(host.provider.find_matches(package, requirements, {})), None)
-            is None
-        ):
+        if next(iter(host.provider.find_matches(package, requirements)), None) is None:
             break
     return causes
 
@@ -138,6 +153,7 @@ def _root_causes(
 def _external_clauses(
     derivation: Incompatibility[Any, Any] | None,
 ) -> list[Incompatibility[Any, Any]]:
+    """Walk shared proof nodes once and return the original external clauses."""
     stack = [derivation]
     seen = set()
     result = []
@@ -154,6 +170,7 @@ def _external_clauses(
 
 
 def _positive_package(clause: Any) -> str | None:
+    """Identify the unavailable package without confusing it with an absence guard."""
     if clause.cause.name == "CONTEXTUAL_NO_VERSIONS":
         package = clause.unavailable_package
         return package if isinstance(package, str) else None
@@ -164,6 +181,7 @@ def _positive_package(clause: Any) -> str | None:
 
 
 def _requested_pair(clause: Any) -> tuple[str | None, str, Any] | None:
+    """Recover the parent and requested package, including self dependencies."""
     positive = [term for term in clause.terms if term.is_positive()]
     negative = [term for term in clause.terms if not term.is_positive()]
     if len(positive) == 1 and clause.dependency_range is not None:

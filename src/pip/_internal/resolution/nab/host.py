@@ -12,16 +12,15 @@ from pip._vendor.nab_resolver.candidate_provider import (
     PreparedCandidate,
 )
 from pip._vendor.nab_resolver.types import RangeProtocol
-from pip._vendor.resolvelib.resolvers import RequirementInformation
 
 from pip._internal.models.link import Link, links_equivalent
-from pip._internal.resolution.nab.ranges import CandidateKey, CandidateRange
-from pip._internal.resolution.resolvelib.base import Candidate, Requirement
-from pip._internal.resolution.resolvelib.factory import (
+from pip._internal.resolution.nab.base import Candidate, Requirement
+from pip._internal.resolution.nab.factory import (
     CollectedRootRequirements,
     Factory,
 )
-from pip._internal.resolution.resolvelib.provider import PipProvider
+from pip._internal.resolution.nab.provider import PipProvider
+from pip._internal.resolution.nab.ranges import CandidateKey, CandidateRange
 
 
 @dataclass(frozen=True)
@@ -55,7 +54,7 @@ def native_candidate(prepared: PreparedCandidate[CandidateKey]) -> Candidate:
 
 
 class NativeHost:
-    """Keep pip's existing finder, preparation and dependency policies."""
+    """Adapt native source identities and metadata obligations to nab queries."""
 
     def __init__(self, factory: Factory, provider: PipProvider) -> None:
         self.factory = factory
@@ -65,9 +64,11 @@ class NativeHost:
         self.refinements: dict[tuple[str, CandidateKey], SelfRefinement] = {}
 
     def availability_generation(self) -> int:
+        """Advance when source registration can change a deferred candidate query."""
         return len(self.sources) + len(self.refinements)
 
     def _source(self, candidate: Candidate) -> str:
+        """Identify metadata by installation origin, link, and editable mode."""
         link = candidate.source_link
         if link is None:
             return (
@@ -76,9 +77,11 @@ class NativeHost:
         return self._link_source(link, candidate.is_editable)
 
     def _link_source(self, link: Link, editable: bool) -> str:
+        """Assign one stable source to equivalent links in the same editable mode."""
         for number, (known, was_editable) in enumerate(self.sources):
             if was_editable == editable and links_equivalent(known, link):
                 return f"link:{number}"
+
         self.sources.append((link, editable))
         return f"link:{len(self.sources) - 1}"
 
@@ -87,17 +90,20 @@ class NativeHost:
         requirement: Requirement,
         parent: Candidate | None = None,
     ) -> CandidateRequirement[str, CandidateKey]:
+        """Attach native provenance to a version and source restriction."""
         candidate, ireq = requirement.get_candidate_lookup()
         if candidate is not None:
             constraint = CandidateRange.singleton(
                 CandidateKey(candidate.version, self._source(candidate))
             )
             if candidate.source_link is not None:
+                # A linked replacement can also carry installed metadata obligations.
                 constraint |= CandidateRange.singleton(self._refinement_key(candidate))
         elif ireq is not None:
             constraint = CandidateRange(ireq.specifier.to_range())
         else:
             constraint = CandidateRange.empty()
+
         return CandidateRequirement(
             requirement.name, constraint, Request(requirement, parent)
         )
@@ -105,6 +111,7 @@ class NativeHost:
     def constraints(
         self, collected: CollectedRootRequirements
     ) -> dict[str, CandidateRange]:
+        """Apply user constraints to base packages and their requested extras."""
         result = {}
         for package, constraint in collected.constraints.items():
             bounds = CandidateRange(constraint.specifier.to_range())
@@ -113,6 +120,7 @@ class NativeHost:
                 editable = CandidateRange.for_source(self._link_source(link, True))
                 bounds &= ordinary | editable
             result[package] = bounds
+
         for requirement in collected.requirements:
             if requirement.project_name in result:
                 result[requirement.name] = result[requirement.project_name]
@@ -124,13 +132,15 @@ class NativeHost:
         allowed: RangeProtocol[CandidateKey],
         requirements: Mapping[str, Sequence[CandidateRequirement[str, CandidateKey]]],
     ) -> Iterable[PreparedCandidate[CandidateKey]]:
+        """Filter native candidate order by the solver's active source ranges."""
         native = {
             name: tuple(cast(Request, cause.origin).requirement for cause in causes)
             for name, causes in requirements.items()
         }
         if package not in native:
             return
-        for candidate in self.provider.find_matches(package, native, {}):
+
+        for candidate in self.provider.find_matches(package, native):
             for prepared in self._prepared_candidates(candidate, native):
                 if prepared.key in allowed:
                     yield prepared
@@ -138,10 +148,12 @@ class NativeHost:
     def get_dependencies(
         self, candidate: PreparedCandidate[CandidateKey]
     ) -> Iterable[CandidateRequirement[str, CandidateKey]]:
+        """Yield replacement dependencies and retained installed obligations."""
         origin = candidate.origin
         if isinstance(origin, SelfRefinement):
             for requirement in origin.dependencies:
                 yield self.bind(requirement, origin.previous)
+
         native = native_candidate(candidate)
         for requirement in self._dependencies_for(native):
             yield self.bind(requirement, native)
@@ -157,6 +169,7 @@ class NativeHost:
             package = pending.popleft()
             if package in mapping:
                 continue
+
             candidate = selected[package]
             mapping[package] = candidate
             for requirement in self.provider.get_dependencies(candidate):
@@ -184,6 +197,7 @@ class NativeHost:
                 constraints[cause.package] = constraint
                 if constraint.is_empty:
                     break
+
             dependencies = tuple(pending)
             self.dependencies[candidate] = dependencies
         return dependencies
@@ -197,6 +211,7 @@ class NativeHost:
                 CandidateKey(candidate.version, self._source(candidate)), candidate
             )
             return
+
         dependencies = self._dependencies_for(candidate)
         self_requirements = tuple(
             requirement
@@ -210,17 +225,20 @@ class NativeHost:
                 CandidateKey(candidate.version, self._source(candidate)), candidate
             )
             return
+
         prospective = dict(requirements)
         prospective[candidate.name] = (
             *requirements[candidate.name],
             *self_requirements,
         )
-        for replacement in self.provider.find_matches(candidate.name, prospective, {}):
+        # Both the current query and the installed self requirement must admit it.
+        for replacement in self.provider.find_matches(candidate.name, prospective):
             if not all(
                 requirement.is_satisfied_by(replacement)
                 for requirement in self_requirements
             ):
                 continue
+
             key = self._refinement_key(replacement)
             origin = self.refinements.setdefault(
                 (candidate.name, key),
@@ -233,13 +251,11 @@ class NativeHost:
         package: str,
         requirements: Mapping[str, Sequence[CandidateRequirement[str, CandidateKey]]],
     ) -> Any:
-        information = {
-            package: tuple(
-                RequirementInformation(
-                    cast(Request, cause.origin).requirement,
-                    cast(Request, cause.origin).parent,
-                )
+        """Rank a package using its active native requirements."""
+        return self.provider.get_preference(
+            package,
+            (
+                cast(Request, cause.origin).requirement
                 for cause in requirements.get(package, ())
-            )
-        }
-        return self.provider.get_preference(package, {}, {}, information, ())
+            ),
+        )

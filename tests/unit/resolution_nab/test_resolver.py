@@ -6,15 +6,15 @@ from unittest import mock
 import pytest
 
 from pip._vendor.packaging.utils import canonicalize_name
-from pip._vendor.resolvelib.resolvers import Result
-from pip._vendor.resolvelib.structs import DirectedGraph
 
 from pip._internal.index.package_finder import PackageFinder
 from pip._internal.operations.prepare import RequirementPreparer
 from pip._internal.req.constructors import install_req_from_line
 from pip._internal.req.req_set import RequirementSet
-from pip._internal.resolution.resolvelib.resolver import (
+from pip._internal.resolution.nab.resolver import (
+    DependencyGraph,
     Resolver,
+    Result,
     get_topological_weights,
 )
 
@@ -39,17 +39,17 @@ def resolver(preparer: RequirementPreparer, finder: PackageFinder) -> Resolver:
 
 def _make_graph(
     edges: list[tuple[str | None, str | None]],
-) -> DirectedGraph[str | None]:
+) -> DependencyGraph:
     """Build graph from edge declarations."""
 
-    graph: DirectedGraph[str | None] = DirectedGraph()
+    graph: DependencyGraph = {}
     for parent, child in edges:
         parent = cast(str, canonicalize_name(parent)) if parent else None
         child = cast(str, canonicalize_name(child)) if child else None
         for v in (parent, child):
             if v not in graph:
-                graph.add(v)
-        graph.connect(parent, child)
+                graph[v] = set()
+        graph[parent].add(child)
     return graph
 
 
@@ -92,9 +92,7 @@ def test_new_resolver_get_installation_order(
 ) -> None:
     graph = _make_graph(edges)
 
-    # Mapping values and criteria are not used in test, so we stub them out.
-    mapping = {vertex: None for vertex in graph if vertex is not None}
-    resolver._result = Result(mapping, graph, criteria=None)  # type: ignore
+    resolver._result = Result({}, graph)
 
     reqset = RequirementSet()
     for r in ordered_reqs:
