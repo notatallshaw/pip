@@ -273,9 +273,9 @@ class RequirementCommand(IndexGroupCommand):
         # Mypy into correctly typechecking. Otherwise it would complain the
         # "Resolver" class being redefined.
         if resolver_variant == "resolvelib":
-            import pip._internal.resolution.resolvelib.resolver
+            import pip._internal.resolution.nab.resolver
 
-            return pip._internal.resolution.resolvelib.resolver.Resolver(
+            return pip._internal.resolution.nab.resolver.Resolver(
                 preparer=preparer,
                 finder=finder,
                 wheel_cache=wheel_cache,
