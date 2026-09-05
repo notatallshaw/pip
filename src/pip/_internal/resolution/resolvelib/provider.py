@@ -259,7 +259,7 @@ class PipProvider(_ProviderBase):
     def find_matches(
         self,
         identifier: str,
-        requirements: Mapping[str, Iterator[Requirement]],
+        requirements: Mapping[str, Iterable[Requirement]],
         incompatibilities: Mapping[str, Iterator[Candidate]],
     ) -> Iterable[Candidate]:
         def _eligible_for_upgrade(identifier: str) -> bool:
