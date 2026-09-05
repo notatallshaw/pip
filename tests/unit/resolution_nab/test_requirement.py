@@ -3,25 +3,17 @@ from pathlib import Path
 
 import pytest
 
-from pip._vendor.resolvelib import BaseReporter, Resolver
+from pip._vendor.nab_provider.candidate_ranges import CandidateKey, CandidateRange
+from pip._vendor.nab_resolver.candidate_provider import CandidateProvider
+from pip._vendor.nab_resolver.resolver import Resolver
+from pip._vendor.packaging.version import Version
 
-from pip._internal.resolution.resolvelib.base import Candidate, Constraint, Requirement
-from pip._internal.resolution.resolvelib.factory import Factory
-from pip._internal.resolution.resolvelib.provider import PipProvider
+from pip._internal.resolution.nab.base import Candidate, Constraint, Requirement
+from pip._internal.resolution.nab.factory import Factory
+from pip._internal.resolution.nab.host import NativeHost
+from pip._internal.resolution.nab.provider import PipProvider
 
 from tests.lib import TestData
-
-# NOTE: All tests are prefixed `test_rlr` (for "test resolvelib resolver").
-#       This helps select just these tests using pytest's `-k` option, and
-#       keeps test names shorter.
-
-# Basic tests:
-#   Create a requirement from a project name - "pip"
-#   Create a requirement from a name + version constraint - "pip >= 20.0"
-#   Create a requirement from a wheel filename
-#   Create a requirement from a sdist filename
-#   Create a requirement from a local directory (which has no obvious name!)
-#   Editables
 
 
 def _is_satisfied_by(requirement: Requirement, candidate: Candidate) -> bool:
@@ -86,7 +78,6 @@ def test_new_resolver_correct_number_of_matches(
         matches = factory.find_candidates(
             req.name,
             {req.name: [req]},
-            {},
             Constraint.empty(),
             prefers_installed=False,
             is_satisfied_by=_is_satisfied_by,
@@ -105,7 +96,6 @@ def test_new_resolver_candidates_match_requirement(
         candidates = factory.find_candidates(
             req.name,
             {req.name: [req]},
-            {},
             Constraint.empty(),
             prefers_installed=False,
             is_satisfied_by=_is_satisfied_by,
@@ -119,6 +109,13 @@ def test_new_resolver_full_resolve(factory: Factory, provider: PipProvider) -> N
     """A very basic full resolve"""
     reqs = list(factory.make_requirements_from_spec("simplewheel", comes_from=None))
     assert len(reqs) == 1
-    r: Resolver[Requirement, Candidate, str] = Resolver(provider, BaseReporter())
-    result = r.resolve(reqs)
-    assert set(result.mapping.keys()) == {"simplewheel"}
+    host = NativeHost(factory, provider)
+    candidates = CandidateProvider(host, [host.bind(req) for req in reqs])
+    resolver = Resolver(
+        candidates,
+        range_type=CandidateRange,
+        root_version=CandidateKey(Version("0"), "root"),
+        availability_generation=host.availability_generation,
+    )
+    result = resolver.solve(candidates.root_requirements())
+    assert set(result.pins) == {"simplewheel"}
