@@ -25,11 +25,7 @@ IndexCandidateInfo = tuple[_BaseVersion, Callable[[], Candidate | None]]
 
 
 def _iter_built(infos: Iterator[IndexCandidateInfo]) -> Iterator[Candidate]:
-    """Iterator for ``FoundCandidates``.
-
-    This iterator is used when the package is not already installed. Candidates
-    from index come later in their normal ordering.
-    """
+    """Prepare index candidates in finder order, skipping duplicate versions."""
     versions_found: set[_BaseVersion] = set()
     for version, func in infos:
         if version in versions_found:
