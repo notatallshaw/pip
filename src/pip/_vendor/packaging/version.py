@@ -4,7 +4,7 @@
 """
 .. testsetup::
 
-    from pip._vendor.packaging.version import parse, normalize_pre, Version, _cmpkey
+    from packaging.version import parse, normalize_pre, Version, _cmpkey
 """
 
 from __future__ import annotations
@@ -12,14 +12,13 @@ from __future__ import annotations
 import re
 import sys
 import typing
+from collections.abc import Callable
 from typing import (
     Any,
-    Callable,
     Literal,
     NamedTuple,
     SupportsInt,
     TypedDict,
-    Union,
 )
 
 if typing.TYPE_CHECKING:
@@ -66,14 +65,14 @@ def __dir__() -> list[str]:
     return __all__
 
 
-LocalType = tuple[Union[int, str], ...]
+LocalType = tuple[int | str, ...]
 
 CmpLocalType = tuple[tuple[int, str], ...]
 CmpSuffix = tuple[int, int, int, int, int, int]
-CmpKey = Union[
-    tuple[int, tuple[int, ...], CmpSuffix],
-    tuple[int, tuple[int, ...], CmpSuffix, CmpLocalType],
-]
+CmpKey = (
+    tuple[int, tuple[int, ...], CmpSuffix]
+    | tuple[int, tuple[int, ...], CmpSuffix, CmpLocalType]
+)
 VersionComparisonMethod = Callable[[CmpKey, CmpKey], bool]
 
 
@@ -370,7 +369,7 @@ class Version(_BaseVersion):
 
         Added a stable pickle format. Pickles created with packaging 26.2+ can
         be unpickled with future releases.  Backward compatibility with pickles
-        from pip._vendor.packaging < 26.2 is supported but may be removed in a future
+        from packaging < 26.2 is supported but may be removed in a future
         release.
     """
 
@@ -431,8 +430,7 @@ class Version(_BaseVersion):
                 # propagate to the caller.
                 if "" in version.split("."):
                     raise InvalidVersion(f"Invalid version: {version!r}") from None
-                # TODO: remove "no cover" when Python 3.9 is dropped.
-                raise  # pragma: no cover
+                raise
 
             self._epoch = 0
             self._pre = None

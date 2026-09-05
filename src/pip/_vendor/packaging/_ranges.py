@@ -17,11 +17,10 @@ from .version import InvalidVersion, Version
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Sequence
-    from typing import Union
 
     # Total-order key for comparing two boundaries (boundary-vs-boundary only).
     # The post slot may be ``_BOUNDARY_INF`` for an AFTER_POSTS boundary.
-    _BoundaryOrderSuffix = tuple[int, int, int, Union[int, float], int, int]
+    _BoundaryOrderSuffix = tuple[int, int, int, int | float, int, int]
     _BoundaryOrderKey = tuple[int, tuple[int, ...], _BoundaryOrderSuffix, float]
 
 __all__ = [
@@ -82,6 +81,10 @@ class BoundaryVersion:
         "kind",
         "version",
     )
+
+    #: A boundary has no PEP 440 comparison key. Bound ordering reads this off
+    #: either operand type, so a boundary falls back to the version operators.
+    _key_cache: None = None
 
     def __init__(self, version: Version, kind: BoundaryKind) -> None:
         self.version = version
@@ -172,7 +175,7 @@ class BoundaryVersion:
 
 
 if TYPE_CHECKING:
-    _VersionOrBoundary = Union[Version, BoundaryVersion, None]
+    _VersionOrBoundary = Version | BoundaryVersion | None
 
 
 @functools.total_ordering
@@ -187,6 +190,11 @@ class LowerBound:
     __slots__ = ("_above", "inclusive", "version")
 
     def __init__(self, version: _VersionOrBoundary, inclusive: bool) -> None:
+        # -inf is not a version, so "inclusive of -inf" has no content;
+        # canonicalizing it keeps the bound order total.
+        if version is None:
+            inclusive = False
+
         self.version = version
         self.inclusive = inclusive
         # Pre-bind a predicate "is parsed at or above this lower
@@ -219,10 +227,50 @@ class LowerBound:
             return other.version is not None
         if other.version is None:
             return False
-        if self.version != other.version:
+        # A boundary has no key, and a version's is computed on first use.
+        self_key = self.version._key_cache
+        other_key = other.version._key_cache
+        if self_key is not None and other_key is not None:
+            if self_key != other_key:
+                return self_key < other_key
+        elif self.version != other.version:
             return self.version < other.version
         # [v < (v: inclusive starts earlier.
         return self.inclusive and not other.inclusive
+
+    # Written out rather than left to functools.total_ordering, whose shims
+    # reach the same answer through ``__lt__`` and ``__eq__``.
+    def __gt__(self, other: LowerBound) -> bool:
+        if not isinstance(other, LowerBound):
+            return NotImplemented
+        if self.version is None:
+            return False
+        if other.version is None:
+            return True
+        self_key = self.version._key_cache
+        other_key = other.version._key_cache
+        if self_key is not None and other_key is not None:
+            if self_key != other_key:
+                return not self_key < other_key
+        elif self.version != other.version:
+            return not self.version < other.version
+        return other.inclusive and not self.inclusive
+
+    def __le__(self, other: LowerBound) -> bool:
+        if not isinstance(other, LowerBound):
+            return NotImplemented
+        if self.version is None:
+            return True
+        if other.version is None:
+            return False
+        self_key = self.version._key_cache
+        other_key = other.version._key_cache
+        if self_key is not None and other_key is not None:
+            if self_key != other_key:
+                return self_key < other_key
+        elif self.version != other.version:
+            return self.version < other.version
+        return self.inclusive or not other.inclusive
 
     def __hash__(self) -> int:
         return hash((self.version, self.inclusive))
@@ -244,6 +292,10 @@ class UpperBound:
     __slots__ = ("_below", "inclusive", "version")
 
     def __init__(self, version: _VersionOrBoundary, inclusive: bool) -> None:
+        # See LowerBound: +inf carries no inclusivity either.
+        if version is None:
+            inclusive = False
+
         self.version = version
         self.inclusive = inclusive
         # Pre-bind a predicate "is parsed at or below this upper
@@ -278,10 +330,33 @@ class UpperBound:
             return False
         if other.version is None:
             return True
-        if self.version != other.version:
+        # See LowerBound.__lt__ for why this reads the cached keys.
+        self_key = self.version._key_cache
+        other_key = other.version._key_cache
+        if self_key is not None and other_key is not None:
+            if self_key != other_key:
+                return self_key < other_key
+        elif self.version != other.version:
             return self.version < other.version
         # v) < v]: exclusive ends earlier.
         return not self.inclusive and other.inclusive
+
+    # Written out for the same reason as on ``LowerBound``.
+    def __gt__(self, other: UpperBound) -> bool:
+        if not isinstance(other, UpperBound):
+            return NotImplemented
+        if self.version is None:
+            return other.version is not None
+        if other.version is None:
+            return False
+        self_key = self.version._key_cache
+        other_key = other.version._key_cache
+        if self_key is not None and other_key is not None:
+            if self_key != other_key:
+                return not self_key < other_key
+        elif self.version != other.version:
+            return not self.version < other.version
+        return self.inclusive and not other.inclusive
 
     def __hash__(self) -> int:
         return hash((self.version, self.inclusive))
