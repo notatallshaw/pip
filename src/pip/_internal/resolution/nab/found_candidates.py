@@ -11,8 +11,7 @@ something.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Iterator, Sequence
-from typing import Any
+from collections.abc import Callable, Iterable, Iterator
 
 from pip._vendor.packaging.version import _BaseVersion
 
@@ -110,33 +109,18 @@ def _iter_built_with_inserted(
         yield installed
 
 
-class FoundCandidates(Sequence[Candidate]):
-    """A lazy sequence to provide candidates to the resolver.
-
-    The intended usage is to return this from `find_matches()` so the resolver
-    can iterate through the sequence multiple times, but only access the index
-    page when remote packages are actually needed. This improve performances
-    when suitable candidates are already installed on disk.
-    """
+class FoundCandidates(Iterable[Candidate]):
+    """Prepare index candidates lazily, placing installed versions by policy."""
 
     def __init__(
         self,
         get_infos: Callable[[], Iterator[IndexCandidateInfo]],
         installed: Candidate | None,
         prefers_installed: bool,
-        incompatible_ids: set[int],
     ):
         self._get_infos = get_infos
         self._installed = installed
         self._prefers_installed = prefers_installed
-        self._incompatible_ids = incompatible_ids
-        self._bool: bool | None = None
-
-    def __getitem__(self, index: Any) -> Any:
-        # Implemented to satisfy the ABC check. This is not needed by the
-        # resolver, and should not be used by the provider either (for
-        # performance reasons).
-        raise NotImplementedError("don't do this")
 
     def __iter__(self) -> Iterator[Candidate]:
         infos = self._get_infos()
@@ -146,21 +130,4 @@ class FoundCandidates(Sequence[Candidate]):
             iterator = _iter_built_with_prepended(self._installed, infos)
         else:
             iterator = _iter_built_with_inserted(self._installed, infos)
-        return (c for c in iterator if id(c) not in self._incompatible_ids)
-
-    def __len__(self) -> int:
-        # Implemented to satisfy the ABC check. This is not needed by the
-        # resolver, and should not be used by the provider either (for
-        # performance reasons).
-        raise NotImplementedError("don't do this")
-
-    def __bool__(self) -> bool:
-        if self._bool is not None:
-            return self._bool
-
-        if self._prefers_installed and self._installed:
-            self._bool = True
-            return True
-
-        self._bool = any(self)
-        return self._bool
+        return iterator
