@@ -5,6 +5,7 @@ from tests.lib.wheel import make_wheel
 def test_direct_url_discovered_after_installed_candidate(
     script: PipTestEnvironment,
 ) -> None:
+    """Read new dependencies from a direct artifact at an installed version."""
     wheel = create_basic_wheel_for_package(script, "dep", "1.0")
     script.pip("install", "--no-index", wheel)
 
@@ -34,9 +35,10 @@ def test_direct_url_discovered_after_installed_candidate(
 def test_try_another_file_when_preferred_wheel_has_inconsistent_metadata(
     script: PipTestEnvironment,
 ) -> None:
+    """Try the next file after rejecting inconsistent wheel metadata."""
     create_basic_wheel_for_package(script, "pkg", "1.0")
     preferred = make_wheel(
-        name="pkg", version="1.0", metadata_updates={"Name": "other"}
+        name="pkg", version="1.0", metadata_updates={"Version": "9.0"}
     )
     preferred.save_to(script.scratch_path / "pkg-1.0-2-py2.py3-none-any.whl")
 
