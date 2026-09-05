@@ -60,6 +60,7 @@ class NativeHost:
         self.factory = factory
         self.provider = provider
         self.sources: list[tuple[Link, bool]] = []
+        self._source_ids: dict[tuple[Link, bool], str] = {}
         self.dependencies: dict[Candidate, tuple[Requirement, ...]] = {}
         self.refinements: dict[tuple[str, CandidateKey], SelfRefinement] = {}
 
@@ -78,12 +79,20 @@ class NativeHost:
 
     def _link_source(self, link: Link, editable: bool) -> str:
         """Assign one stable source to equivalent links in the same editable mode."""
+        key = (link, editable)
+        if (source := self._source_ids.get(key)) is not None:
+            return source
+
         for number, (known, was_editable) in enumerate(self.sources):
             if was_editable == editable and links_equivalent(known, link):
-                return f"link:{number}"
+                source = f"link:{number}"
+                break
+        else:
+            source = f"link:{len(self.sources)}"
+            self.sources.append((link, editable))
 
-        self.sources.append((link, editable))
-        return f"link:{len(self.sources) - 1}"
+        self._source_ids[key] = source
+        return source
 
     def bind(
         self,
