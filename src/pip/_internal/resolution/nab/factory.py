@@ -17,7 +17,6 @@ from pip._vendor.packaging.requirements import InvalidRequirement
 from pip._vendor.packaging.specifiers import SpecifierSet
 from pip._vendor.packaging.utils import NormalizedName, canonicalize_name
 from pip._vendor.packaging.version import InvalidVersion, Version
-from pip._vendor.resolvelib import ResolutionImpossible
 from pip._vendor.rich.markup import escape
 
 from pip._internal.cache import CacheEntry, WheelCache
@@ -49,7 +48,7 @@ from pip._internal.utils.hashes import Hashes
 from pip._internal.utils.packaging import get_requirement
 from pip._internal.utils.virtualenv import running_under_virtualenv
 
-from .base import Candidate, Constraint, Requirement
+from .base import Candidate, Constraint, Requirement, RequirementCause
 from .candidates import (
     AlreadyInstalledCandidate,
     BaseCandidate,
@@ -248,7 +247,6 @@ class Factory:
         specifier: SpecifierSet,
         hashes: Hashes,
         prefers_installed: bool,
-        incompatible_ids: set[int],
         constraint_hash_options: dict[str, list[str]] | None = None,
     ) -> Iterable[Candidate]:
         if not ireqs:
@@ -303,9 +301,6 @@ class Factory:
                 extras=extras,
                 template=template,
             )
-            # The candidate is a known incompatibility. Don't use it.
-            if id(candidate) in incompatible_ids:
-                return None
             return candidate
 
         def iter_index_candidate_infos() -> Iterator[IndexCandidateInfo]:
@@ -352,7 +347,6 @@ class Factory:
             iter_index_candidate_infos,
             _get_installed_candidate(),
             prefers_installed,
-            incompatible_ids,
         )
 
     def _iter_explicit_candidates_from_base(
@@ -415,7 +409,6 @@ class Factory:
         self,
         identifier: str,
         requirements: Mapping[str, Iterable[Requirement]],
-        incompatibilities: Mapping[str, Iterator[Candidate]],
         constraint: Constraint,
         prefers_installed: bool,
         is_satisfied_by: Callable[[Requirement, Candidate], bool],
@@ -464,10 +457,6 @@ class Factory:
                 # target architecture, no candidates will ever be valid.
                 return ()
 
-        # Since we cache all the candidates, incompatibility identification
-        # can be made quicker by comparing only the id() values.
-        incompat_ids = {id(c) for c in incompatibilities.get(identifier, ())}
-
         # If none of the requirements want an explicit candidate, we can ask
         # the finder for candidates.
         if not explicit_candidates:
@@ -476,15 +465,13 @@ class Factory:
                 constraint.specifier,
                 constraint.hashes,
                 prefers_installed,
-                incompat_ids,
                 constraint.hash_options,
             )
 
         return (
             c
             for c in explicit_candidates
-            if id(c) not in incompat_ids
-            and constraint.is_satisfied_by(c)
+            if constraint.is_satisfied_by(c)
             and all(is_satisfied_by(req, c) for req in requirements[identifier])
         )
 
@@ -572,14 +559,8 @@ class Factory:
                 if ireq.user_supplied and template.name not in collected.user_requested:
                     collected.user_requested[template.name] = i
                 collected.requirements.extend(reqs)
-        # Put requirements with extras at the end of the root requires. This does not
-        # affect resolvelib's picking preference but it does affect its initial criteria
-        # population: by putting extras at the end we enable the candidate finder to
-        # present resolvelib with a smaller set of candidates to resolvelib, already
-        # taking into account any non-transient constraints on the associated base. This
-        # means resolvelib will have fewer candidates to visit and reject.
-        # Python's list sort is stable, meaning relative order is kept for objects with
-        # the same key.
+        # Admit base constraints before their extras. The stable sort preserves
+        # declaration order within each group for native failure diagnostics.
         collected.requirements.sort(key=lambda r: r.name != r.project_name)
         return collected
 
@@ -775,7 +756,6 @@ class Factory:
             self.find_candidates(
                 project_name,
                 requirements={project_name: []},
-                incompatibilities={},
                 constraint=Constraint.empty(),
                 prefers_installed=True,
                 is_satisfied_by=lambda r, c: True,
@@ -784,16 +764,17 @@ class Factory:
 
     def get_installation_error(
         self,
-        e: ResolutionImpossible[Requirement, Candidate],
+        requirement_causes: Sequence[RequirementCause],
         constraints: dict[str, Constraint],
     ) -> InstallationError:
-        assert e.causes, "Installation error reported with no cause"
+        """Render conflicting native requirements with their original parents."""
+        assert requirement_causes, "Installation error reported with no cause"
 
         # If one of the things we can't solve is "we need Python X.Y",
         # that is what we report.
         requires_python_causes = [
             cause
-            for cause in e.causes
+            for cause in requirement_causes
             if isinstance(cause.requirement, RequiresPythonRequirement)
             and not cause.requirement.is_satisfied_by(self._python_candidate)
         ]
@@ -809,8 +790,8 @@ class Factory:
 
         # The simplest case is when we have *one* cause that can't be
         # satisfied. We just report that case.
-        if len(e.causes) == 1:
-            req, parent = next(iter(e.causes))
+        if len(requirement_causes) == 1:
+            req, parent = next(iter(requirement_causes))
             if req.name not in constraints:
                 return self._report_single_requirement_conflict(req, parent)
 
@@ -833,7 +814,7 @@ class Factory:
             return str(ireq.comes_from)
 
         triggers = set()
-        for req, parent in e.causes:
+        for req, parent in requirement_causes:
             if parent is None:
                 # This is a root requirement, so we can report it directly
                 trigger = req.format_for_error()
@@ -854,7 +835,7 @@ class Factory:
         msg = "\nThe conflict is caused by:"
 
         relevant_constraints = set()
-        for req, parent in e.causes:
+        for req, parent in requirement_causes:
             if req.name in constraints:
                 relevant_constraints.add(req.name)
             msg = msg + "\n    "
@@ -869,7 +850,7 @@ class Factory:
 
         # Check for causes that had no candidates
         causes = set()
-        for req, _ in e.causes:
+        for req, _ in requirement_causes:
             causes.add(req.name)
 
         no_candidates = {c for c in causes if not self._has_any_candidates(c)}

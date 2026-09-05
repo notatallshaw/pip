@@ -1,18 +1,17 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from logging import getLogger
-from typing import Any
 
-from pip._vendor.resolvelib.reporters import BaseReporter
-
-from .base import Candidate, Constraint, Requirement
+from .base import Candidate, Constraint, RequirementCause
 
 logger = getLogger(__name__)
 
 
-class PipReporter(BaseReporter[Requirement, Candidate, str]):
+class PipReporter:
+    """Summarize candidate rejections and report applicable user constraints."""
+
     def __init__(self, constraints: Mapping[str, Constraint] | None = None) -> None:
         self.reject_count_by_package: defaultdict[str, int] = defaultdict(int)
         self._constraints = constraints or {}
@@ -36,7 +35,15 @@ class PipReporter(BaseReporter[Requirement, Candidate, str]):
             ),
         }
 
-    def rejecting_candidate(self, criterion: Any, candidate: Candidate) -> None:
+    def starting(self) -> None:
+        pass
+
+    def pinning(self, candidate: Candidate) -> None:
+        pass
+
+    def rejecting_candidate(
+        self, causes: Sequence[RequirementCause], candidate: Candidate
+    ) -> None:
         """Report a candidate being rejected.
 
         Logs both the rejection count message (if applicable) and details about
@@ -50,7 +57,7 @@ class PipReporter(BaseReporter[Requirement, Candidate, str]):
             logger.info("INFO: %s", message.format(package_name=candidate.name))
 
         msg = "Will try a different candidate, due to conflict:"
-        for req_info in criterion.information:
+        for req_info in causes:
             req, parent = req_info.requirement, req_info.parent
             msg += "\n    "
             if parent:
@@ -70,29 +77,16 @@ class PipReporter(BaseReporter[Requirement, Candidate, str]):
         logger.debug(msg)
 
 
-class PipDebuggingReporter(BaseReporter[Requirement, Candidate, str]):
+class PipDebuggingReporter:
     """A reporter that does an info log for every event it sees."""
 
     def starting(self) -> None:
         logger.info("Reporter.starting()")
 
-    def starting_round(self, index: int) -> None:
-        logger.info("Reporter.starting_round(%r)", index)
-
-    def ending_round(self, index: int, state: Any) -> None:
-        logger.info("Reporter.ending_round(%r, state)", index)
-        logger.debug("Reporter.ending_round(%r, %r)", index, state)
-
-    def ending(self, state: Any) -> None:
-        logger.info("Reporter.ending(%r)", state)
-
-    def adding_requirement(
-        self, requirement: Requirement, parent: Candidate | None
+    def rejecting_candidate(
+        self, causes: Sequence[RequirementCause], candidate: Candidate
     ) -> None:
-        logger.info("Reporter.adding_requirement(%r, %r)", requirement, parent)
-
-    def rejecting_candidate(self, criterion: Any, candidate: Candidate) -> None:
-        logger.info("Reporter.rejecting_candidate(%r, %r)", criterion, candidate)
+        logger.info("Reporter.rejecting_candidate(%r, %r)", causes, candidate)
 
     def pinning(self, candidate: Candidate) -> None:
         logger.info("Reporter.pinning(%r)", candidate)

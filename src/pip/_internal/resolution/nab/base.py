@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Optional
+from typing import NamedTuple, Optional
 
 from pip._vendor.packaging.specifiers import SpecifierSet
 from pip._vendor.packaging.utils import NormalizedName
@@ -162,3 +162,10 @@ class Candidate:
 
     def format_for_error(self) -> str:
         raise NotImplementedError("Subclass should override")
+
+
+class RequirementCause(NamedTuple):
+    """A native requirement and the distribution that declared it."""
+
+    requirement: Requirement
+    parent: Candidate | None

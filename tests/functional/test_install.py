@@ -1346,9 +1346,9 @@ def test_install_nonlocal_compatible_wheel_path(
         "--no-index",
         "--only-binary=:all:",
         Path(data.packages) / "simplewheel-2.0-py3-fakeabi-fakeplat.whl",
-        expect_error=(resolver_variant == "resolvelib"),
+        expect_error=(resolver_variant == "nab"),
     )
-    if resolver_variant == "resolvelib":
+    if resolver_variant == "nab":
         assert result.returncode == ERROR
     else:
         assert result.returncode == SUCCESS
@@ -2004,14 +2004,14 @@ def test_install_editable_with_wrong_egg_name(
         "--no-build-isolation",
         "--editable",
         path_to_url(str(pkga_path)) + "#egg=pkgb",
-        expect_error=(resolver_variant == "resolvelib"),
+        expect_error=(resolver_variant == "nab"),
     )
     assert (
         "Generating metadata for package pkgb produced metadata "
         "for project name pkga. Fix your #egg=pkgb "
         "fragments."
     ) in result.stderr
-    if resolver_variant == "resolvelib":
+    if resolver_variant == "nab":
         assert "has inconsistent" in result.stdout, str(result)
     else:
         assert "Successfully installed pkga" in str(result), str(result)
