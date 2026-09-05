@@ -108,7 +108,9 @@ class Resolver(BaseResolver):
 
         host = NativeHost(self.factory, native)
         provider = CandidateProvider(
-            host, [host.bind(req) for req in collected.requirements]
+            host,
+            [host.bind(req) for req in collected.requirements],
+            query_feedback=True,
         )
         resolver = NabResolver(
             provider,
