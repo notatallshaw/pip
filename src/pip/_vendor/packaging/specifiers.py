@@ -4,8 +4,8 @@
 """
 .. testsetup::
 
-    from pip._vendor.packaging.specifiers import Specifier, SpecifierSet, InvalidSpecifier
-    from pip._vendor.packaging.version import Version
+    from packaging.specifiers import Specifier, SpecifierSet, InvalidSpecifier
+    from packaging.version import Version
 """
 
 from __future__ import annotations
@@ -16,10 +16,8 @@ import typing
 from typing import (
     TYPE_CHECKING,
     Any,
-    Callable,
     Final,
     TypeVar,
-    Union,
 )
 
 from ._ranges import (
@@ -37,13 +35,8 @@ from .utils import canonicalize_version
 from .version import Version
 
 if TYPE_CHECKING:
-    import sys
-    from collections.abc import Iterable, Iterator, Sequence
-
-    if sys.version_info >= (3, 10):
-        from typing import TypeGuard
-    else:
-        from typing_extensions import TypeGuard
+    from collections.abc import Callable, Iterable, Iterator, Sequence
+    from typing import TypeGuard
 
     from . import ranges
     from ._ranges import Interval
@@ -75,7 +68,7 @@ def _validate_pre(pre: object, /) -> TypeGuard[bool | None]:
 
 
 T = TypeVar("T")
-UnparsedVersion = Union[Version, str]
+UnparsedVersion = Version | str
 UnparsedVersionVar = TypeVar("UnparsedVersionVar", bound=UnparsedVersion)
 
 
@@ -233,7 +226,7 @@ class Specifier(BaseSpecifier):
 
         Added a stable pickle format. Pickles created with packaging 26.2+ can
         be unpickled with future releases.  Backward compatibility with pickles
-        from pip._vendor.packaging < 26.2 is supported but may be removed in a future
+        from packaging < 26.2 is supported but may be removed in a future
         release.
     """
 
@@ -336,9 +329,8 @@ class Specifier(BaseSpecifier):
         )
         """
 
-    _regex = re.compile(
-        r"\s*" + _specifier_regex_str + r"\s*", re.VERBOSE | re.IGNORECASE
-    )
+    # No surrounding \s*, so _tokenizer can share this object; __init__ strips first.
+    _regex = re.compile(_specifier_regex_str, re.VERBOSE | re.IGNORECASE)
 
     # Legacy unused attribute, kept for backward compatibility
     _operators: Final = {
@@ -365,10 +357,11 @@ class Specifier(BaseSpecifier):
         :raises InvalidSpecifier:
             If the given specifier is invalid (i.e. bad syntax).
         """
-        if not self._regex.fullmatch(spec):
+        stripped = spec.strip()
+        if not self._regex.fullmatch(stripped):
             raise InvalidSpecifier(f"Invalid specifier: {spec!r}")
 
-        spec = spec.strip()
+        spec = stripped
         if spec.startswith("==="):
             operator, version = spec[:3], spec[3:].strip()
         elif spec.startswith(("~=", "==", "!=", "<=", ">=")):

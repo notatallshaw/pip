@@ -11,10 +11,8 @@ if TYPE_CHECKING:
     from collections.abc import Generator, Mapping
 
 
-@dataclass
+@dataclass(slots=True)
 class Token:
-    __slots__ = ("name", "position", "text")
-
     name: str
     text: str
     position: int
@@ -79,10 +77,8 @@ DEFAULT_RULES: dict[str, re.Pattern[str]] = {
         """,
         re.VERBOSE,
     ),
-    "SPECIFIER": re.compile(
-        Specifier._specifier_regex_str,
-        re.VERBOSE | re.IGNORECASE,
-    ),
+    # Shared with Specifier so the pattern compiles once.
+    "SPECIFIER": Specifier._regex,
     "AT": re.compile(r"\@"),
     "URL": re.compile(r"[^ \t]+"),
     "IDENTIFIER": re.compile(r"\b[a-zA-Z0-9][a-zA-Z0-9._-]*\b"),
@@ -179,7 +175,7 @@ class Tokenizer:
     @contextlib.contextmanager
     def enclosing_tokens(
         self, open_token: str, close_token: str, *, around: str
-    ) -> Generator[None, None, None]:
+    ) -> Generator[None]:
         if self.check(open_token):
             open_position = self.position
             self.read()
