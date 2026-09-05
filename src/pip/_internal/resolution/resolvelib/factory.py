@@ -87,6 +87,24 @@ class CollectedRootRequirements(NamedTuple):
     user_requested: dict[str, int]
 
 
+def specifier_pins_version(specifier: SpecifierSet) -> bool:
+    """Whether any clause in the specifier set pins one exact version.
+
+    A ``==`` clause ending in ``.*`` selects a range of versions rather than
+    one of them, so it is not a pin. Neither is ``~=``, which PEP 440 defines
+    in terms of ``>=`` and ``==`` with a wildcard.
+    """
+    for sp in specifier:
+        if sp.operator == "===":
+            return True
+        if sp.operator != "==":
+            continue
+        if sp.version.endswith(".*"):
+            continue
+        return True
+    return False
+
+
 class Factory:
     def __init__(
         self,
@@ -320,19 +338,7 @@ class Factory:
             # explicitly pins a version (via '==' or '===') that can be
             # solely satisfied by a yanked release.
             all_yanked = all(ican.link.is_yanked for ican in icans)
-
-            def is_pinned(specifier: SpecifierSet) -> bool:
-                for sp in specifier:
-                    if sp.operator == "===":
-                        return True
-                    if sp.operator != "==":
-                        continue
-                    if sp.version.endswith(".*"):
-                        continue
-                    return True
-                return False
-
-            pinned = is_pinned(specifier)
+            pinned = specifier_pins_version(specifier)
 
             # PackageFinder returns earlier versions first, so we reverse.
             for ican in reversed(icans):
