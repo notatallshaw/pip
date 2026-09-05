@@ -6,6 +6,11 @@ import sys
 _PROBE = """
 import sys
 
+# Initialize pip logging before blocking imports from the range module.
+import pip._internal
+
+assert "pip._internal.resolution.nab.ranges" not in sys.modules
+
 for name in (
     "dataclasses",
     "pip._vendor.nab_markersets",
