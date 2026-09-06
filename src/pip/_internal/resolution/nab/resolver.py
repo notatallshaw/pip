@@ -102,7 +102,7 @@ class Resolver(BaseResolver):
     def _resolve_attempt(
         self, collected: CollectedRootRequirements, *, provisional: bool
     ) -> Result | None:
-        """Return an install graph, or None when provisional assumptions need retrying."""
+        """Return an install graph, or None when assumptions need a retry."""
         native = PipProvider(
             factory=self.factory,
             constraints=collected.constraints,
