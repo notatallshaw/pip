@@ -10,10 +10,8 @@ def test_repeated_conflicts_prioritize_model_constraints(
 ) -> None:
     for version in ("1", "2"):
         create_basic_wheel_for_package(script, "hub", version)
-    for version in range(1, 17):
-        create_basic_wheel_for_package(
-            script, "model", str(version), depends=["hub<2"]
-        )
+    for number in range(1, 17):
+        create_basic_wheel_for_package(script, "model", str(number), depends=["hub<2"])
 
     script.environ["PIP_RESOLVER_DEBUG"] = "1"
     report_path = script.scratch_path / "report.json"
