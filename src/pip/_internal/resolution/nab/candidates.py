@@ -232,11 +232,8 @@ class _InstallRequirementBackedCandidate(Candidate):
                 str(self._version),
                 str(dist.version),
             )
-        # check dependencies are valid
-        # TODO performance: this means we iterate the dependencies at least twice,
-        # we may want to cache parsed Requires-Dist
         try:
-            list(dist.iter_dependencies(list(dist.iter_provided_extras())))
+            dist.validate_dependencies()
         except InvalidRequirement as e:
             raise MetadataInvalid(self._ireq, str(e))
 
