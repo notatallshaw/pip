@@ -111,6 +111,7 @@ class Resolver(BaseResolver):
             host,
             [host.bind(req) for req in collected.requirements],
             query_feedback=True,
+            conflict_feedback=True,
         )
         resolver = NabResolver(
             provider,
