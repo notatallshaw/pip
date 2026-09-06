@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from .types import Incompatibility
 
 __all__ = [
+    "ProvisionalResolutionError",
     "ResolutionError",
 ]
 
@@ -27,10 +28,10 @@ class ResolutionError(Exception):
     None where the resolver stopped before proving one. Walk ``cause_left`` and
     ``cause_right`` to trace the full proof.
 
-    Two paths raise without a report: exceeding ``max_iterations``, which
-    leaves ``incompatibility`` None, and a stalled conflict-resolution loop,
-    which attaches one but reports a resolver bug. Neither proves the
-    requirements unsatisfiable.
+    Exceeding ``max_iterations`` or a provisional work budget leaves
+    ``incompatibility`` None. A stalled conflict-resolution loop attaches one
+    but reports a resolver bug. None proves the requirements unsatisfiable.
+    Provisional assumptions also make a derived failure inconclusive.
 
     ``verbose_message`` is the same report at more depth, set by whatever
     augments the error with what the resolve knows beyond the derivation.
@@ -49,3 +50,13 @@ class ResolutionError(Exception):
         super().__init__(message)
         self.incompatibility = incompatibility
         self.verbose_message: str | None = None
+
+
+class ProvisionalResolutionError(ResolutionError):
+    """A provisional attempt reached its work limit without proving failure."""
+
+    def __init__(self, rounds: int) -> None:
+        """Record the completed rounds after the first provisional absence."""
+        self.rounds = rounds
+        message = f"Provisional resolution stopped after {rounds} rounds"
+        super().__init__(message)
