@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import importlib
+import io
 import logging
 import os
+import sys
 import time
 from collections.abc import Callable, Iterator
+from contextlib import contextmanager, nullcontext
 from optparse import Values
 from pathlib import Path
 from typing import NoReturn
@@ -26,13 +29,24 @@ from pip._internal.utils.logging import BrokenStdoutLoggingError
 from pip._internal.utils.temp_dir import TempDirectory
 
 
-@pytest.fixture(autouse=True)
-def restore_logging_level() -> Iterator[None]:
-    """Restore the root level after a command configures logging."""
+@contextmanager
+def preserve_root_logging() -> Iterator[None]:
+    """Restore root handlers and level after a command configures logging."""
     logger = logging.getLogger()
     level = logger.level
-    yield
-    logger.setLevel(level)
+    handlers = logger.handlers[:]
+
+    try:
+        yield
+    finally:
+        logger.handlers[:] = handlers
+        logger.setLevel(level)
+
+
+@pytest.fixture(autouse=True)
+def restore_logging() -> Iterator[None]:
+    with preserve_root_logging():
+        yield
 
 
 @pytest.fixture
@@ -82,6 +96,42 @@ class FakeCommandWithUnicode(FakeCommand):
         logging.getLogger("pip.tests").info(b"bytes here \xe9")
         logging.getLogger("pip.tests").info(b"unicode here \xc3\xa9".decode("utf-8"))
         return SUCCESS
+
+
+@pytest.mark.parametrize("raise_after_command", [False, True])
+def test_command_handlers_do_not_keep_closed_capture_streams(
+    capfd: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    raise_after_command: bool,
+) -> None:
+    caplog.set_level(logging.WARNING)
+    logger = logging.getLogger()
+    handlers = logger.handlers[:]
+    level = logger.level
+    exit_scope = (
+        pytest.raises(RuntimeError, match="after command")
+        if raise_after_command
+        else nullcontext()
+    )
+
+    with io.StringIO() as stream, monkeypatch.context() as patch:
+        patch.setattr(sys, "stdout", stream)
+        patch.setattr(sys, "stderr", stream)
+        with exit_scope, preserve_root_logging():
+            assert FakeCommand().main(["fake", "--debug"]) == SUCCESS
+            if raise_after_command:
+                raise RuntimeError("after command")
+
+    logging.getLogger("pip.subprocessor").warning("after command")
+    captured = capfd.readouterr()
+    assert (captured.out, captured.err) == ("", "")
+    assert caplog.record_tuples == [
+        ("pip.subprocessor", logging.WARNING, "after command")
+    ]
+
+    assert logger.handlers == handlers
+    assert logger.level == level
 
 
 class TestCommand:
