@@ -16,6 +16,7 @@ from pip._vendor.packaging.utils import canonicalize_name
 from pip._vendor.packaging.version import Version
 
 from pip._internal.cache import WheelCache
+from pip._internal.exceptions import PipError
 from pip._internal.index.package_finder import PackageFinder
 from pip._internal.operations.prepare import RequirementPreparer
 from pip._internal.req.constructors import install_req_extend_extras
@@ -91,7 +92,17 @@ class Resolver(BaseResolver):
         self._result: Result | None = None
 
     def _resolve(self, collected: CollectedRootRequirements) -> Result:
-        """Select distributions, then discard obligations used only for validation."""
+        """Validate a provisional solution or retry with contextual query failures."""
+        result = self._resolve_attempt(collected, provisional=True)
+        if result is None:
+            result = self._resolve_attempt(collected, provisional=False)
+        assert result is not None
+        return result
+
+    def _resolve_attempt(
+        self, collected: CollectedRootRequirements, *, provisional: bool
+    ) -> Result | None:
+        """Return an install graph, or None when provisional assumptions need retrying."""
         native = PipProvider(
             factory=self.factory,
             constraints=collected.constraints,
@@ -111,7 +122,8 @@ class Resolver(BaseResolver):
             host,
             [host.bind(req) for req in collected.requirements],
             query_feedback=True,
-            conflict_feedback=True,
+            dependency_precheck=True,
+            precheck_feedback=True,
         )
         resolver = NabResolver(
             provider,
@@ -119,12 +131,20 @@ class Resolver(BaseResolver):
             root_version=CandidateKey(Version("0"), "root"),
             observer=_Observer(provider, reporter),
             availability_generation=host.availability_generation,
+            provisional=provisional,
         )
+        constraints = host.constraints(collected)
         try:
-            solution = resolver.solve(
-                provider.root_requirements(), host.constraints(collected)
-            )
-        except ResolutionError as error:
+            solution = resolver.solve(provider.root_requirements(), constraints)
+            if resolver.provisional_absences and not provider.validate_solution(
+                solution, constraints
+            ):
+                return None
+        except (ResolutionError, PipError) as error:
+            if resolver.provisional_absences:
+                return None
+            if not isinstance(error, ResolutionError):
+                raise
             raise installation_error(
                 error, provider, self.factory, collected.constraints
             ) from error
