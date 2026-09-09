@@ -514,6 +514,7 @@ def _install_wheel(  # noqa: C901, PLR0915 function is too long
 
     # (scheme directory, parent directory) pairs already resolved and accepted.
     verified_parents: set[tuple[str, str]] = set()
+    resolved_scheme_dirs: dict[str, str] = {}
 
     def assert_no_path_traversal(dest_dir_path: str, target_path: str) -> None:
         if not is_within_directory(dest_dir_path, target_path):
@@ -532,12 +533,15 @@ def _install_wheel(  # noqa: C901, PLR0915 function is too long
         if (dest_dir_path, parent_dir_path) in verified_parents:
             return
 
+        if dest_dir_path not in resolved_scheme_dirs:
+            resolved_scheme_dirs[dest_dir_path] = os.path.realpath(dest_dir_path)
+        resolved_parent = os.path.realpath(parent_dir_path)
         if not is_within_directory(
-            dest_dir_path, parent_dir_path, resolve_symlinks=True
+            resolved_scheme_dirs[dest_dir_path], resolved_parent
         ):
             raise InstallationError(
                 f"Cannot install into {parent_dir_path!r}: it resolves to"
-                f" {os.path.realpath(parent_dir_path)!r}, outside the target"
+                f" {resolved_parent!r}, outside the target"
                 f" directory {dest_dir_path!r}."
                 " Remove the symbolic link to install here."
             )
@@ -672,6 +676,7 @@ def _install_wheel(  # noqa: C901, PLR0915 function is too long
 
     # Compile all of the pyc files for the installed files
     if pycompile:
+        checked_pyc_dirs: set[str] = set()
         with contextlib.redirect_stdout(
             StreamWrapper.from_stream(sys.stdout)
         ) as stdout:
@@ -680,17 +685,19 @@ def _install_wheel(  # noqa: C901, PLR0915 function is too long
                 for path in pyc_source_file_paths():
                     # The .pyc goes into __pycache__, which is not a wheel entry
                     # and so was never checked for being a symlink.
-                    pyc_dir = os.path.dirname(pyc_output_path(path))
-                    if os.path.islink(pyc_dir):
-                        raise InstallationError(
-                            f"Cannot install into {pyc_dir!r}: it is a symbolic"
-                            f" link to {os.path.realpath(pyc_dir)!r}. Remove the"
-                            " symbolic link to install here."
-                        )
+                    pyc_path = pyc_output_path(path)
+                    pyc_dir = os.path.dirname(pyc_path)
+                    if pyc_dir not in checked_pyc_dirs:
+                        if os.path.islink(pyc_dir):
+                            raise InstallationError(
+                                f"Cannot install into {pyc_dir!r}: it is a symbolic"
+                                f" link to {os.path.realpath(pyc_dir)!r}. Remove the"
+                                " symbolic link to install here."
+                            )
+                        checked_pyc_dirs.add(pyc_dir)
 
                     success = compileall.compile_file(path, force=True, quiet=True)
                     if success:
-                        pyc_path = pyc_output_path(path)
                         assert os.path.exists(pyc_path)
                         pyc_record_path = cast(
                             "RecordPath", pyc_path.replace(os.path.sep, "/")
