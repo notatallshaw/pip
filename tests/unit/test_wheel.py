@@ -590,9 +590,10 @@ class TestInstallUnpackedWheel:
                 req_description=str(self.req),
             )
 
+        checked_paths = [Path(check.args[0]) for check in islink.call_args_list]
         for directory, count in (("sample", 2), ("sample/other", 1)):
             pyc_dir = Path(self.scheme.purelib, directory, "__pycache__")
-            assert islink.call_args_list.count(call(str(pyc_dir))) == 1
+            assert checked_paths.count(pyc_dir) == 1
             assert len(list(pyc_dir.glob("*.pyc"))) == count
 
     @pytest.mark.skipif("sys.platform == 'win32'")
