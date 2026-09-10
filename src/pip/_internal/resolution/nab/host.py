@@ -249,13 +249,13 @@ class NativeHost:
     def priority(
         self,
         package: str,
-        requirements: Mapping[str, Sequence[CandidateRequirement[str, CandidateKey]]],
+        requirements: Sequence[CandidateRequirement[str, CandidateKey]],
     ) -> Any:
         """Rank a package using its active native requirements."""
         return self.provider.get_preference(
             package,
             (
                 cast(Request, cause.origin).requirement
-                for cause in requirements.get(package, ())
+                for cause in requirements
             ),
         )
