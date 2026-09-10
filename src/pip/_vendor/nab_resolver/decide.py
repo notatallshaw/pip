@@ -42,6 +42,10 @@ def choose_package_to_decide(
     across scans, so one that moves without the solution or ``priority_epoch``
     moving is never read again.
 
+    A dynamic provider can supply ``consume_priority_changes`` to report
+    additional invalidations and use the queue across deferred queries.
+    Without that contract, dynamic queries recompute every eligible key.
+
     ``ROOT`` never turns up in the undecided set: it is decided at level 1, a
     targeted backtrack never aims lower, and conflict resolution raises rather
     than backjumping to level 0.
@@ -82,14 +86,13 @@ def choose_package_to_decide(
         return (ready_penalty, priority, tiebreak)
 
     consume_changes = getattr(resolver.provider, "consume_priority_changes", None)
-    priority_changes = None if consume_changes is None else consume_changes()
-    if excluded is not None and priority_changes is None:
+    if excluded is not None and consume_changes is None:
         resolver.solution.take_changed_packages()
         return min(undecided, key=sort_key)
 
     changed = resolver.solution.take_changed_packages()
-    if priority_changes is not None:
-        changed.update(priority_changes)
+    if consume_changes is not None:
+        changed.update(consume_changes())
     return resolver.decision_queue.pick(
         undecided,
         sort_key,
