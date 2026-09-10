@@ -40,13 +40,14 @@ def test_native_query_does_not_translate_unrelated_requirements(
     factory: Factory, provider: PipProvider
 ) -> None:
     host = NativeHost(factory, provider)
+    requirements = {
+        name: tuple(factory.make_requirements_from_spec(name, comes_from=None))
+        for name in ("simplewheel", "simple")
+    }
     declarations = TrackedDeclarations(
         {
-            name: tuple(
-                host.bind(req)
-                for req in factory.make_requirements_from_spec(name, comes_from=None)
-            )
-            for name in ("simplewheel", "simple")
+            name: tuple(host.bind(req) for req in group)
+            for name, group in requirements.items()
         }
     )
 
@@ -54,7 +55,10 @@ def test_native_query_does_not_translate_unrelated_requirements(
         host.iter_candidates("simplewheel", CandidateRange.full(), declarations)
     )
 
-    assert len(selected) == 1
+    assert selected
+    assert [host_module.native_candidate(candidate) for candidate in selected] == list(
+        provider.find_matches("simplewheel", requirements)
+    )
     assert set(declarations.reads) == {"simplewheel"}
 
 
