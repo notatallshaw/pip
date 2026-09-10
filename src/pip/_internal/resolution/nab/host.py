@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -51,6 +51,34 @@ def native_candidate(prepared: PreparedCandidate[CandidateKey]) -> Candidate:
         if isinstance(origin, SelfRefinement)
         else cast(Candidate, origin)
     )
+
+
+class _NativeRequirements(Mapping[str, tuple[Requirement, ...]]):
+    """Translate only the declaration groups a native candidate query reads."""
+
+    def __init__(
+        self,
+        requirements: Mapping[str, Sequence[CandidateRequirement[str, CandidateKey]]],
+    ) -> None:
+        self._requirements = requirements
+        self._native: dict[str, tuple[Requirement, ...]] = {}
+
+    def __getitem__(self, package: str) -> tuple[Requirement, ...]:
+        if package not in self._native:
+            self._native[package] = tuple(
+                cast(Request, cause.origin).requirement
+                for cause in self._requirements[package]
+            )
+        return self._native[package]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._requirements)
+
+    def __len__(self) -> int:
+        return len(self._requirements)
+
+    def __contains__(self, package: object) -> bool:
+        return package in self._requirements
 
 
 class NativeHost:
@@ -142,10 +170,7 @@ class NativeHost:
         requirements: Mapping[str, Sequence[CandidateRequirement[str, CandidateKey]]],
     ) -> Iterable[PreparedCandidate[CandidateKey]]:
         """Filter native candidate order by the solver's active source ranges."""
-        native = {
-            name: tuple(cast(Request, cause.origin).requirement for cause in causes)
-            for name, causes in requirements.items()
-        }
+        native = _NativeRequirements(requirements)
         if package not in native:
             return
 
@@ -263,8 +288,5 @@ class NativeHost:
         """Rank a package using its active native requirements."""
         return self.provider.get_preference(
             package,
-            (
-                cast(Request, cause.origin).requirement
-                for cause in requirements
-            ),
+            (cast(Request, cause.origin).requirement for cause in requirements),
         )
