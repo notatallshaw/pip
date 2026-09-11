@@ -114,6 +114,7 @@ class Factory:
         self._force_reinstall = force_reinstall
         self._ignore_requires_python = ignore_requires_python
         self.catalogue_only = False
+        self._catalogue_yanked_versions: dict[str, frozenset[Version]] = {}
 
         self._build_failures: Cache[InstallationError] = {}
         self._link_candidate_cache: Cache[LinkCandidate] = {}
@@ -384,7 +385,31 @@ class Factory:
                 ),
             )
             for candidate in reversed(candidates)
+            if not candidate.link.is_yanked
         ]
+
+    def catalogue_requires_yanked(
+        self, identifier: str, specifier: SpecifierSet
+    ) -> bool:
+        """Detect a declaration that could opt into an excluded yanked release."""
+        pinned = any(
+            item.operator == "==="
+            or (item.operator == "==" and not item.version.endswith(".*"))
+            for item in specifier
+        )
+        if not pinned:
+            return False
+        name = canonicalize_name(get_requirement(identifier).name)
+        if name not in self._catalogue_yanked_versions:
+            self._catalogue_yanked_versions[name] = frozenset(
+                item.version
+                for item in self._finder.find_all_candidates(name)
+                if item.link.is_yanked
+            )
+        return any(
+            specifier.contains(version, prereleases=True)
+            for version in self._catalogue_yanked_versions[name]
+        )
 
     def _prepare_catalogue_candidate(
         self,
