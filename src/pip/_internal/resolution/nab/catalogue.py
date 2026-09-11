@@ -53,6 +53,8 @@ class CatalogueProvider(BaseProvider[str, Version]):
                 self.remember(candidate)
                 allowed = VersionRange.singleton(candidate.version)
             elif ireq is not None:
+                if ireq.specifier.prereleases:
+                    raise CatalogueUnsupported("prerelease requirement")
                 if ireq.link or ireq.hash_options or ireq.config_settings:
                     raise CatalogueUnsupported("requirement preparation options")
                 self.templates.setdefault(requirement.name, ireq)
