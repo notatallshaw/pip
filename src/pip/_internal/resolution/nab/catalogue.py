@@ -11,6 +11,7 @@ from pip._vendor.nab_resolver.resolver import (
     ResolverObserver,
     Solution,
 )
+from pip._vendor.nab_resolver.types import Incompatibility, IncompatibilityCause, Term
 from pip._vendor.packaging.ranges import VersionRange
 from pip._vendor.packaging.specifiers import SpecifierSet
 from pip._vendor.packaging.version import Version
@@ -70,6 +71,8 @@ class CatalogueProvider(BaseProvider[str, Version]):
         self.candidates = {}
         self.dependencies = {}
         self.templates = {}
+        self.solution_ranges = {}
+        self.pending_dependencies = []
         self.roots = self.ranges(collected.requirements, roots=True)
         self.constraints = {}
         for package, constraint in collected.constraints.items():
@@ -133,8 +136,38 @@ class CatalogueProvider(BaseProvider[str, Version]):
                 if candidate is None:
                     raise CatalogueUnsupported("artifact preparation rejected")
                 self.remember(candidate)
+            if self.precheck_dependencies(package, version):
+                return None
             return version
         return None
+
+    def receive_partial_solution_hint(self, positive_ranges, decisions):
+        self.solution_ranges = positive_ranges
+
+    def precheck_dependencies(self, package, version):
+        """Expose a conflicting dependency before committing its parent candidate."""
+        for dependency, required in self.get_dependencies(package, version).items():
+            if dependency == package:
+                continue
+            allowed = self.solution_ranges.get(dependency)
+            if allowed is not None and allowed.is_disjoint(required):
+                self.pending_dependencies.append(
+                    Incompatibility(
+                        [
+                            Term(
+                                package, VersionRange.singleton(version), positive=True
+                            ),
+                            Term(dependency, required, positive=False),
+                        ],
+                        cause=IncompatibilityCause.DEPENDENCY,
+                    )
+                )
+                return True
+        return False
+
+    def consume_pending_clauses(self):
+        pending, self.pending_dependencies = self.pending_dependencies, []
+        return pending
 
     def has_satisfying_version(self, package, version_range):
         if package.startswith("<"):
