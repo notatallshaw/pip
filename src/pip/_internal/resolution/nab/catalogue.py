@@ -181,12 +181,13 @@ class CatalogueProvider(BaseProvider[str, Version]):
                 continue
             allowed = self.solution_ranges.get(dependency)
             if allowed is not None and allowed.is_disjoint(required):
+                parent_range = self.widen_decision(package, version)
+                if parent_range is None:
+                    parent_range = VersionRange.singleton(version)
                 self.pending_dependencies.append(
                     Incompatibility(
                         [
-                            Term(
-                                package, VersionRange.singleton(version), positive=True
-                            ),
+                            Term(package, parent_range, positive=True),
                             Term(dependency, required, positive=False),
                         ],
                         cause=IncompatibilityCause.DEPENDENCY,
