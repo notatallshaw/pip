@@ -31,7 +31,7 @@ from pip._internal.exceptions import (
 )
 from pip._internal.index.package_finder import PackageFinder
 from pip._internal.metadata import BaseDistribution, get_default_environment
-from pip._internal.models.link import Link
+from pip._internal.models.link import Link, links_equivalent
 from pip._internal.models.wheel import Wheel
 from pip._internal.operations.prepare import RequirementPreparer
 from pip._internal.req.constructors import (
@@ -364,12 +364,18 @@ class Factory:
         name = canonicalize_name(requirement.name)
         if template is None:
             template = self._make_install_req_from_spec(identifier, None)
-        result = self._finder.find_best_candidate(project_name=name)
+        # SpecifierSet equality ignores prerelease overrides.
+        evaluator = self._finder.make_candidate_evaluator(
+            project_name=name, specifier=SpecifierSet(prereleases=True)
+        )
+        candidates = evaluator.get_applicable_candidates(
+            self._finder.find_all_candidates(name)
+        )
         return [
             (
                 candidate.version,
                 functools.partial(
-                    self._make_candidate_from_link,
+                    self._prepare_catalogue_candidate,
                     link=candidate.link,
                     extras=frozenset(requirement.extras),
                     template=template,
@@ -377,9 +383,55 @@ class Factory:
                     version=candidate.version,
                 ),
             )
-            for candidate in reversed(result.applicable_candidates)
-            if not candidate.link.is_yanked and not candidate.version.is_prerelease
+            for candidate in reversed(candidates)
         ]
+
+    def _prepare_catalogue_candidate(
+        self,
+        link: Link,
+        extras: frozenset[str],
+        template: InstallRequirement,
+        name: NormalizedName,
+        version: Version,
+    ) -> Candidate | None:
+        if link.is_yanked:
+            raise CatalogueUnsupported("yanked candidate")
+        return self._make_candidate_from_link(link, extras, template, name, version)
+
+    def catalogue_prerelease_policy(self, identifier: str) -> bool | None:
+        """Return the fixed command-line release policy for a catalogue package."""
+        control = self._finder.release_control
+        if control is None:
+            return None
+        name = canonicalize_name(get_requirement(identifier).name)
+        return control.allows_prereleases(name)
+
+    def catalogue_prerelease_admitted(
+        self,
+        candidate: Candidate,
+        requirements: Mapping[str, Iterable[Requirement]],
+        constraint: Constraint,
+    ) -> bool:
+        """Check prerelease admission before a synthetic validation pin grants opt-in."""
+        if candidate.source_link is None:
+            return True
+        declarations = list(requirements[candidate.name])
+        if candidate.name != candidate.project_name:
+            declarations.extend(requirements.get(candidate.project_name, ()))
+        specifier = constraint.specifier
+        for requirement in declarations:
+            _, ireq = requirement.get_candidate_lookup()
+            if ireq is not None:
+                specifier &= ireq.specifier
+        result = self._finder.find_best_candidate(
+            project_name=candidate.project_name,
+            specifier=specifier,
+            hashes=constraint.hashes,
+        )
+        return any(
+            links_equivalent(item.link, candidate.source_link)
+            for item in result.applicable_candidates
+        )
 
     def _iter_explicit_candidates_from_base(
         self,
