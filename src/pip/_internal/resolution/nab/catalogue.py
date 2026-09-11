@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Mapping
 
+from pip._vendor.nab_resolver.priority import compute_tier
+
 from pip._vendor.nab_resolver.resolver import (
     BaseProvider,
     Resolver,
@@ -73,6 +75,7 @@ class CatalogueProvider(BaseProvider[str, Version]):
         self.templates = {}
         self.solution_ranges = {}
         self.pending_dependencies = []
+        self.matching_counts = {}
         self.roots = self.ranges(collected.requirements, roots=True)
         self.constraints = {}
         for package, constraint in collected.constraints.items():
@@ -187,8 +190,32 @@ class CatalogueProvider(BaseProvider[str, Version]):
         return self.dependencies[key][1]
 
     def prioritize(self, package, version_range, conflict_counts, culprit_counts=None):
+        key = package, version_range
+        if key not in self.matching_counts:
+            if package.startswith("<"):
+                count = sum(
+                    name == package and version in version_range
+                    for name, version in self.candidates
+                )
+            else:
+                count = len(
+                    {
+                        version
+                        for version, _ in self.catalogue(package)
+                        if version in version_range
+                    }
+                )
+            self.matching_counts[key] = count
+        tier = compute_tier(
+            package,
+            conflict_counts.get(package, 0),
+            culprit_counts.get(package, 0) if culprit_counts else 0,
+            culprit_counts,
+        )
         return (
-            -conflict_counts.get(package, 0),
+            tier,
+            self.matching_counts[key],
+            "[" not in package,
             self.collected.user_requested.get(package, float("inf")),
             package,
         )
