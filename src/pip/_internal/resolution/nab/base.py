@@ -15,6 +15,10 @@ from pip._internal.utils.hashes import Hashes
 CandidateLookup = tuple[Optional["Candidate"], InstallRequirement | None]
 
 
+class CatalogueUnsupported(Exception):
+    """The static attempt needs the compatible candidate model."""
+
+
 def format_name(project: NormalizedName, extras: frozenset[NormalizedName]) -> str:
     if not extras:
         return project
