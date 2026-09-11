@@ -64,5 +64,30 @@ def test_catalogue_retries_an_exact_prerelease(script: PipTestEnvironment) -> No
         script.scratch_path,
         "dep==1.0a1",
     )
-    assert "Nab catalogue fallback: ResolutionError" in result.stdout
+    assert (
+        "Nab catalogue fallback: CatalogueUnsupported: prerelease requirement"
+        in result.stdout
+    )
     script.assert_installed(dep="1.0a1")
+
+
+def test_catalogue_does_not_downgrade_a_root_to_avoid_prereleases(
+    script: PipTestEnvironment,
+) -> None:
+    create_basic_wheel_for_package(script, "dep", "1.0a1")
+    create_basic_wheel_for_package(script, "dep", "1.0")
+    create_basic_wheel_for_package(script, "app", "2.0", depends=["dep==1.0a1"])
+    create_basic_wheel_for_package(script, "app", "1.0", depends=["dep==1.0"])
+    result = script.pip(
+        "install",
+        "--ignore-installed",
+        "--no-index",
+        "--find-links",
+        script.scratch_path,
+        "app",
+    )
+    assert (
+        "Nab catalogue fallback: CatalogueUnsupported: prerelease requirement"
+        in result.stdout
+    )
+    script.assert_installed(app="2.0", dep="1.0a1")
