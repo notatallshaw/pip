@@ -54,7 +54,7 @@ def test_catalogue_preserves_base_constraints_with_extras(
     script.assert_installed(dep="1.0")
 
 
-def test_catalogue_retries_an_exact_prerelease(script: PipTestEnvironment) -> None:
+def test_catalogue_resolves_an_exact_prerelease(script: PipTestEnvironment) -> None:
     create_basic_wheel_for_package(script, "dep", "1.0a1")
     result = script.pip(
         "install",
@@ -64,10 +64,7 @@ def test_catalogue_retries_an_exact_prerelease(script: PipTestEnvironment) -> No
         script.scratch_path,
         "dep==1.0a1",
     )
-    assert (
-        "Nab catalogue fallback: CatalogueUnsupported: prerelease requirement"
-        in result.stdout
-    )
+    assert "Nab catalogue success" in result.stdout
     script.assert_installed(dep="1.0a1")
 
 
@@ -86,8 +83,43 @@ def test_catalogue_does_not_downgrade_a_root_to_avoid_prereleases(
         script.scratch_path,
         "app",
     )
-    assert (
-        "Nab catalogue fallback: CatalogueUnsupported: prerelease requirement"
-        in result.stdout
-    )
+    assert "Nab catalogue success" in result.stdout
     script.assert_installed(app="2.0", dep="1.0a1")
+
+
+@pytest.mark.parametrize("flags, expected", [([], "1.0"), (["--pre"], "2.0b1")])
+def test_catalogue_respects_command_line_prerelease_policy(
+    script: PipTestEnvironment, flags: list[str], expected: str
+) -> None:
+    create_basic_wheel_for_package(script, "dep", "1.0")
+    create_basic_wheel_for_package(script, "dep", "2.0b1")
+    result = script.pip(
+        "install",
+        "--ignore-installed",
+        "--no-index",
+        "--find-links",
+        script.scratch_path,
+        *flags,
+        "dep",
+    )
+    assert "Nab catalogue success" in result.stdout
+    script.assert_installed(dep=expected)
+
+
+def test_catalogue_keeps_prereleases_below_a_final_release(
+    script: PipTestEnvironment,
+) -> None:
+    create_basic_wheel_for_package(script, "dep", "0.9b1")
+    create_basic_wheel_for_package(script, "dep", "1.0")
+    create_basic_wheel_for_package(script, "app", "2.0", depends=["dep<1.0"])
+    create_basic_wheel_for_package(script, "app", "1.0", depends=["dep==1.0"])
+    result = script.pip(
+        "install",
+        "--ignore-installed",
+        "--no-index",
+        "--find-links",
+        script.scratch_path,
+        "app",
+    )
+    assert "Nab catalogue success" in result.stdout
+    script.assert_installed(app="2.0", dep="0.9b1")

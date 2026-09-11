@@ -122,7 +122,12 @@ class Resolver(BaseResolver):
         )
         try:
             provider = CatalogueProvider(factory, native, collected)
-            solution = provider.solve()
+            reporter = (
+                PipDebuggingReporter()
+                if "PIP_RESOLVER_DEBUG" in os.environ
+                else PipReporter(collected.constraints)
+            )
+            solution = provider.solve(reporter)
             if not provider.validate(solution):
                 logger.info("Nab catalogue fallback: final admission")
                 return None

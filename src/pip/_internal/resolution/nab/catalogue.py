@@ -5,7 +5,12 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Mapping
 
-from pip._vendor.nab_resolver.resolver import BaseProvider, Resolver, Solution
+from pip._vendor.nab_resolver.resolver import (
+    BaseProvider,
+    Resolver,
+    ResolverObserver,
+    Solution,
+)
 from pip._vendor.packaging.ranges import VersionRange
 from pip._vendor.packaging.specifiers import SpecifierSet
 from pip._vendor.packaging.version import Version
@@ -17,6 +22,36 @@ from pip._internal.resolution.nab.base import (
 )
 from pip._internal.resolution.nab.factory import CollectedRootRequirements, Factory
 from pip._internal.resolution.nab.provider import PipProvider
+from pip._internal.resolution.nab.reporter import PipDebuggingReporter, PipReporter
+
+
+class CatalogueObserver(ResolverObserver[str, Version]):
+    """Forward static solver decisions to pip's candidate reporter."""
+
+    def __init__(self, provider, reporter):
+        self.provider = provider
+        self.reporter = reporter
+        self.decisions = {}
+
+    def on_decision(self, package, version, level):
+        self.decisions[package] = version
+        self.reporter.pinning(self.provider.candidates[package, version])
+
+    def on_conflict_step(
+        self,
+        incompatibility,
+        *,
+        satisfier_package,
+        satisfier_is_decision,
+        satisfier_level,
+        previous_level,
+        can_backjump,
+    ):
+        if satisfier_is_decision and satisfier_package in self.decisions:
+            candidate = self.provider.candidates[
+                satisfier_package, self.decisions[satisfier_package]
+            ]
+            self.reporter.rejecting_candidate((), candidate)
 
 
 class CatalogueProvider(BaseProvider[str, Version]):
@@ -53,8 +88,6 @@ class CatalogueProvider(BaseProvider[str, Version]):
                 self.remember(candidate)
                 allowed = VersionRange.singleton(candidate.version)
             elif ireq is not None:
-                if ireq.specifier.prereleases:
-                    raise CatalogueUnsupported("prerelease requirement")
                 if ireq.link or ireq.hash_options or ireq.config_settings:
                     raise CatalogueUnsupported("requirement preparation options")
                 self.templates.setdefault(requirement.name, ireq)
@@ -88,9 +121,12 @@ class CatalogueProvider(BaseProvider[str, Version]):
                 ),
                 None,
             )
-        for version, prepare in self.catalogue(package):
-            if version not in version_range:
-                continue
+        choices = version_range.filter(
+            self.catalogue(package),
+            key=lambda item: item[0],
+            prereleases=self.factory.catalogue_prerelease_policy(package),
+        )
+        for version, prepare in choices:
             key = package, version
             if key not in self.candidates:
                 candidate = prepare()
@@ -127,10 +163,16 @@ class CatalogueProvider(BaseProvider[str, Version]):
     def widen_decision(self, package, version):
         return None
 
-    def solve(self) -> Solution[str, Version]:
-        return Resolver(self, range_type=VersionRange, root_version=Version("0")).solve(
-            self.roots, self.constraints
-        )
+    def solve(
+        self, reporter: PipReporter | PipDebuggingReporter
+    ) -> Solution[str, Version]:
+        reporter.starting()
+        return Resolver(
+            self,
+            range_type=VersionRange,
+            root_version=Version("0"),
+            observer=CatalogueObserver(self, reporter),
+        ).solve(self.roots, self.constraints)
 
     def validate(self, solution: Solution[str, Version]) -> bool:
         """Recheck final native requirements and artifact order within each selected version."""
@@ -152,7 +194,13 @@ class CatalogueProvider(BaseProvider[str, Version]):
             )
             if not base.is_satisfied_by(candidate):
                 return False
-            # Catalogue candidates exclude yanks and prereleases before version pinning.
+            if (
+                candidate.version.is_prerelease
+                and not self.factory.catalogue_prerelease_admitted(
+                    candidate, requirements, base
+                )
+            ):
+                return False
             pinned = Constraint(
                 base.specifier & SpecifierSet(f"=={version}"),
                 base.hashes,
