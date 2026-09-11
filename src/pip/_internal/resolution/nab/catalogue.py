@@ -108,6 +108,8 @@ class CatalogueProvider(BaseProvider[str, Version]):
         for package, constraint in collected.constraints.items():
             if constraint.links or constraint.hashes:
                 raise CatalogueUnsupported("source or hash constraint")
+            if factory.catalogue_requires_yanked(package, constraint.specifier):
+                raise CatalogueUnsupported("yanked constraint pin")
             self.constraints[package] = constraint.specifier.to_range()
 
     def ranges(self, requirements, *, roots=False):
@@ -123,6 +125,10 @@ class CatalogueProvider(BaseProvider[str, Version]):
             elif ireq is not None:
                 if ireq.link or ireq.hash_options or ireq.config_settings:
                     raise CatalogueUnsupported("requirement preparation options")
+                if self.factory.catalogue_requires_yanked(
+                    requirement.name, ireq.specifier
+                ):
+                    raise CatalogueUnsupported("yanked requirement pin")
                 self.templates.setdefault(requirement.name, ireq)
                 allowed = ireq.specifier.to_range()
             else:
