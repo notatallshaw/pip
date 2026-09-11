@@ -151,6 +151,8 @@ class CatalogueProvider(BaseProvider[str, Version]):
         return self.catalogues[package]
 
     def choose_version(self, package, version_range):
+        if self.precheck_base_version(package, version_range):
+            return None
         if package.startswith("<"):
             return next(
                 (
@@ -179,6 +181,23 @@ class CatalogueProvider(BaseProvider[str, Version]):
 
     def receive_partial_solution_hint(self, positive_ranges, decisions):
         self.solution_ranges = positive_ranges
+
+    def precheck_base_version(self, package, version_range):
+        """Enforce extras/base version equality before preparing extras metadata."""
+        base, bracket, _ = package.partition("[")
+        allowed = self.solution_ranges.get(base) if bracket else None
+        if allowed is None or version_range.is_subset(allowed):
+            return False
+        self.pending_dependencies.append(
+            Incompatibility(
+                [
+                    Term(package, ~allowed, positive=True),
+                    Term(base, allowed, positive=True),
+                ],
+                cause=IncompatibilityCause.DEPENDENCY,
+            )
+        )
+        return True
 
     def precheck_dependencies(self, package, version):
         """Expose a conflicting dependency before committing its parent candidate."""
