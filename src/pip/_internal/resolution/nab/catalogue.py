@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from bisect import bisect_left, bisect_right
 from collections import defaultdict
 from collections.abc import Mapping
 
@@ -26,6 +27,31 @@ from pip._internal.resolution.nab.base import (
 from pip._internal.resolution.nab.factory import CollectedRootRequirements, Factory
 from pip._internal.resolution.nab.provider import PipProvider
 from pip._internal.resolution.nab.reporter import PipDebuggingReporter, PipReporter
+
+
+def cached_dependency_span(package, version, universe, dependencies):
+    """Cover adjacent cached equivalents and the empty gaps around them."""
+    below = bisect_left(universe, version)
+    above = bisect_right(universe, version)
+    cached = dependencies.get((package, version))
+    if cached is not None:
+        while (
+            below
+            and dependencies.get((package, universe[below - 1]), ((), None))[1]
+            == cached[1]
+        ):
+            below -= 1
+        while (
+            above < len(universe)
+            and dependencies.get((package, universe[above]), ((), None))[1] == cached[1]
+        ):
+            above += 1
+    return VersionRange.from_bounds(
+        universe[below - 1] if below else None,
+        universe[above] if above < len(universe) else None,
+        include_lower=False,
+        include_upper=False,
+    )
 
 
 class CatalogueObserver(ResolverObserver[str, Version]):
@@ -76,6 +102,7 @@ class CatalogueProvider(BaseProvider[str, Version]):
         self.solution_ranges = {}
         self.pending_dependencies = []
         self.matching_counts = {}
+        self.universes = {}
         self.roots = self.ranges(collected.requirements, roots=True)
         self.constraints = {}
         for package, constraint in collected.constraints.items():
@@ -221,7 +248,15 @@ class CatalogueProvider(BaseProvider[str, Version]):
         )
 
     def widen_decision(self, package, version):
-        return None
+        if package.startswith("<"):
+            return None
+        if package not in self.universes:
+            self.universes[package] = sorted(
+                {key for key, _ in self.catalogue(package)}
+            )
+        return cached_dependency_span(
+            package, version, self.universes[package], self.dependencies
+        )
 
     def solve(
         self, reporter: PipReporter | PipDebuggingReporter
