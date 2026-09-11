@@ -48,7 +48,13 @@ from pip._internal.utils.hashes import Hashes
 from pip._internal.utils.packaging import get_requirement
 from pip._internal.utils.virtualenv import running_under_virtualenv
 
-from .base import Candidate, Constraint, Requirement, RequirementCause
+from .base import (
+    Candidate,
+    CatalogueUnsupported,
+    Constraint,
+    Requirement,
+    RequirementCause,
+)
 from .candidates import (
     AlreadyInstalledCandidate,
     BaseCandidate,
@@ -107,6 +113,7 @@ class Factory:
         self._use_user_site = use_user_site
         self._force_reinstall = force_reinstall
         self._ignore_requires_python = ignore_requires_python
+        self.catalogue_only = False
 
         self._build_failures: Cache[InstallationError] = {}
         self._link_candidate_cache: Cache[LinkCandidate] = {}
@@ -349,6 +356,31 @@ class Factory:
             prefers_installed,
         )
 
+    def catalogue_candidates(
+        self, identifier: str, template: InstallRequirement | None
+    ) -> list[IndexCandidateInfo]:
+        """Snapshot finder order without preparing artifacts or requiring a parent."""
+        requirement = get_requirement(identifier)
+        name = canonicalize_name(requirement.name)
+        if template is None:
+            template = self._make_install_req_from_spec(identifier, None)
+        result = self._finder.find_best_candidate(project_name=name)
+        return [
+            (
+                candidate.version,
+                functools.partial(
+                    self._make_candidate_from_link,
+                    link=candidate.link,
+                    extras=frozenset(requirement.extras),
+                    template=template,
+                    name=name,
+                    version=candidate.version,
+                ),
+            )
+            for candidate in reversed(result.applicable_candidates)
+            if not candidate.link.is_yanked and not candidate.version.is_prerelease
+        ]
+
     def _iter_explicit_candidates_from_base(
         self,
         base_requirements: Iterable[Requirement],
@@ -487,6 +519,12 @@ class Factory:
                 (or link) and one with the extra. This allows centralized constraint
                 handling for the base, resulting in fewer candidate rejections.
         """
+        if (
+            self.catalogue_only
+            and ireq.link is not None
+            and ireq.match_markers(requested_extras)
+        ):
+            raise CatalogueUnsupported("URL dependency")
         if not ireq.match_markers(requested_extras):
             logger.info(
                 "Ignoring %s: markers '%s' don't match your environment",

@@ -23,7 +23,8 @@ from pip._internal.req.constructors import install_req_extend_extras
 from pip._internal.req.req_install import InstallRequirement
 from pip._internal.req.req_set import RequirementSet
 from pip._internal.resolution.base import BaseResolver, InstallRequirementProvider
-from pip._internal.resolution.nab.base import Candidate
+from pip._internal.resolution.nab.base import Candidate, CatalogueUnsupported
+from pip._internal.resolution.nab.catalogue import CatalogueProvider
 from pip._internal.resolution.nab.errors import installation_error
 from pip._internal.resolution.nab.factory import CollectedRootRequirements, Factory
 from pip._internal.resolution.nab.host import (
@@ -75,7 +76,8 @@ class Resolver(BaseResolver):
         assert upgrade_strategy in self._allowed_strategies
         assert not (ignore_dependencies and only_dependencies)
 
-        self.factory = Factory(
+        self._make_factory = functools.partial(
+            Factory,
             finder=finder,
             preparer=preparer,
             make_install_req=make_install_req,
@@ -86,6 +88,8 @@ class Resolver(BaseResolver):
             ignore_requires_python=ignore_requires_python,
             py_version_info=py_version_info,
         )
+        self.factory = self._make_factory()
+        self.ignore_installed = ignore_installed
         self.ignore_dependencies = ignore_dependencies
         self.only_dependencies = only_dependencies
         self.upgrade_strategy = upgrade_strategy
@@ -93,11 +97,45 @@ class Resolver(BaseResolver):
 
     def _resolve(self, collected: CollectedRootRequirements) -> Result:
         """Validate a provisional solution or retry with contextual query failures."""
+        if self.ignore_installed:
+            result = self._resolve_catalogue(collected)
+            if result is not None:
+                return result
+        else:
+            logger.info("Nab catalogue fallback: installed environment")
         result = self._resolve_attempt(collected, provisional=True)
         if result is None:
             result = self._resolve_attempt(collected, provisional=False)
         assert result is not None
         return result
+
+    def _resolve_catalogue(self, collected: CollectedRootRequirements) -> Result | None:
+        """Discard unsupported or unsuccessful static attempts before native retry."""
+        factory = self._make_factory()
+        factory.catalogue_only = True
+        native = PipProvider(
+            factory=factory,
+            constraints=collected.constraints,
+            ignore_dependencies=self.ignore_dependencies,
+            upgrade_strategy=self.upgrade_strategy,
+            user_requested=collected.user_requested,
+        )
+        try:
+            provider = CatalogueProvider(factory, native, collected)
+            solution = provider.solve()
+            if not provider.validate(solution):
+                logger.info("Nab catalogue fallback: final admission")
+                return None
+        except (CatalogueUnsupported, ResolutionError, PipError) as error:
+            logger.info("Nab catalogue fallback: %s: %s", type(error).__name__, error)
+            return None
+        logger.info("Nab catalogue success")
+        graph: DependencyGraph = {None: set(solution.roots)}
+        graph.update((package, set()) for package in solution.pins)
+        for parent, child in solution.edges:
+            graph[parent].add(child)
+        self.factory = factory
+        return Result(dict(provider.selected(solution)), graph)
 
     def _resolve_attempt(
         self, collected: CollectedRootRequirements, *, provisional: bool
