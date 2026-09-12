@@ -182,7 +182,11 @@ class CatalogueProvider(BaseProvider[str, Version]):
             key = package, version
             if key not in self.candidates:
                 prepared = self.prepared_counts.get(package, 0)
-                if not self.requested_order and prepared >= _REORDER_AFTER_VERSIONS:
+                if (
+                    not self.requested_order
+                    and prepared >= _REORDER_AFTER_VERSIONS
+                    and package not in self.roots
+                ):
                     raise _TryRequestedOrder(package)
                 candidate = catalogue.prepare(artifact)
                 if candidate is None:
