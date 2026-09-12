@@ -35,6 +35,7 @@ __all__ = [
     "CandidateHost",
     "CandidateProvider",
     "CandidateRequirement",
+    "PrecheckFeedback",
     "PreparedCandidate",
 ]
 
@@ -130,7 +131,7 @@ class _QueryFeedback(Generic[_PackageT]):
         )
 
 
-class _PrecheckFeedback(Generic[_PackageT, _KeyT]):
+class PrecheckFeedback(Generic[_PackageT, _KeyT]):
     """Bound retreat requests from distinct candidates sharing a selected blocker."""
 
     __slots__ = ("counts", "parents", "rejected", "targets")
@@ -213,7 +214,7 @@ class CandidateProvider(BaseProvider[_PackageT, _KeyT]):
         self._conflict_feedback = conflict_feedback
         self._dependency_precheck = dependency_precheck
         self._precheck_feedback = (
-            _PrecheckFeedback[_PackageT, _KeyT]() if precheck_feedback else None
+            PrecheckFeedback[_PackageT, _KeyT]() if precheck_feedback else None
         )
         self._positive_ranges: Mapping[_PackageT, RangeProtocol[_KeyT]] = {}
         self._pending: list[Incompatibility[_PackageT, _KeyT]] = []
