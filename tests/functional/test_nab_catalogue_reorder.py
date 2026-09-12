@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from tests.lib import PipTestEnvironment, create_basic_wheel_for_package
+from tests.lib.wheel import make_wheel
 
 
 def blocked_parent_wheels(script: PipTestEnvironment) -> list[Path]:
@@ -80,9 +81,15 @@ def test_catalogue_still_falls_back_for_a_url_discovered_after_reordering(
     hidden.mkdir()
     leaf = leaf.rename(hidden / leaf.name)
     for version in range(1, 33):
-        create_basic_wheel_for_package(
-            script, "url-parent", str(version), depends=[f"leaf @ {leaf.as_uri()}"]
+        wheel = make_wheel(
+            name="url_parent",
+            version=str(version),
+            metadata=(
+                f"Metadata-Version: 2.1\nName: url-parent\nVersion: {version}\n"
+                f"Requires-Dist: leaf @ {leaf.as_uri()}\n"
+            ),
         )
+        wheel.save_to_dir(script.scratch_path)
     result = script.pip(
         "install",
         "--ignore-installed",

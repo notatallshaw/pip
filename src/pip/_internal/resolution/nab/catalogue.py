@@ -319,7 +319,7 @@ class CatalogueProvider(BaseProvider[str, Version]):
             return self._solve_once(reporter)
         except _TryRequestedOrder as error:
             logger.info(
-                "Nab catalogue reordered after repeated preparation of %s", error
+                "Nab catalogue reordered after repeated preparation of %s", str(error)
             )
             self.requested_order = True
             self.solution_ranges = {}
