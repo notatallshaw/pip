@@ -8,7 +8,6 @@ from collections.abc import Mapping
 
 from pip._vendor.nab_resolver.candidate_provider import PrecheckFeedback
 from pip._vendor.nab_resolver.priority import compute_tier
-
 from pip._vendor.nab_resolver.resolver import (
     BaseProvider,
     Resolver,
@@ -165,15 +164,17 @@ class CatalogueProvider(BaseProvider[str, Version]):
                 ),
                 None,
             )
+        catalogue = self.catalogue(package)
         choices = version_range.filter(
-            self.catalogue(package),
-            key=lambda item: item[0],
+            catalogue.candidates,
+            key=lambda item: item.version,
             prereleases=self.factory.catalogue_prerelease_policy(package),
         )
-        for version, prepare in choices:
+        for artifact in choices:
+            version = artifact.version
             key = package, version
             if key not in self.candidates:
-                candidate = prepare()
+                candidate = catalogue.prepare(artifact)
                 if candidate is None:
                     raise CatalogueUnsupported("artifact preparation rejected")
                 self.remember(candidate)
@@ -232,7 +233,10 @@ class CatalogueProvider(BaseProvider[str, Version]):
                 )
                 if dependency in self.solution_decisions:
                     self.precheck_feedback.record(
-                        package, version, dependency, self.solution_decisions[dependency]
+                        package,
+                        version,
+                        dependency,
+                        self.solution_decisions[dependency],
                     )
                 return True
         return False
@@ -247,7 +251,10 @@ class CatalogueProvider(BaseProvider[str, Version]):
                 name == package and version in version_range
                 for name, version in self.candidates
             )
-        return any(version in version_range for version, _ in self.catalogue(package))
+        return any(
+            candidate.version in version_range
+            for candidate in self.catalogue(package).candidates
+        )
 
     def get_dependencies(self, package, version):
         key = package, version
@@ -269,9 +276,9 @@ class CatalogueProvider(BaseProvider[str, Version]):
             else:
                 count = len(
                     {
-                        version
-                        for version, _ in self.catalogue(package)
-                        if version in version_range
+                        candidate.version
+                        for candidate in self.catalogue(package).candidates
+                        if candidate.version in version_range
                     }
                 )
             self.matching_counts[key] = count
@@ -295,7 +302,7 @@ class CatalogueProvider(BaseProvider[str, Version]):
             return None
         if package not in self.universes:
             self.universes[package] = sorted(
-                {key for key, _ in self.catalogue(package)}
+                {candidate.version for candidate in self.catalogue(package).candidates}
             )
         return cached_dependency_span(
             package, version, self.universes[package], self.dependencies
@@ -313,7 +320,7 @@ class CatalogueProvider(BaseProvider[str, Version]):
         ).solve(self.roots, self.constraints)
 
     def validate(self, solution: Solution[str, Version]) -> bool:
-        """Recheck final native requirements and artifact order within each selected version."""
+        """Recheck native requirements and artifact order for the selected versions."""
         requirements = defaultdict(list)
         for requirement in self.collected.requirements:
             requirements[requirement.name].append(requirement)

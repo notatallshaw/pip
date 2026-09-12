@@ -31,6 +31,7 @@ from pip._internal.exceptions import (
 )
 from pip._internal.index.package_finder import PackageFinder
 from pip._internal.metadata import BaseDistribution, get_default_environment
+from pip._internal.models.candidate import InstallationCandidate
 from pip._internal.models.link import Link, links_equivalent
 from pip._internal.models.wheel import Wheel
 from pip._internal.operations.prepare import RequirementPreparer
@@ -90,6 +91,30 @@ class CollectedRootRequirements(NamedTuple):
     requirements: list[Requirement]
     constraints: dict[str, Constraint]
     user_requested: dict[str, int]
+
+
+class CandidateCatalogue:
+    """Keep finder-ordered artifacts with one shared preparation context."""
+
+    def __init__(
+        self,
+        factory: Factory,
+        candidates: list[InstallationCandidate],
+        name: NormalizedName,
+        extras: frozenset[str],
+        template: InstallRequirement,
+    ) -> None:
+        self.factory = factory
+        self.candidates = candidates
+        self.name = name
+        self.extras = extras
+        self.template = template
+
+    def prepare(self, candidate: InstallationCandidate) -> Candidate | None:
+        """Prepare only the artifact selected from this catalogue."""
+        return self.factory._prepare_catalogue_candidate(
+            candidate.link, self.extras, self.template, self.name, candidate.version
+        )
 
 
 class Factory:
@@ -359,7 +384,7 @@ class Factory:
 
     def catalogue_candidates(
         self, identifier: str, template: InstallRequirement | None
-    ) -> list[IndexCandidateInfo]:
+    ) -> CandidateCatalogue:
         """Snapshot finder order without preparing artifacts or requiring a parent."""
         requirement = get_requirement(identifier)
         name = canonicalize_name(requirement.name)
@@ -372,21 +397,17 @@ class Factory:
         candidates = evaluator.get_applicable_candidates(
             self._finder.find_all_candidates(name)
         )
-        return [
-            (
-                candidate.version,
-                functools.partial(
-                    self._prepare_catalogue_candidate,
-                    link=candidate.link,
-                    extras=frozenset(requirement.extras),
-                    template=template,
-                    name=name,
-                    version=candidate.version,
-                ),
-            )
-            for candidate in reversed(candidates)
-            if not candidate.link.is_yanked
-        ]
+        return CandidateCatalogue(
+            self,
+            [
+                candidate
+                for candidate in reversed(candidates)
+                if not candidate.link.is_yanked
+            ],
+            name,
+            frozenset(requirement.extras),
+            template,
+        )
 
     def catalogue_requires_yanked(
         self, identifier: str, specifier: SpecifierSet
@@ -437,7 +458,7 @@ class Factory:
         requirements: Mapping[str, Iterable[Requirement]],
         constraint: Constraint,
     ) -> bool:
-        """Check prerelease admission before a synthetic validation pin grants opt-in."""
+        """Check prerelease admission without granting opt-in through validation pins."""
         if candidate.source_link is None:
             return True
         declarations = list(requirements[candidate.name])
