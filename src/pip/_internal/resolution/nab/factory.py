@@ -458,7 +458,7 @@ class Factory:
         requirements: Mapping[str, Iterable[Requirement]],
         constraint: Constraint,
     ) -> bool:
-        """Check prerelease admission without granting opt-in through validation pins."""
+        """Check prerelease admission without synthetic validation pins."""
         if candidate.source_link is None:
             return True
         declarations = list(requirements[candidate.name])
