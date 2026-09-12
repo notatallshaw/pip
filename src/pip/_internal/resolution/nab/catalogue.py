@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from bisect import bisect_left, bisect_right
 from collections import defaultdict
 from collections.abc import Mapping
@@ -26,6 +27,13 @@ from pip._internal.resolution.nab.base import (
 from pip._internal.resolution.nab.factory import CollectedRootRequirements, Factory
 from pip._internal.resolution.nab.provider import PipProvider
 from pip._internal.resolution.nab.reporter import PipDebuggingReporter, PipReporter
+
+logger = logging.getLogger(__name__)
+_REORDER_AFTER_VERSIONS = 8
+
+
+class _TryRequestedOrder(Exception):
+    """Abandon search state without discarding fixed-catalogue metadata."""
 
 
 def cached_dependency_span(package, version, universe, dependencies):
@@ -102,6 +110,8 @@ class CatalogueProvider(BaseProvider[str, Version]):
         self.pending_dependencies = []
         self.matching_counts = {}
         self.universes = {}
+        self.prepared_counts: dict[str, int] = {}
+        self.requested_order = False
         self.roots = self.ranges(collected.requirements, roots=True)
         self.constraints = {}
         for package, constraint in collected.constraints.items():
@@ -171,10 +181,14 @@ class CatalogueProvider(BaseProvider[str, Version]):
             version = artifact.version
             key = package, version
             if key not in self.candidates:
+                prepared = self.prepared_counts.get(package, 0)
+                if not self.requested_order and prepared >= _REORDER_AFTER_VERSIONS:
+                    raise _TryRequestedOrder(package)
                 candidate = catalogue.prepare(artifact)
                 if candidate is None:
                     raise CatalogueUnsupported("artifact preparation rejected")
                 self.remember(candidate)
+                self.prepared_counts[package] = prepared + 1
             if self.precheck_dependencies(package, version):
                 return None
             return version
@@ -269,6 +283,15 @@ class CatalogueProvider(BaseProvider[str, Version]):
             culprit_counts.get(package, 0) if culprit_counts else 0,
             culprit_counts,
         )
+        if self.requested_order:
+            return (
+                tier,
+                self.matching_counts[key] != 1,
+                self.collected.user_requested.get(package, float("inf")),
+                self.matching_counts[key],
+                "[" not in package,
+                package,
+            )
         return (
             tier,
             self.matching_counts[key],
@@ -292,6 +315,21 @@ class CatalogueProvider(BaseProvider[str, Version]):
         self, reporter: PipReporter | PipDebuggingReporter
     ) -> Solution[str, Version]:
         reporter.starting()
+        try:
+            return self._solve_once(reporter)
+        except _TryRequestedOrder as error:
+            logger.info(
+                "Nab catalogue reordered after repeated preparation of %s", error
+            )
+            self.requested_order = True
+            self.solution_ranges = {}
+            self.pending_dependencies.clear()
+        return self._solve_once(reporter)
+
+    def _solve_once(
+        self, reporter: PipReporter | PipDebuggingReporter
+    ) -> Solution[str, Version]:
+        """Run a fresh solver over the retained fixed-catalogue metadata."""
         return Resolver(
             self,
             range_type=VersionRange,
