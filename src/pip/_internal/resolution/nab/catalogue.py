@@ -6,7 +6,6 @@ from bisect import bisect_left, bisect_right
 from collections import defaultdict
 from collections.abc import Mapping
 
-from pip._vendor.nab_resolver.candidate_provider import PrecheckFeedback
 from pip._vendor.nab_resolver.priority import compute_tier
 from pip._vendor.nab_resolver.resolver import (
     BaseProvider,
@@ -100,8 +99,6 @@ class CatalogueProvider(BaseProvider[str, Version]):
         self.dependencies = {}
         self.templates = {}
         self.solution_ranges = {}
-        self.solution_decisions: Mapping[str, Version] = {}
-        self.precheck_feedback: PrecheckFeedback[str, Version] = PrecheckFeedback()
         self.pending_dependencies = []
         self.matching_counts = {}
         self.universes = {}
@@ -185,15 +182,6 @@ class CatalogueProvider(BaseProvider[str, Version]):
 
     def receive_partial_solution_hint(self, positive_ranges, decisions):
         self.solution_ranges = positive_ranges
-        self.solution_decisions = decisions
-
-    def receive_decision(self, package: str, version: Version) -> bool:
-        """Refresh priorities when a blocking decision's demotion expires."""
-        return self.precheck_feedback.decided(package)
-
-    def consume_force_backtrack_targets(self) -> list[str]:
-        """Let the resolver revisit decisions blocking repeated parent choices."""
-        return self.precheck_feedback.consume_targets()
 
     def precheck_base_version(self, package, version_range):
         """Enforce extras/base version equality before preparing extras metadata."""
@@ -231,13 +219,6 @@ class CatalogueProvider(BaseProvider[str, Version]):
                         cause=IncompatibilityCause.DEPENDENCY,
                     )
                 )
-                if dependency in self.solution_decisions:
-                    self.precheck_feedback.record(
-                        package,
-                        version,
-                        dependency,
-                        self.solution_decisions[dependency],
-                    )
                 return True
         return False
 
@@ -287,7 +268,6 @@ class CatalogueProvider(BaseProvider[str, Version]):
             conflict_counts.get(package, 0),
             culprit_counts.get(package, 0) if culprit_counts else 0,
             culprit_counts,
-            force_backtracked=self.precheck_feedback.requested(package),
         )
         return (
             tier,
