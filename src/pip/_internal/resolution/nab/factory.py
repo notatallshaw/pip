@@ -163,6 +163,19 @@ class Factory:
     def force_reinstall(self) -> bool:
         return self._force_reinstall
 
+    @contextlib.contextmanager
+    def catalogue_context(self) -> Iterator[None]:
+        """Retain native preparation while isolating static admission and failures."""
+        assert not self.catalogue_only
+        failures = self._build_failures
+        self._build_failures = {}
+        self.catalogue_only = True
+        try:
+            yield
+        finally:
+            self.catalogue_only = False
+            self._build_failures = failures
+
     def _fail_if_link_is_unsupported_wheel(self, link: Link) -> None:
         if not link.is_wheel:
             return
