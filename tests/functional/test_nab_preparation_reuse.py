@@ -109,6 +109,32 @@ def test_unsatisfiable_fallback_reuses_prepared_wheel(
     assert "NATIVE_ACTIVE_EXCEPTION" not in result.stdout
 
 
+def test_definitive_fallback_discovers_a_url_after_static_failure(
+    script: PipTestEnvironment,
+) -> None:
+    create_basic_wheel_for_package(script, "dep", "1.0")
+    hidden = script.scratch_path / "hidden"
+    hidden.mkdir()
+    direct = create_basic_wheel_for_package(script, "dep", "3.0")
+    direct = direct.rename(hidden / direct.name)
+    make_wheel(
+        name="bridge",
+        version="1.0",
+        metadata=(
+            "Metadata-Version: 2.1\nName: bridge\nVersion: 1.0\n"
+            f"Requires-Dist: dep @ {direct.as_uri()}\n"
+        ),
+    ).save_to_dir(script.scratch_path)
+
+    result = tracked_install(script, "dep>=2", "bridge")
+
+    script.assert_installed(dep="3.0", bridge="1.0")
+    assert "Nab catalogue fallback: ResolutionError" in result.stdout
+    assert "NATIVE True" not in result.stdout
+    assert result.stdout.splitlines().count("NATIVE False") == 1
+    assert "NATIVE_ACTIVE_EXCEPTION" not in result.stdout
+
+
 def test_fallback_rechecks_failed_metadata_in_native_order(
     script: PipTestEnvironment,
 ) -> None:
