@@ -163,6 +163,8 @@ class CatalogueProvider(BaseProvider[str, Version]):
                 ):
                     raise CatalogueUnsupported("yanked requirement pin")
                 self.templates.setdefault(requirement.name, ireq)
+                if roots:
+                    self.templates.setdefault(requirement.project_name, ireq)
                 allowed = ireq.specifier.to_range()
             else:
                 allowed = VersionRange.empty()
