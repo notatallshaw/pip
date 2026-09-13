@@ -110,9 +110,8 @@ class Resolver(BaseResolver):
         return result
 
     def _resolve_catalogue(self, collected: CollectedRootRequirements) -> Result | None:
-        """Discard unsupported or unsuccessful static attempts before native retry."""
-        factory = self._make_factory()
-        factory.catalogue_only = True
+        """Try fixed catalogues while retaining native preparation for fallback."""
+        factory = self.factory
         native = PipProvider(
             factory=factory,
             constraints=collected.constraints,
@@ -121,16 +120,17 @@ class Resolver(BaseResolver):
             user_requested=collected.user_requested,
         )
         try:
-            provider = CatalogueProvider(factory, native, collected)
-            reporter = (
-                PipDebuggingReporter()
-                if "PIP_RESOLVER_DEBUG" in os.environ
-                else PipReporter(collected.constraints)
-            )
-            solution = provider.solve(reporter)
-            if not provider.validate(solution):
-                logger.info("Nab catalogue fallback: final admission")
-                return None
+            with factory.catalogue_context():
+                provider = CatalogueProvider(factory, native, collected)
+                reporter = (
+                    PipDebuggingReporter()
+                    if "PIP_RESOLVER_DEBUG" in os.environ
+                    else PipReporter(collected.constraints)
+                )
+                solution = provider.solve(reporter)
+                if not provider.validate(solution):
+                    logger.info("Nab catalogue fallback: final admission")
+                    return None
         except (CatalogueUnsupported, ResolutionError, PipError) as error:
             logger.info("Nab catalogue fallback: %s: %s", type(error).__name__, error)
             return None
@@ -139,7 +139,6 @@ class Resolver(BaseResolver):
         graph.update((package, set()) for package in solution.pins)
         for parent, child in solution.edges:
             graph[parent].add(child)
-        self.factory = factory
         return Result(dict(provider.selected(solution)), graph)
 
     def _resolve_attempt(
