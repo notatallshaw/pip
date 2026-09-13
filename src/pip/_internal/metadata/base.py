@@ -447,6 +447,10 @@ class BaseDistribution(Protocol):
         """
         raise NotImplementedError()
 
+    def validate_dependencies(self) -> None:
+        """Validate dependency declarations with this backend's extra processing."""
+        list(self.iter_dependencies(list(self.iter_provided_extras())))
+
     def iter_raw_dependencies(self) -> Iterable[str]:
         """Raw Requires-Dist metadata."""
         return self.metadata.get_all("Requires-Dist", [])
