@@ -1,7 +1,11 @@
+from pathlib import Path
+
 from tests.lib import PipTestEnvironment, create_basic_wheel_for_package
 
 
-def yanked_listing(script, packages):
+def yanked_listing(
+    script: PipTestEnvironment, packages: list[tuple[str, str, list[str]]]
+) -> Path:
     """Build a local listing with a yanked dep2 and literal dependency metadata."""
     files = script.scratch_path / "files"
     files.mkdir()
