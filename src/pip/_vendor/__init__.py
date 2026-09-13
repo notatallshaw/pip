@@ -63,6 +63,7 @@ if DEBUNDLED:
     vendored("dependency-groups")
     vendored("distlib")
     vendored("distro")
+    vendored("nab_resolver")
     vendored("packaging")
     vendored("packaging.version")
     vendored("packaging.specifiers")
