@@ -10,15 +10,26 @@ from tests.lib.wheel import make_wheel
 
 PREPARATION_PROBE = """\
 import runpy
+import sys
 from pip._internal.resolution.nab.candidates import LinkCandidate
+from pip._internal.resolution.nab.resolver import Resolver
 
 original = LinkCandidate._prepare
+original_resolve = Resolver._resolve_attempt
 
 def prepare(candidate):
     print("PREPARE " + candidate.source_link.filename, flush=True)
     return original(candidate)
 
 LinkCandidate._prepare = prepare
+
+def resolve_native(resolver, collected, *, provisional):
+    print("NATIVE " + str(provisional), flush=True)
+    if sys.exc_info()[0] is not None:
+        print("NATIVE_ACTIVE_EXCEPTION", flush=True)
+    return original_resolve(resolver, collected, provisional=provisional)
+
+Resolver._resolve_attempt = resolve_native
 runpy.run_module("pip", run_name="__main__", alter_sys=True)
 """
 
@@ -28,6 +39,7 @@ def tracked_install(
     *requirements: str | Path,
     options: tuple[str, ...] = (),
     expect_error: bool = False,
+    ignore_installed: bool = True,
 ) -> TestPipResult:
     """Run real pip while counting candidate preparation at its native boundary."""
     return script.run(
@@ -35,12 +47,12 @@ def tracked_install(
         "-c",
         PREPARATION_PROBE,
         "install",
-        "--ignore-installed",
+        *(("--ignore-installed",) if ignore_installed else ()),
         "--no-index",
         "--find-links",
-        script.scratch_path,
+        str(script.scratch_path),
         *options,
-        *requirements,
+        *(str(requirement) for requirement in requirements),
         expect_error=expect_error,
         allow_stderr_warning=True if script.pip_expect_warning else None,
     )
@@ -92,6 +104,9 @@ def test_unsatisfiable_fallback_reuses_prepared_wheel(
     assert "Nab catalogue fallback: ResolutionError" in result.stdout
     assert "No matching distribution found for dep>=2" in result.stdout + result.stderr
     assert preparation_count(result.stdout, app) == 1
+    assert "NATIVE True" not in result.stdout
+    assert result.stdout.splitlines().count("NATIVE False") == 1
+    assert "NATIVE_ACTIVE_EXCEPTION" not in result.stdout
 
 
 def test_fallback_rechecks_failed_metadata_in_native_order(
@@ -121,3 +136,17 @@ def test_explicit_root_restores_native_dependency_handling(
     script.assert_installed(app="1.0", dep="3.0")
     assert "CatalogueUnsupported: explicit root" in result.stdout
     assert preparation_count(result.stdout, older) == 1
+    assert result.stdout.splitlines().count("NATIVE True") == 1
+    assert "NATIVE False" not in result.stdout
+
+
+def test_installed_environment_bypass_keeps_provisional_policy(
+    script: PipTestEnvironment,
+) -> None:
+    create_basic_wheel_for_package(script, "pkg", "1.0")
+    result = tracked_install(script, "pkg", ignore_installed=False)
+
+    script.assert_installed(pkg="1.0")
+    assert "Nab catalogue fallback: installed environment" in result.stdout
+    assert result.stdout.splitlines().count("NATIVE True") == 1
+    assert "NATIVE False" not in result.stdout

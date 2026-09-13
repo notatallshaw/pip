@@ -96,15 +96,23 @@ class Resolver(BaseResolver):
         self._result: Result | None = None
 
     def _resolve(self, collected: CollectedRootRequirements) -> Result:
-        """Validate a provisional solution or retry with contextual query failures."""
+        """Choose native fallback policy from the catalogue solve outcome."""
+        provisional = True
         if self.ignore_installed:
-            result = self._resolve_catalogue(collected)
-            if result is not None:
-                return result
+            try:
+                result = self._resolve_catalogue(collected)
+            except ResolutionError as error:
+                logger.info(
+                    "Nab catalogue fallback: %s: %s", type(error).__name__, error
+                )
+                provisional = False
+            else:
+                if result is not None:
+                    return result
         else:
             logger.info("Nab catalogue fallback: installed environment")
-        result = self._resolve_attempt(collected, provisional=True)
-        if result is None:
+        result = self._resolve_attempt(collected, provisional=provisional)
+        if result is None and provisional:
             result = self._resolve_attempt(collected, provisional=False)
         assert result is not None
         return result
@@ -131,7 +139,7 @@ class Resolver(BaseResolver):
                 if not provider.validate(solution):
                     logger.info("Nab catalogue fallback: final admission")
                     return None
-        except (CatalogueUnsupported, ResolutionError, PipError) as error:
+        except (CatalogueUnsupported, PipError) as error:
             logger.info("Nab catalogue fallback: %s: %s", type(error).__name__, error)
             return None
         logger.info("Nab catalogue success")
