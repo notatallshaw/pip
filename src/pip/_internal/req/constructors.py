@@ -460,11 +460,14 @@ def install_req_from_req_string(
         PyPI.file_storage_domain,
         TestPyPI.file_storage_domain,
     ]
+    source_link = (
+        comes_from.cached_wheel_source_link or comes_from.link if comes_from else None
+    )
     if (
         req.url
         and comes_from
-        and comes_from.link
-        and comes_from.link.netloc in domains_not_allowed
+        and source_link
+        and source_link.netloc in domains_not_allowed
     ):
         # Explicitly disallow pypi packages that depend on external urls
         raise InstallationError(
