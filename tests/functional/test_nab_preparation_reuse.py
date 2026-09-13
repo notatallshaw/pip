@@ -42,10 +42,11 @@ def tracked_install(
     ignore_installed: bool = True,
 ) -> TestPipResult:
     """Run real pip while counting candidate preparation at its native boundary."""
+    probe = script.scratch_path / "preparation_probe.py"
+    probe.write_text(PREPARATION_PROBE)
     return script.run(
         "python",
-        "-c",
-        PREPARATION_PROBE,
+        str(probe),
         "install",
         *(("--ignore-installed",) if ignore_installed else ()),
         "--no-index",
