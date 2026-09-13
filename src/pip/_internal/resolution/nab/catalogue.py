@@ -5,7 +5,8 @@ from __future__ import annotations
 import logging
 from bisect import bisect_left, bisect_right
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING, cast
 
 from pip._vendor.nab_resolver.priority import compute_tier
 from pip._vendor.nab_resolver.resolver import (
@@ -14,19 +15,33 @@ from pip._vendor.nab_resolver.resolver import (
     ResolverObserver,
     Solution,
 )
-from pip._vendor.nab_resolver.types import Incompatibility, IncompatibilityCause, Term
+from pip._vendor.nab_resolver.types import (
+    Incompatibility,
+    IncompatibilityCause,
+    RangeProtocol,
+    Term,
+)
 from pip._vendor.packaging.ranges import VersionRange
 from pip._vendor.packaging.specifiers import SpecifierSet
 from pip._vendor.packaging.version import Version
 
+from pip._internal.req.req_install import InstallRequirement
 from pip._internal.resolution.nab.base import (
     Candidate,
     CatalogueUnsupported,
     Constraint,
+    Requirement,
 )
-from pip._internal.resolution.nab.factory import CollectedRootRequirements, Factory
+from pip._internal.resolution.nab.factory import (
+    CandidateCatalogue,
+    CollectedRootRequirements,
+    Factory,
+)
 from pip._internal.resolution.nab.provider import PipProvider
 from pip._internal.resolution.nab.reporter import PipDebuggingReporter, PipReporter
+
+if TYPE_CHECKING:
+    DependencyRecord = tuple[tuple[Requirement, ...], dict[str, VersionRange]]
 
 logger = logging.getLogger(__name__)
 _REORDER_AFTER_VERSIONS = 8
@@ -36,7 +51,12 @@ class _TryRequestedOrder(Exception):
     """Abandon search state without discarding fixed-catalogue metadata."""
 
 
-def cached_dependency_span(package, version, universe, dependencies):
+def cached_dependency_span(
+    package: str,
+    version: Version,
+    universe: Sequence[Version],
+    dependencies: Mapping[tuple[str, Version], DependencyRecord],
+) -> VersionRange:
     """Cover adjacent cached equivalents and the empty gaps around them."""
     below = bisect_left(universe, version)
     above = bisect_right(universe, version)
@@ -64,25 +84,27 @@ def cached_dependency_span(package, version, universe, dependencies):
 class CatalogueObserver(ResolverObserver[str, Version]):
     """Forward static solver decisions to pip's candidate reporter."""
 
-    def __init__(self, provider, reporter):
+    def __init__(
+        self, provider: CatalogueProvider, reporter: PipReporter | PipDebuggingReporter
+    ) -> None:
         self.provider = provider
         self.reporter = reporter
-        self.decisions = {}
+        self.decisions: dict[str, Version] = {}
 
-    def on_decision(self, package, version, level):
+    def on_decision(self, package: str, version: Version, level: int) -> None:
         self.decisions[package] = version
         self.reporter.pinning(self.provider.candidates[package, version])
 
     def on_conflict_step(
         self,
-        incompatibility,
+        incompatibility: Incompatibility[str, Version],
         *,
-        satisfier_package,
-        satisfier_is_decision,
-        satisfier_level,
-        previous_level,
-        can_backjump,
-    ):
+        satisfier_package: str,
+        satisfier_is_decision: bool,
+        satisfier_level: int,
+        previous_level: int,
+        can_backjump: bool,
+    ) -> None:
         if satisfier_is_decision and satisfier_package in self.decisions:
             candidate = self.provider.candidates[
                 satisfier_package, self.decisions[satisfier_package]
@@ -98,22 +120,22 @@ class CatalogueProvider(BaseProvider[str, Version]):
         factory: Factory,
         native: PipProvider,
         collected: CollectedRootRequirements,
-    ):
+    ) -> None:
         self.factory = factory
         self.native = native
         self.collected = collected
-        self.catalogues = {}
-        self.candidates = {}
-        self.dependencies = {}
-        self.templates = {}
-        self.solution_ranges = {}
-        self.pending_dependencies = []
-        self.matching_counts = {}
-        self.universes = {}
+        self.catalogues: dict[str, CandidateCatalogue] = {}
+        self.candidates: dict[tuple[str, Version], Candidate] = {}
+        self.dependencies: dict[tuple[str, Version], DependencyRecord] = {}
+        self.templates: dict[str, InstallRequirement] = {}
+        self.solution_ranges: Mapping[str, RangeProtocol[Version]] = {}
+        self.pending_dependencies: list[Incompatibility[str, Version]] = []
+        self.matching_counts: dict[tuple[str, RangeProtocol[Version]], int] = {}
+        self.universes: dict[str, list[Version]] = {}
         self.prepared_counts: dict[str, int] = {}
         self.requested_order = False
         self.roots = self.ranges(collected.requirements, roots=True)
-        self.constraints = {}
+        self.constraints: dict[str, VersionRange] = {}
         for package, constraint in collected.constraints.items():
             if constraint.links or constraint.hashes:
                 raise CatalogueUnsupported("source or hash constraint")
@@ -121,9 +143,11 @@ class CatalogueProvider(BaseProvider[str, Version]):
                 raise CatalogueUnsupported("yanked constraint pin")
             self.constraints[package] = constraint.specifier.to_range()
 
-    def ranges(self, requirements, *, roots=False):
+    def ranges(
+        self, requirements: Iterable[Requirement], *, roots: bool = False
+    ) -> dict[str, VersionRange]:
         """Translate declarations without granting URL candidates eligibility."""
-        ranges = {}
+        ranges: dict[str, VersionRange] = {}
         for requirement in requirements:
             candidate, ireq = requirement.get_candidate_lookup()
             if candidate is not None:
@@ -146,20 +170,23 @@ class CatalogueProvider(BaseProvider[str, Version]):
             ranges[name] = ranges.get(name, VersionRange.full()) & allowed
         return ranges
 
-    def remember(self, candidate):
+    def remember(self, candidate: Candidate) -> None:
         key = candidate.name, candidate.version
         previous = self.candidates.setdefault(key, candidate)
         if previous != candidate:
             raise CatalogueUnsupported("same-version source replacement")
 
-    def catalogue(self, package):
+    def catalogue(self, package: str) -> CandidateCatalogue:
+        """Return the request's fixed artifact list, loading it on first use."""
         if package not in self.catalogues:
             self.catalogues[package] = self.factory.catalogue_candidates(
                 package, self.templates.get(package)
             )
         return self.catalogues[package]
 
-    def choose_version(self, package, version_range):
+    def choose_version(
+        self, package: str, version_range: RangeProtocol[Version]
+    ) -> Version | None:
         if self.precheck_base_version(package, version_range):
             return None
         if package.startswith("<"):
@@ -172,7 +199,8 @@ class CatalogueProvider(BaseProvider[str, Version]):
                 None,
             )
         catalogue = self.catalogue(package)
-        choices = version_range.filter(
+        # _solve_once binds this provider to VersionRange's prerelease filtering.
+        choices = cast(VersionRange, version_range).filter(
             catalogue.candidates,
             key=lambda item: item.version,
             prereleases=self.factory.catalogue_prerelease_policy(package),
@@ -198,10 +226,16 @@ class CatalogueProvider(BaseProvider[str, Version]):
             return version
         return None
 
-    def receive_partial_solution_hint(self, positive_ranges, decisions):
+    def receive_partial_solution_hint(
+        self,
+        positive_ranges: Mapping[str, RangeProtocol[Version]],
+        decisions: Mapping[str, Version],
+    ) -> None:
         self.solution_ranges = positive_ranges
 
-    def precheck_base_version(self, package, version_range):
+    def precheck_base_version(
+        self, package: str, version_range: RangeProtocol[Version]
+    ) -> bool:
         """Enforce extras/base version equality before preparing extras metadata."""
         base, bracket, _ = package.partition("[")
         allowed = self.solution_ranges.get(base) if bracket else None
@@ -218,7 +252,7 @@ class CatalogueProvider(BaseProvider[str, Version]):
         )
         return True
 
-    def precheck_dependencies(self, package, version):
+    def precheck_dependencies(self, package: str, version: Version) -> bool:
         """Expose a conflicting dependency before committing its parent candidate."""
         for dependency, required in self.get_dependencies(package, version).items():
             if dependency == package:
@@ -240,11 +274,13 @@ class CatalogueProvider(BaseProvider[str, Version]):
                 return True
         return False
 
-    def consume_pending_clauses(self):
+    def consume_pending_clauses(self) -> list[Incompatibility[str, Version]]:
         pending, self.pending_dependencies = self.pending_dependencies, []
         return pending
 
-    def has_satisfying_version(self, package, version_range):
+    def has_satisfying_version(
+        self, package: str, version_range: RangeProtocol[Version]
+    ) -> bool:
         if package.startswith("<"):
             return any(
                 name == package and version in version_range
@@ -255,7 +291,9 @@ class CatalogueProvider(BaseProvider[str, Version]):
             for candidate in self.catalogue(package).candidates
         )
 
-    def get_dependencies(self, package, version):
+    def get_dependencies(
+        self, package: str, version: Version
+    ) -> dict[str, VersionRange]:
         key = package, version
         if key not in self.dependencies:
             candidate = self.candidates[key]
@@ -264,7 +302,16 @@ class CatalogueProvider(BaseProvider[str, Version]):
             self.dependencies[key] = requirements, ranges
         return self.dependencies[key][1]
 
-    def prioritize(self, package, version_range, conflict_counts, culprit_counts=None):
+    def prioritize(
+        self,
+        package: str,
+        version_range: RangeProtocol[Version],
+        conflict_counts: Mapping[str, int],
+        culprit_counts: Mapping[str, int] | None = None,
+    ) -> (
+        tuple[int, bool, int | float, int, bool, str]
+        | tuple[int, int, bool, int | float, str]
+    ):
         key = package, version_range
         if key not in self.matching_counts:
             if package.startswith("<"):
@@ -304,7 +351,7 @@ class CatalogueProvider(BaseProvider[str, Version]):
             package,
         )
 
-    def widen_decision(self, package, version):
+    def widen_decision(self, package: str, version: Version) -> VersionRange | None:
         if package.startswith("<"):
             return None
         if package not in self.universes:
@@ -343,7 +390,7 @@ class CatalogueProvider(BaseProvider[str, Version]):
 
     def validate(self, solution: Solution[str, Version]) -> bool:
         """Recheck native requirements and artifact order for the selected versions."""
-        requirements = defaultdict(list)
+        requirements: dict[str, list[Requirement]] = defaultdict(list)
         for requirement in self.collected.requirements:
             requirements[requirement.name].append(requirement)
         for name, version in solution.pins.items():

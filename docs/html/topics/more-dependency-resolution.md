@@ -22,21 +22,9 @@ you have if you hit a problem situation like this a little later.
 
 ## Python specific issues
 
-Many algorithms for handling dependency resolution assume that you know the
-full details of the problem at the start - that is, you know all of the
-dependencies up front. Unfortunately, that is not the case for Python packages.
-With the current package index structure, dependency metadata is only available
-by downloading the package file, and extracting the data from it. And in the
-case of source distributions, the situation is even worse as the project must
-be built after being downloaded in order to determine the dependencies.
+Dependency metadata is discovered during resolution. Pip can fetch separate metadata files when the index provides them, read metadata from downloaded distributions, or ask a source distribution's build backend to prepare it.
 
-Work is ongoing to try to make metadata more readily available at lower cost,
-but at the time of writing, this has not been completed.
-
-As downloading projects is a costly operation, pip cannot pre-compute the full
-dependency tree. This means that we are unable to use a number of techniques
-for solving the dependency resolution problem. In practice, we have to use a
-*backtracking algorithm*.
+Fetching and preparing every available release would be costly. Pip instead reads metadata as it considers candidates and backtracks when their dependencies conflict.
 
 ## Dependency metadata
 
@@ -86,11 +74,7 @@ by another component of pip, the "finder". The finder is responsible for
 feeding candidates to the resolver, and has a key role to play in selecting
 suitable candidates.
 
-Note that the resolver is *only* relevant for packages fetched from an index.
-Candidates coming from other sources (local source directories, {ref}`direct
-URL references <pypug:dependency-specifiers>`) do *not* go through the finder,
-and are merged with the candidates provided by the finder as part of the resolver's
-"provider" implementation.
+Candidates from local source directories and {ref}`direct URL references <pypug:dependency-specifiers>` do not go through the finder. They still participate in resolution, alongside candidates obtained through the finder.
 
 As well as determining what versions exist in the index for a given project,
 the finder selects the best distribution file to use for that candidate. This
@@ -106,11 +90,23 @@ over older versions, for example.
 
 ## The resolver algorithm
 
-The resolver uses nab's PubGrub algorithm. Pip supplies native requirements and prepared candidates through `NativeHost`, while nab tracks version and source restrictions, learns conflicts, and backtracks.
+The resolver uses nab's PubGrub algorithm through two providers. Both leave package preparation and installation policy with pip.
+
+### Fixed-catalogue resolution
+
+For eligible `--ignore-installed` requests, pip first resolves against fixed lists of finder candidates. Metadata is still prepared on demand; a fixed candidate list does not mean every dependency is known in advance. The provider checks dependencies before committing a candidate and reuses metadata when backtracking. It usually considers packages with fewer matching versions first. After repeated preparation of versions of a transitive package, it can restart once with command-line requirement order taking precedence over non-singleton candidate counts.
+
+Pip rechecks the selected artifacts against native requirements, constraints, prerelease admission and finder preference before accepting the result. A URL dependency, an unsupported preparation option, a failure to resolve, or failed final admission sends the original request to the native provider. An unsuccessful fixed-catalogue solve is not proof that the original request is impossible: an unvisited package can declare a URL that supplies a missing candidate.
+
+### Native resolution and fallback
+
+Requests that consider installed distributions, and requests with explicit root candidates, use native resolution. Pip supplies requirements and prepared candidates through `NativeHost`, while nab tracks version and source restrictions, learns conflicts, and backtracks.
+
+Fallback starts with a new host, provider and solver. It can reuse successfully prepared artifacts in the request's factory, but not fixed-catalogue clauses, absence conclusions or failed-preparation exclusions. Source eligibility is determined again from the original request and the dependencies considered by native resolution. A failed catalogue solve goes directly to definitive native resolution; other fallback paths can first try provisional availability and retry if validation rejects its assumptions.
 
 Pip owns package preparation and installation policy. The factory obtains candidates from the finder, installed distributions, direct URLs, and editable projects. The host assigns source identities, translates requirements into ranges, and supplies dependency metadata when nab requests a candidate. A version from an installed distribution and the same version from a URL can have different metadata, so their source identities remain distinct.
 
-Pip ranks unresolved packages using their active requirements, in this order:
+The native provider ranks unresolved packages using their active requirements, in this order:
 
 * Direct URL requirements.
 * Exact pins using `===` or `==` without a wildcard.
