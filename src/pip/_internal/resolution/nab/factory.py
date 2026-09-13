@@ -51,6 +51,7 @@ from pip._internal.utils.virtualenv import running_under_virtualenv
 
 from .base import (
     Candidate,
+    CataloguePreparationConflict,
     CatalogueUnsupported,
     Constraint,
     Requirement,
@@ -117,6 +118,14 @@ class CandidateCatalogue:
         )
 
 
+class _CataloguePreparation(NamedTuple):
+    """Retain pre-catalogue caches for a native retry without imported context."""
+
+    links: Cache[LinkCandidate]
+    extras: dict[tuple[int, frozenset[NormalizedName]], ExtrasCandidate]
+    failures: Cache[InstallationError]
+
+
 class Factory:
     def __init__(
         self,
@@ -140,6 +149,8 @@ class Factory:
         self._ignore_requires_python = ignore_requires_python
         self.catalogue_only = False
         self._catalogue_yanked_versions: dict[str, frozenset[Version]] = {}
+        self._catalogue_preparation: _CataloguePreparation | None = None
+        self._catalogue_candidate_ids: set[int] = set()
 
         self._build_failures: Cache[InstallationError] = {}
         self._link_candidate_cache: Cache[LinkCandidate] = {}
@@ -168,6 +179,11 @@ class Factory:
         """Retain native preparation while isolating static admission and failures."""
         assert not self.catalogue_only
         failures = self._build_failures
+        preparation = _CataloguePreparation(
+            self._link_candidate_cache.copy(),
+            self._extras_candidate_cache.copy(),
+            failures.copy(),
+        )
         self._build_failures = {}
         self.catalogue_only = True
         try:
@@ -175,6 +191,22 @@ class Factory:
         finally:
             self.catalogue_only = False
             self._build_failures = failures
+            self._catalogue_preparation = preparation
+            self._catalogue_candidate_ids = {
+                id(candidate)
+                for link, candidate in self._link_candidate_cache.items()
+                if link not in preparation.links
+            }
+
+    def discard_catalogue_preparation(self) -> None:
+        """Restore pre-catalogue objects before starting a fresh native attempt."""
+        preparation = self._catalogue_preparation
+        assert preparation is not None
+        self._link_candidate_cache = preparation.links
+        self._extras_candidate_cache = preparation.extras
+        self._build_failures = preparation.failures
+        self._catalogue_preparation = None
+        self._catalogue_candidate_ids.clear()
 
     def _fail_if_link_is_unsupported_wheel(self, link: Link) -> None:
         if not link.is_wheel:
@@ -267,6 +299,13 @@ class Factory:
 
             return self._editable_candidate_cache[link]
         else:
+            if (
+                not self.catalogue_only
+                and template.is_direct
+                and id(self._link_candidate_cache.get(link))
+                in self._catalogue_candidate_ids
+            ):
+                raise CataloguePreparationConflict
             if link not in self._link_candidate_cache:
                 try:
                     self._link_candidate_cache[link] = LinkCandidate(

@@ -104,6 +104,8 @@ Requests that consider installed distributions, and requests with explicit root 
 
 Fallback starts with a new host, provider and solver. It can reuse successfully prepared artifacts in the request's factory, but not fixed-catalogue clauses, absence conclusions or failed-preparation exclusions. Source eligibility is determined again from the original request and the dependencies considered by native resolution. A failed catalogue solve goes directly to definitive native resolution; other fallback paths can first try provisional availability and retry if validation rejects its assumptions.
 
+If a native URL request encounters a catalogue-prepared candidate with index origin, pip discards the reused candidate contexts and restarts native resolution once to preserve URL provenance.
+
 Pip owns package preparation and installation policy. The factory obtains candidates from the finder, installed distributions, direct URLs, and editable projects. The host assigns source identities, translates requirements into ranges, and supplies dependency metadata when nab requests a candidate. A version from an installed distribution and the same version from a URL can have different metadata, so their source identities remain distinct.
 
 Nab prioritizes packages involved in contextual query failures and can temporarily demote repeated dependency blockers. Within that feedback ordering, the native host uses the following preferences:
