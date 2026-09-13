@@ -22,9 +22,13 @@ you have if you hit a problem situation like this a little later.
 
 ## Python specific issues
 
-Dependency metadata is discovered during resolution. Pip can fetch separate metadata files when the index provides them, read metadata from downloaded distributions, or ask a source distribution's build backend to prepare it.
+Dependency metadata is discovered during resolution. Pip can fetch separate
+metadata files when the index provides them, read metadata from downloaded
+distributions, or ask a source distribution's build backend to prepare it.
 
-Fetching and preparing every available release would be costly. Pip instead reads metadata as it considers candidates and backtracks when their dependencies conflict.
+Fetching and preparing every available release would be costly. Pip instead
+reads metadata as it considers candidates and backtracks when their
+dependencies conflict.
 
 ## Dependency metadata
 
@@ -40,11 +44,12 @@ There are other pieces of data (e.g., extras, python version restrictions, wheel
 compatibility tags) which are used as well, but they do not fundamentally
 alter the process, so we will ignore them here.
 
-The most important information is the project name and version. Together with its source, they identify a candidate for installation. Name and version must be available from the
-moment the candidate object is created. This is not an issue for distribution
-files (sdists and wheels) as that data is available from the filename, but for
-unpackaged source trees, pip needs to call the build backend to ask for that
-data. This is done before resolution proper starts.
+The most important information is the project name and version. Together with
+its source, they identify a candidate for installation. Name and version must
+be available from the moment the candidate object is created. This is not an
+issue for distribution files (sdists and wheels) as that data is available from
+the filename, but for unpackaged source trees, pip needs to call the build
+backend to ask for that data. This is done before resolution proper starts.
 
 The dependency data is *not* requested in advance (as noted above, doing so
 would be prohibitively costly, and for a backtracking algorithm it isn't
@@ -74,7 +79,10 @@ by another component of pip, the "finder". The finder is responsible for
 feeding candidates to the resolver, and has a key role to play in selecting
 suitable candidates.
 
-Candidates from local source directories and {ref}`direct URL references <pypug:dependency-specifiers>` do not go through the finder. They still participate in resolution, alongside candidates obtained through the finder.
+Candidates from local source directories and
+{ref}`direct URL references <pypug:dependency-specifiers>` do not go through
+the finder. They still participate in resolution, alongside candidates
+obtained through the finder.
 
 As well as determining what versions exist in the index for a given project,
 the finder selects the best distribution file to use for that candidate. This
@@ -90,25 +98,57 @@ over older versions, for example.
 
 ## The resolver algorithm
 
-The resolver uses nab's PubGrub algorithm through two providers. Both leave package preparation and installation policy with pip.
+The resolver uses nab's PubGrub algorithm through two providers. Both leave
+package preparation and installation policy with pip.
 
 ### Fixed-catalogue resolution
 
-For eligible `--ignore-installed` requests, pip first resolves against fixed lists of finder candidates. Metadata is still prepared on demand; a fixed candidate list does not mean every dependency is known in advance. The provider checks dependencies before committing a candidate and reuses metadata when backtracking. It usually considers packages with fewer matching versions first. After repeated preparation of versions of a transitive package, it can restart once with command-line requirement order taking precedence over non-singleton candidate counts.
+For eligible `--ignore-installed` requests, pip first resolves against fixed
+lists of finder candidates. Metadata is still prepared on demand; a fixed
+candidate list does not mean every dependency is known in advance. The provider
+checks dependencies before committing a candidate and reuses metadata when
+backtracking. It usually considers packages with fewer matching versions first.
+After repeated preparation of versions of a transitive package, it can restart
+once with command-line requirement order taking precedence over non-singleton
+candidate counts.
 
-Pip rechecks the selected artifacts against native requirements, constraints, prerelease admission and finder preference before accepting the result. A URL dependency, an unsupported preparation option, a failure to resolve, or failed final admission sends the original request to the native provider. An unsuccessful fixed-catalogue solve is not proof that the original request is impossible: an unvisited package can declare a URL that supplies a missing candidate.
+Pip rechecks the selected artifacts against native requirements, constraints,
+prerelease admission and finder preference before accepting the result. A URL
+dependency, an unsupported preparation option, a failure to resolve, or failed
+final admission sends the original request to the native provider. An
+unsuccessful fixed-catalogue solve is not proof that the original request is
+impossible: an unvisited package can declare a URL that supplies a missing
+candidate.
 
 ### Native resolution and fallback
 
-Requests that consider installed distributions, and requests with explicit root candidates, use native resolution. Pip supplies requirements and prepared candidates through `NativeHost`, while nab tracks version and source restrictions, learns conflicts, and backtracks.
+Requests that consider installed distributions, and requests with explicit root
+candidates, use native resolution. Pip supplies requirements and prepared
+candidates through `NativeHost`, while nab tracks version and source
+restrictions, learns conflicts, and backtracks.
 
-Fallback starts with a new host, provider and solver. It can reuse successfully prepared artifacts in the request's factory, but not fixed-catalogue clauses, absence conclusions or failed-preparation exclusions. Source eligibility is determined again from the original request and the dependencies considered by native resolution. A failed catalogue solve goes directly to definitive native resolution; other fallback paths can first try provisional availability and retry if validation rejects its assumptions.
+Fallback starts with a new host, provider and solver. It can reuse successfully
+prepared artifacts in the request's factory, but not fixed-catalogue clauses,
+absence conclusions or failed-preparation exclusions. Source eligibility is
+determined again from the original request and the dependencies considered by
+native resolution. A failed catalogue solve goes directly to definitive native
+resolution; other fallback paths can first try provisional availability and
+retry if validation rejects its assumptions.
 
-If a native URL request encounters a catalogue-prepared candidate with index origin, pip discards the reused candidate contexts and restarts native resolution once to preserve URL provenance.
+If a native URL request encounters a catalogue-prepared candidate with index
+origin, pip discards the reused candidate contexts and restarts native
+resolution once to preserve URL provenance.
 
-Pip owns package preparation and installation policy. The factory obtains candidates from the finder, installed distributions, direct URLs, and editable projects. The host assigns source identities, translates requirements into ranges, and supplies dependency metadata when nab requests a candidate. A version from an installed distribution and the same version from a URL can have different metadata, so their source identities remain distinct.
+Pip owns package preparation and installation policy. The factory obtains
+candidates from the finder, installed distributions, direct URLs, and editable
+projects. The host assigns source identities, translates requirements into
+ranges, and supplies dependency metadata when nab requests a candidate. A
+version from an installed distribution and the same version from a URL can have
+different metadata, so their source identities remain distinct.
 
-Nab prioritizes packages involved in contextual query failures and can temporarily demote repeated dependency blockers. Within that feedback ordering, the native host uses the following preferences:
+Nab prioritizes packages involved in contextual query failures and can
+temporarily demote repeated dependency blockers. Within that feedback ordering,
+the native host uses the following preferences:
 
 * Direct URL requirements.
 * Exact pins using `===` or `==` without a wildcard.
@@ -117,6 +157,9 @@ Nab prioritizes packages involved in contextual query failures and can temporari
 * Other version restrictions, such as `>=` or `!=`.
 * Package name.
 
-The finder orders candidates within a package, subject to upgrade and installed-package preferences. These choices happen before all transitive metadata is available. In the diagram below, selecting between A->B and A->C may happen before pip has read the dependencies shown in grey.
+The finder orders candidates within a package, subject to upgrade and
+installed-package preferences. These choices happen before all transitive
+metadata is available. In the diagram below, selecting between A->B and A->C may
+happen before pip has read the dependencies shown in grey.
 
 ![](deps.png)
