@@ -106,7 +106,7 @@ Fallback starts with a new host, provider and solver. It can reuse successfully 
 
 Pip owns package preparation and installation policy. The factory obtains candidates from the finder, installed distributions, direct URLs, and editable projects. The host assigns source identities, translates requirements into ranges, and supplies dependency metadata when nab requests a candidate. A version from an installed distribution and the same version from a URL can have different metadata, so their source identities remain distinct.
 
-The native provider ranks unresolved packages using their active requirements, in this order:
+Nab prioritizes packages involved in contextual query failures and can temporarily demote repeated dependency blockers. Within that feedback ordering, the native host uses the following preferences:
 
 * Direct URL requirements.
 * Exact pins using `===` or `==` without a wildcard.
