@@ -99,6 +99,14 @@ Modifications
   rather than ``appdirs``.
 * ``packaging`` has been modified to import its dependencies from
   ``pip._vendor``.
+  The nab prototype also carries a snapshot patch for version-range operations
+  and prepared marker evaluation; see ``packaging/PROVENANCE.md``.
+* ``nab-resolver`` carries the candidate-provider API and incremental scheduling
+  changes used by the prototype. Its patch is based on release 0.0.17 and
+  reproduces the resolver source at nab commit
+  ``865785398361c122bf1b00c85f87755c43e6f4d5``, with typing imports qualified
+  through ``pip._vendor``. These functional patches are prototype dependencies,
+  not released APIs or a claim of compliance with the release-only policy above.
 * ``CacheControl`` has been modified to import its dependencies from
   ``pip._vendor``.
 * ``requests`` has been modified to import its other dependencies from
