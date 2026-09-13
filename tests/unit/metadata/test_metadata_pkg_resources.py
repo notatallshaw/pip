@@ -5,7 +5,8 @@ from unittest import mock
 
 import pytest
 
-from pip._vendor.packaging.requirements import Requirement
+from pip._vendor.packaging.markers import UndefinedComparison, UndefinedEnvironmentName
+from pip._vendor.packaging.requirements import InvalidRequirement, Requirement
 from pip._vendor.packaging.specifiers import SpecifierSet
 from pip._vendor.packaging.utils import canonicalize_name
 from pip._vendor.packaging.version import parse as parse_version
@@ -18,6 +19,8 @@ from pip._internal.metadata.pkg_resources import (
 )
 
 pkg_resources = pytest.importorskip("pip._vendor.pkg_resources")
+
+_VALIDATION_METADATA = b"Name: probe\nVersion: 1.0\n"
 
 
 def _dist_is_local(dist: mock.Mock) -> bool:
@@ -141,3 +144,81 @@ def test_iter_entry_points_throws_on_invalid_entry_point() -> None:
     with pytest.raises(InstallationError) as e:
         list(dist.iter_entry_points())
     assert "hello = hello:" in str(e.value)
+
+
+@pytest.mark.parametrize(
+    "files,error,message",
+    [
+        ({"requires.txt": b"[unused:not_a_marker]\ndep\n"}, None, ""),
+        ({"requires.txt": b"dep>=1 # comment\n"}, None, ""),
+        ({"depends.txt": b"broken=>1\n"}, InvalidRequirement, "broken=>1"),
+        (
+            {
+                "PKG-INFO": b"Name: probe\nVersion: 1.0\nRequires-Dist: valid\n",
+                "requires.txt": b"broken=>1\n",
+            },
+            InvalidRequirement,
+            "broken=>1",
+        ),
+        (
+            {
+                "METADATA": _VALIDATION_METADATA
+                + b'Requires-Dist: dep; os_name ~= "posix"\n'
+            },
+            UndefinedComparison,
+            "Undefined",
+        ),
+        (
+            {
+                "METADATA": (
+                    _VALIDATION_METADATA
+                    + b'Provides-Extra: unused\nRequires-Dist: dep; extra == "unused" '
+                    b'and os_name ~= "posix"\n'
+                )
+            },
+            UndefinedComparison,
+            "Undefined",
+        ),
+        (
+            {
+                "METADATA": _VALIDATION_METADATA
+                + b'Requires-Dist: dep; "extra" == "gpu"\n'
+            },
+            UndefinedEnvironmentName,
+            "gpu",
+        ),
+        (
+            {
+                "METADATA": (
+                    _VALIDATION_METADATA + b'Requires-Dist: dep; os_name ~= "posix"\n'
+                    b"Requires-Dist: broken=>1\n"
+                )
+            },
+            InvalidRequirement,
+            "broken=>1",
+        ),
+    ],
+)
+def test_dependency_validation_retains_legacy_backend_rules(
+    files: dict[str, bytes], error: type[Exception] | None, message: str
+) -> None:
+    metadata = {"PKG-INFO": b"Name: probe\nVersion: 1.0\n", **files}
+    implementation = (
+        pkg_resources.DistInfoDistribution
+        if "METADATA" in metadata
+        else pkg_resources.Distribution
+    )
+    dist = Distribution(
+        implementation(
+            project_name="probe",
+            version="1.0",
+            location="<in-memory>",
+            metadata=InMemoryMetadata(metadata, "<in-memory>"),
+        )
+    )
+
+    if error is None:
+        dist.validate_dependencies()
+    else:
+        with pytest.raises(error, match=message):
+            dist.validate_dependencies()

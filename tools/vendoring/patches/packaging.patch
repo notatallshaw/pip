@@ -1,0 +1,1947 @@
+diff --git a/src/pip/_vendor/packaging/PROVENANCE.md b/src/pip/_vendor/packaging/PROVENANCE.md
+new file mode 100644
+index 0000000..be69731
+--- /dev/null
++++ b/src/pip/_vendor/packaging/PROVENANCE.md
+@@ -0,0 +1,11 @@
++# Packaging snapshot used by the nab integration
++
++The base distribution is packaging 26.3. `tools/vendoring/patches/packaging.patch` reproduces the integration's patched snapshot through pip's normal vendoring command. This is a prototype bridge, not an unmodified packaging release.
++
++The module's version label stays at the base release so pip's vendor inventory and debug output agree.
++
++The implementation was imported from `nab-provider/src/nab_provider/_vendor/packaging` in notatallshaw/nab at `865785398361c122bf1b00c85f87755c43e6f4d5`. That snapshot includes version-range operations and prepared marker evaluation used by the integration. Its upstream pin, accumulated patch and original provenance are in that nab revision; their task paths refer to nab, not this pip checkout.
++
++Keep runtime changes separate from vendoring reproducibility changes. Regenerate the pip patch from pristine vendored packaging 26.3 and the intended snapshot, then run `nox -s vendoring` and verify that it leaves the committed tree unchanged. Do not hand-edit the generated patch or silently replace the snapshot with another revision.
++
++The upstream Apache-2.0 and BSD-2-Clause license texts remain alongside the source. Packaging unvendoring is outside this prototype.
+diff --git a/src/pip/_vendor/packaging/_manylinux.py b/src/pip/_vendor/packaging/_manylinux.py
+index 86de1e6..c5edbb7 100644
+--- a/src/pip/_vendor/packaging/_manylinux.py
++++ b/src/pip/_vendor/packaging/_manylinux.py
+@@ -31,7 +31,7 @@ _ALLOWED_ARCHS = {
+ 
+ 
+ @contextlib.contextmanager
+-def _parse_elf(path: str) -> Generator[ELFFile | None, None, None]:
++def _parse_elf(path: str) -> Generator[ELFFile | None]:
+     try:
+         with open(path, "rb") as f:
+             yield ELFFile(f)
+diff --git a/src/pip/_vendor/packaging/_parser.py b/src/pip/_vendor/packaging/_parser.py
+index 9331b4b..1efb387 100644
+--- a/src/pip/_vendor/packaging/_parser.py
++++ b/src/pip/_vendor/packaging/_parser.py
+@@ -8,7 +8,7 @@ from __future__ import annotations
+ 
+ import ast
+ from collections.abc import Sequence
+-from typing import Literal, NamedTuple, Union
++from typing import Literal, NamedTuple, TypeAlias
+ 
+ from ._tokenizer import DEFAULT_RULES, ParserSyntaxError, Tokenizer
+ 
+@@ -86,10 +86,10 @@ class Op(Node):
+ 
+ 
+ MarkerLogical = Literal["and", "or"]
+-MarkerVar = Union[Variable, Value]
++MarkerVar = Variable | Value
+ MarkerItem = tuple[MarkerVar, Op, MarkerVar]
+-MarkerAtom = Union[MarkerItem, Sequence["MarkerAtom"]]
+-MarkerList = list[Union["MarkerList", MarkerAtom, MarkerLogical]]
++MarkerAtom = MarkerItem | Sequence["MarkerAtom"]
++MarkerList: TypeAlias = 'list["MarkerList" | MarkerAtom | MarkerLogical]'
+ 
+ 
+ class ParsedRequirement(NamedTuple):
+@@ -394,8 +394,15 @@ def process_env_var(env_var: str) -> Variable:
+ 
+ 
+ def process_python_str(python_str: str) -> Value:
+-    value = ast.literal_eval(python_str)
+-    return Value(str(value))
++    # QUOTED_STRING admits no prefix and no embedded delimiter, so an ASCII body
++    # holding no backslash, line break or NUL is what the literal parse returns.
++    # The rest keeps that parse, for the escapes it expands and the bodies it rejects.
++    body = python_str[1:-1]
++    if body.isascii() and not (
++        "\\" in body or "\n" in body or "\r" in body or "\0" in body
++    ):
++        return Value(body)
++    return Value(str(ast.literal_eval(python_str)))
+ 
+ 
+ def _parse_marker_op(tokenizer: Tokenizer) -> Op:
+diff --git a/src/pip/_vendor/packaging/_ranges.py b/src/pip/_vendor/packaging/_ranges.py
+index 5370ec8..29c32bc 100644
+--- a/src/pip/_vendor/packaging/_ranges.py
++++ b/src/pip/_vendor/packaging/_ranges.py
+@@ -17,11 +17,10 @@ from .version import InvalidVersion, Version
+ 
+ if TYPE_CHECKING:
+     from collections.abc import Callable, Iterable, Iterator, Sequence
+-    from typing import Union
+ 
+     # Total-order key for comparing two boundaries (boundary-vs-boundary only).
+     # The post slot may be ``_BOUNDARY_INF`` for an AFTER_POSTS boundary.
+-    _BoundaryOrderSuffix = tuple[int, int, int, Union[int, float], int, int]
++    _BoundaryOrderSuffix = tuple[int, int, int, int | float, int, int]
+     _BoundaryOrderKey = tuple[int, tuple[int, ...], _BoundaryOrderSuffix, float]
+ 
+ __all__ = [
+@@ -83,6 +82,10 @@ class BoundaryVersion:
+         "version",
+     )
+ 
++    #: A boundary has no PEP 440 comparison key. Bound ordering reads this off
++    #: either operand type, so a boundary falls back to the version operators.
++    _key_cache: None = None
++
+     def __init__(self, version: Version, kind: BoundaryKind) -> None:
+         self.version = version
+         self.kind = kind
+@@ -172,7 +175,7 @@ class BoundaryVersion:
+ 
+ 
+ if TYPE_CHECKING:
+-    _VersionOrBoundary = Union[Version, BoundaryVersion, None]
++    _VersionOrBoundary = Version | BoundaryVersion | None
+ 
+ 
+ @functools.total_ordering
+@@ -187,6 +190,11 @@ class LowerBound:
+     __slots__ = ("_above", "inclusive", "version")
+ 
+     def __init__(self, version: _VersionOrBoundary, inclusive: bool) -> None:
++        # -inf is not a version, so "inclusive of -inf" has no content;
++        # canonicalizing it keeps the bound order total.
++        if version is None:
++            inclusive = False
++
+         self.version = version
+         self.inclusive = inclusive
+         # Pre-bind a predicate "is parsed at or above this lower
+@@ -219,11 +227,51 @@ class LowerBound:
+             return other.version is not None
+         if other.version is None:
+             return False
+-        if self.version != other.version:
++        # A boundary has no key, and a version's is computed on first use.
++        self_key = self.version._key_cache
++        other_key = other.version._key_cache
++        if self_key is not None and other_key is not None:
++            if self_key != other_key:
++                return self_key < other_key
++        elif self.version != other.version:
+             return self.version < other.version
+         # [v < (v: inclusive starts earlier.
+         return self.inclusive and not other.inclusive
+ 
++    # Written out rather than left to functools.total_ordering, whose shims
++    # reach the same answer through ``__lt__`` and ``__eq__``.
++    def __gt__(self, other: LowerBound) -> bool:
++        if not isinstance(other, LowerBound):
++            return NotImplemented
++        if self.version is None:
++            return False
++        if other.version is None:
++            return True
++        self_key = self.version._key_cache
++        other_key = other.version._key_cache
++        if self_key is not None and other_key is not None:
++            if self_key != other_key:
++                return not self_key < other_key
++        elif self.version != other.version:
++            return not self.version < other.version
++        return other.inclusive and not self.inclusive
++
++    def __le__(self, other: LowerBound) -> bool:
++        if not isinstance(other, LowerBound):
++            return NotImplemented
++        if self.version is None:
++            return True
++        if other.version is None:
++            return False
++        self_key = self.version._key_cache
++        other_key = other.version._key_cache
++        if self_key is not None and other_key is not None:
++            if self_key != other_key:
++                return self_key < other_key
++        elif self.version != other.version:
++            return self.version < other.version
++        return self.inclusive or not other.inclusive
++
+     def __hash__(self) -> int:
+         return hash((self.version, self.inclusive))
+ 
+@@ -244,6 +292,10 @@ class UpperBound:
+     __slots__ = ("_below", "inclusive", "version")
+ 
+     def __init__(self, version: _VersionOrBoundary, inclusive: bool) -> None:
++        # See LowerBound: +inf carries no inclusivity either.
++        if version is None:
++            inclusive = False
++
+         self.version = version
+         self.inclusive = inclusive
+         # Pre-bind a predicate "is parsed at or below this upper
+@@ -278,11 +330,34 @@ class UpperBound:
+             return False
+         if other.version is None:
+             return True
+-        if self.version != other.version:
++        # See LowerBound.__lt__ for why this reads the cached keys.
++        self_key = self.version._key_cache
++        other_key = other.version._key_cache
++        if self_key is not None and other_key is not None:
++            if self_key != other_key:
++                return self_key < other_key
++        elif self.version != other.version:
+             return self.version < other.version
+         # v) < v]: exclusive ends earlier.
+         return not self.inclusive and other.inclusive
+ 
++    # Written out for the same reason as on ``LowerBound``.
++    def __gt__(self, other: UpperBound) -> bool:
++        if not isinstance(other, UpperBound):
++            return NotImplemented
++        if self.version is None:
++            return other.version is not None
++        if other.version is None:
++            return False
++        self_key = self.version._key_cache
++        other_key = other.version._key_cache
++        if self_key is not None and other_key is not None:
++            if self_key != other_key:
++                return not self_key < other_key
++        elif self.version != other.version:
++            return not self.version < other.version
++        return self.inclusive and not other.inclusive
++
+     def __hash__(self) -> int:
+         return hash((self.version, self.inclusive))
+ 
+diff --git a/src/pip/_vendor/packaging/_tokenizer.py b/src/pip/_vendor/packaging/_tokenizer.py
+index db7cd17..6384493 100644
+--- a/src/pip/_vendor/packaging/_tokenizer.py
++++ b/src/pip/_vendor/packaging/_tokenizer.py
+@@ -11,10 +11,8 @@ if TYPE_CHECKING:
+     from collections.abc import Generator, Mapping
+ 
+ 
+-@dataclass
++@dataclass(slots=True)
+ class Token:
+-    __slots__ = ("name", "position", "text")
+-
+     name: str
+     text: str
+     position: int
+@@ -79,10 +77,8 @@ DEFAULT_RULES: dict[str, re.Pattern[str]] = {
+         """,
+         re.VERBOSE,
+     ),
+-    "SPECIFIER": re.compile(
+-        Specifier._specifier_regex_str,
+-        re.VERBOSE | re.IGNORECASE,
+-    ),
++    # Shared with Specifier so the pattern compiles once.
++    "SPECIFIER": Specifier._regex,
+     "AT": re.compile(r"\@"),
+     "URL": re.compile(r"[^ \t]+"),
+     "IDENTIFIER": re.compile(r"\b[a-zA-Z0-9][a-zA-Z0-9._-]*\b"),
+@@ -179,7 +175,7 @@ class Tokenizer:
+     @contextlib.contextmanager
+     def enclosing_tokens(
+         self, open_token: str, close_token: str, *, around: str
+-    ) -> Generator[None, None, None]:
++    ) -> Generator[None]:
+         if self.check(open_token):
+             open_position = self.position
+             self.read()
+diff --git a/src/pip/_vendor/packaging/direct_url.py b/src/pip/_vendor/packaging/direct_url.py
+index 4de7acc..ceb6b0e 100644
+--- a/src/pip/_vendor/packaging/direct_url.py
++++ b/src/pip/_vendor/packaging/direct_url.py
+@@ -152,7 +152,7 @@ class _DirectUrlRequiredKeyError(DirectUrlValidationError):
+         super().__init__("Missing required value", context=key)
+ 
+ 
+-@dataclasses.dataclass(frozen=True, init=False)
++@dataclasses.dataclass(frozen=True, kw_only=True, slots=True)
+ class VcsInfo:
+     """The version control information of a :class:`DirectUrl`."""
+ 
+@@ -160,17 +160,6 @@ class VcsInfo:
+     commit_id: str
+     requested_revision: str | None = None
+ 
+-    def __init__(
+-        self,
+-        *,
+-        vcs: str,
+-        commit_id: str,
+-        requested_revision: str | None = None,
+-    ) -> None:
+-        object.__setattr__(self, "vcs", vcs)
+-        object.__setattr__(self, "commit_id", commit_id)
+-        object.__setattr__(self, "requested_revision", requested_revision)
+-
+     @classmethod
+     def _from_dict(cls, d: Mapping[str, Any]) -> Self:
+         # We can't validate vcs value because is not closed.
+@@ -181,19 +170,12 @@ class VcsInfo:
+         )
+ 
+ 
+-@dataclasses.dataclass(frozen=True, init=False)
++@dataclasses.dataclass(frozen=True, kw_only=True, slots=True)
+ class ArchiveInfo:
+     """The archive information of a :class:`DirectUrl`."""
+ 
+     hashes: Mapping[str, str] | None = None
+ 
+-    def __init__(
+-        self,
+-        *,
+-        hashes: Mapping[str, str] | None = None,
+-    ) -> None:
+-        object.__setattr__(self, "hashes", hashes)
+-
+     @classmethod
+     def _from_dict(cls, d: Mapping[str, Any]) -> Self:
+         hashes = _get(d, Mapping, "hashes")  # type: ignore[type-abstract]
+@@ -229,19 +211,12 @@ class ArchiveInfo:
+         return cls(hashes=hashes)
+ 
+ 
+-@dataclasses.dataclass(frozen=True, init=False)
++@dataclasses.dataclass(frozen=True, kw_only=True, slots=True)
+ class DirInfo:
+     """The local directory information of a :class:`DirectUrl`."""
+ 
+     editable: bool | None = None
+ 
+-    def __init__(
+-        self,
+-        *,
+-        editable: bool | None = None,
+-    ) -> None:
+-        object.__setattr__(self, "editable", editable)
+-
+     @classmethod
+     def _from_dict(cls, d: Mapping[str, Any]) -> Self:
+         return cls(
+@@ -249,7 +224,7 @@ class DirInfo:
+         )
+ 
+ 
+-@dataclasses.dataclass(frozen=True, init=False)
++@dataclasses.dataclass(frozen=True, kw_only=True, slots=True)
+ class DirectUrl:
+     """A class representing a direct URL.
+ 
+@@ -262,21 +237,6 @@ class DirectUrl:
+     dir_info: DirInfo | None = None
+     subdirectory: str | None = None  # XXX Path or str?
+ 
+-    def __init__(
+-        self,
+-        *,
+-        url: str,
+-        archive_info: ArchiveInfo | None = None,
+-        vcs_info: VcsInfo | None = None,
+-        dir_info: DirInfo | None = None,
+-        subdirectory: str | None = None,
+-    ) -> None:
+-        object.__setattr__(self, "url", url)
+-        object.__setattr__(self, "archive_info", archive_info)
+-        object.__setattr__(self, "vcs_info", vcs_info)
+-        object.__setattr__(self, "dir_info", dir_info)
+-        object.__setattr__(self, "subdirectory", subdirectory)
+-
+     @classmethod
+     def _from_dict(cls, d: Mapping[str, Any]) -> Self:
+         direct_url = cls(
+diff --git a/src/pip/_vendor/packaging/errors.py b/src/pip/_vendor/packaging/errors.py
+index d1d47cf..912da38 100644
+--- a/src/pip/_vendor/packaging/errors.py
++++ b/src/pip/_vendor/packaging/errors.py
+@@ -34,7 +34,7 @@ else:  # pragma: no cover
+             return f"{self.__class__.__name__}({self.message!r}, {self.exceptions!r})"
+ 
+ 
+-@dataclasses.dataclass
++@dataclasses.dataclass(slots=True)
+ class _ErrorCollector:
+     """
+     Collect errors into ExceptionGroups.
+@@ -62,7 +62,7 @@ class _ErrorCollector:
+             raise ExceptionGroup(msg, self.errors)
+ 
+     @contextlib.contextmanager
+-    def on_exit(self, msg: str) -> typing.Generator[_ErrorCollector, None, None]:
++    def on_exit(self, msg: str) -> typing.Generator[_ErrorCollector]:
+         """
+         Calls finalize if no uncollected errors were present.
+ 
+@@ -72,7 +72,7 @@ class _ErrorCollector:
+         self.finalize(msg)
+ 
+     @contextlib.contextmanager
+-    def collect(self, *err_cls: type[Exception]) -> typing.Generator[None, None, None]:
++    def collect(self, *err_cls: type[Exception]) -> typing.Generator[None]:
+         """
+         Context manager to collect errors into the error list.
+ 
+diff --git a/src/pip/_vendor/packaging/licenses/_spdx.py b/src/pip/_vendor/packaging/licenses/_spdx.py
+index a277af2..5f98b80 100644
+--- a/src/pip/_vendor/packaging/licenses/_spdx.py
++++ b/src/pip/_vendor/packaging/licenses/_spdx.py
+@@ -1,4 +1,3 @@
+-
+ from __future__ import annotations
+ 
+ from typing import TypedDict
+diff --git a/src/pip/_vendor/packaging/markers.py b/src/pip/_vendor/packaging/markers.py
+index 51b6036..e8b9be5 100644
+--- a/src/pip/_vendor/packaging/markers.py
++++ b/src/pip/_vendor/packaging/markers.py
+@@ -9,8 +9,9 @@ import operator
+ import os
+ import platform
+ import sys
++from collections.abc import Callable
+ from collections.abc import Set as AbstractSet
+-from typing import TYPE_CHECKING, Callable, Literal, TypedDict, Union, cast
++from typing import TYPE_CHECKING, Literal, TypedDict, cast
+ 
+ from ._parser import MarkerAtom, MarkerList, Op, Value, Variable
+ from ._parser import parse_marker as _parse_marker
+@@ -29,6 +30,7 @@ __all__ = [
+     "UndefinedComparison",
+     "UndefinedEnvironmentName",
+     "default_environment",
++    "prepare_environment",
+ ]
+ 
+ 
+@@ -36,7 +38,7 @@ def __dir__() -> list[str]:
+     return __all__
+ 
+ 
+-Operator = Callable[[str, Union[str, AbstractSet[str]]], bool]
++Operator = Callable[[str, str | AbstractSet[str]], bool]
+ EvaluateContext = Literal["metadata", "lock_file", "requirement"]
+ """A ``typing.Literal`` enumerating valid marker evaluation contexts.
+ 
+@@ -206,27 +208,23 @@ def _normalize_extra_values(results: MarkerList) -> MarkerList:
+ def _format_marker(
+     marker: list[str] | MarkerAtom | str, first: bool | None = True
+ ) -> str:
+-    assert isinstance(marker, (list, tuple, str))
+-
+-    # Unwrap a redundant [[...]] wrapper, but keep the nesting context so a
+-    # nested group keeps the parentheses its and/or precedence needs.
+-    if (
+-        isinstance(marker, list)
+-        and len(marker) == 1
+-        and isinstance(marker[0], (list, tuple))
+-    ):
+-        return _format_marker(marker[0], first=first)
++    """Serialize parser output: a marker list, a three-node item, or an operator."""
++    if isinstance(marker, tuple):
++        lhs, op, rhs = marker
++        return f"{lhs.serialize()} {op.serialize()} {rhs.serialize()}"
+ 
+     if isinstance(marker, list):
+-        inner = (_format_marker(m, first=False) for m in marker)
++        # Unwrap a redundant [[...]] wrapper, but keep the nesting context so a
++        # nested group keeps the parentheses its and/or precedence needs.
++        if len(marker) == 1 and isinstance(marker[0], (list, tuple)):
++            return _format_marker(marker[0], first=first)
++
++        inner = [_format_marker(m, first=False) for m in marker]
+         if first:
+             return " ".join(inner)
+-        else:
+-            return "(" + " ".join(inner) + ")"
+-    elif isinstance(marker, tuple):
+-        return " ".join([m.serialize() for m in marker])
+-    else:
+-        return marker
++        return "(" + " ".join(inner) + ")"
++
++    return marker
+ 
+ 
+ _operators: dict[str, Operator] = {
+@@ -377,6 +375,51 @@ def default_environment() -> Environment:
+     return cast("Environment", dict(_cached_default_environment()))
+ 
+ 
++def prepare_environment(
++    environment: Mapping[str, str | AbstractSet[str]] | None = None,
++    context: EvaluateContext = "metadata",
++) -> dict[str, str | AbstractSet[str]]:
++    """Build the environment a marker is evaluated against.
++
++    The detected process environment merged with the ``context`` defaults and
++    ``environment``, with ``extra`` canonicalized. Code evaluating many markers
++    against one environment can build it once here and pass the result to
++    :meth:`Marker.evaluate_prepared`, rather than having :meth:`Marker.evaluate`
++    rebuild it on every call.
++
++    :param environment: Mapping containing keys and values to override the
++       detected environment.
++    :param EvaluateContext context: The context in which the marker is
++        evaluated, which influences what marker names are considered valid.
++        Accepted values are ``"metadata"`` (for core metadata; default),
++        ``"lock_file"``, and ``"requirement"`` (i.e. all other situations).
++    :returns: A fresh dict on every call, which the caller may mutate.
++
++    .. versionadded:: 26.4
++    """
++    current_environment = cast(
++        "dict[str, str | AbstractSet[str]]", default_environment()
++    )
++    if context == "lock_file":
++        current_environment |= {
++            "extras": frozenset(),
++            "dependency_groups": frozenset(),
++        }
++    elif context == "metadata":
++        current_environment["extra"] = ""
++
++    if environment is not None:
++        current_environment |= environment
++        if "extra" in current_environment:
++            # The API used to allow setting extra to None. We need to handle
++            # this case for backwards compatibility. Also skip running
++            # normalize name if extra is empty.
++            extra = cast("str | None", current_environment["extra"])
++            current_environment["extra"] = canonicalize_name(extra) if extra else ""
++
++    return _repair_python_full_version(current_environment)
++
++
+ class Marker:
+     """Represents a parsed dependency marker expression.
+ 
+@@ -397,7 +440,7 @@ class Marker:
+         release.
+     """
+ 
+-    __slots__ = ("_markers",)
++    __slots__ = ("_markers", "_serialized")
+ 
+     def __init__(self, marker: str) -> None:
+         # Note: We create a Marker object without calling this constructor in
+@@ -411,7 +454,7 @@ class Marker:
+         try:
+             self._markers = _normalize_extra_values(_parse_marker(marker))
+             # The attribute `_markers` can be described in terms of a recursive type:
+-            # MarkerList = List[Union[Tuple[Node, ...], str, MarkerList]]
++            # MarkerList = list[tuple[Node, ...] | str | MarkerList]
+             #
+             # For example, the following expression:
+             # python_version > "3.6" or (python_version == "3.6" and os_name == "unix")
+@@ -440,7 +483,13 @@ class Marker:
+         return new
+ 
+     def __str__(self) -> str:
+-        return _format_marker(self._markers)
++        # _markers is never rebound after construction, so serialise once.
++        try:
++            return self._serialized
++        except AttributeError:
++            serialized = _format_marker(self._markers)
++            self._serialized = serialized
++            return serialized
+ 
+     def __repr__(self) -> str:
+         return f"<{self.__class__.__name__}({str(self)!r})>"
+@@ -529,29 +578,22 @@ class Marker:
+             Added the ``context`` parameter, which influences which marker names
+             are considered valid.
+         """
+-        current_environment = cast(
+-            "dict[str, str | AbstractSet[str]]", default_environment()
+-        )
+-        if context == "lock_file":
+-            current_environment |= {
+-                "extras": frozenset(),
+-                "dependency_groups": frozenset(),
+-            }
+-        elif context == "metadata":
+-            current_environment["extra"] = ""
+-
+-        if environment is not None:
+-            current_environment |= environment
+-            if "extra" in current_environment:
+-                # The API used to allow setting extra to None. We need to handle
+-                # this case for backwards compatibility. Also skip running
+-                # normalize name if extra is empty.
+-                extra = cast("str | None", current_environment["extra"])
+-                current_environment["extra"] = canonicalize_name(extra) if extra else ""
+-
+-        return _evaluate_markers(
+-            self._markers, _repair_python_full_version(current_environment)
+-        )
++        return self.evaluate_prepared(prepare_environment(environment, context))
++
++    def evaluate_prepared(self, environment: dict[str, str | AbstractSet[str]]) -> bool:
++        """Evaluate a marker against an already-prepared environment.
++
++        :param environment: The result of a :func:`prepare_environment` call.
++        :raises UndefinedComparison: If the marker uses a comparison on values
++            that are not valid versions per the :ref:`specification of version
++            specifiers <pypug:version-specifiers>`.
++        :raises UndefinedEnvironmentName: If the marker references a value that
++            is missing from the evaluation environment.
++        :returns: ``True`` if the marker matches, otherwise ``False``.
++
++        .. versionadded:: 26.4
++        """
++        return _evaluate_markers(self._markers, environment)
+ 
+ 
+ def _pep440_python_full_version(python_full_version: str) -> str:
+diff --git a/src/pip/_vendor/packaging/metadata.py b/src/pip/_vendor/packaging/metadata.py
+index 1061105..c139366 100644
+--- a/src/pip/_vendor/packaging/metadata.py
++++ b/src/pip/_vendor/packaging/metadata.py
+@@ -10,7 +10,6 @@ import re
+ import typing
+ from typing import (
+     Any,
+-    Callable,
+     Generic,
+     Literal,
+     TypedDict,
+@@ -22,6 +21,8 @@ from . import version as version_module
+ from .errors import ExceptionGroup, _ErrorCollector
+ 
+ if typing.TYPE_CHECKING:
++    from collections.abc import Callable
++
+     from .licenses import NormalizedLicenseExpression
+     from .version import Version
+ 
+diff --git a/src/pip/_vendor/packaging/pylock.py b/src/pip/_vendor/packaging/pylock.py
+index b797623..f981df9 100644
+--- a/src/pip/_vendor/packaging/pylock.py
++++ b/src/pip/_vendor/packaging/pylock.py
+@@ -3,13 +3,12 @@ from __future__ import annotations
+ import dataclasses
+ import logging
+ import re
+-from collections.abc import Mapping, Sequence
++from collections.abc import Callable, Mapping, Sequence
+ from dataclasses import dataclass
+ from datetime import datetime
+ from typing import (
+     TYPE_CHECKING,
+     Any,
+-    Callable,
+     Protocol,
+     TypeVar,
+     cast,
+@@ -322,33 +321,15 @@ class PylockSelectError(Exception):
+     """
+ 
+ 
+-@dataclass(frozen=True, init=False)
++@dataclass(frozen=True, kw_only=True, slots=True)
+ class PackageVcs:
+     type: str
+     url: str | None = None
+     path: str | None = None
+     requested_revision: str | None = None
+-    commit_id: str  # type: ignore[misc]
++    commit_id: str
+     subdirectory: str | None = None
+ 
+-    def __init__(
+-        self,
+-        *,
+-        type: str,
+-        url: str | None = None,
+-        path: str | None = None,
+-        requested_revision: str | None = None,
+-        commit_id: str,
+-        subdirectory: str | None = None,
+-    ) -> None:
+-        # In Python 3.10+ make dataclass kw_only=True and remove __init__
+-        object.__setattr__(self, "type", type)
+-        object.__setattr__(self, "url", url)
+-        object.__setattr__(self, "path", path)
+-        object.__setattr__(self, "requested_revision", requested_revision)
+-        object.__setattr__(self, "commit_id", commit_id)
+-        object.__setattr__(self, "subdirectory", subdirectory)
+-
+     @classmethod
+     def _from_dict(cls, d: Mapping[str, Any]) -> Self:
+         package_vcs = cls(
+@@ -363,24 +344,12 @@ class PackageVcs:
+         return package_vcs
+ 
+ 
+-@dataclass(frozen=True, init=False)
++@dataclass(frozen=True, kw_only=True, slots=True)
+ class PackageDirectory:
+     path: str
+     editable: bool | None = None
+     subdirectory: str | None = None
+ 
+-    def __init__(
+-        self,
+-        *,
+-        path: str,
+-        editable: bool | None = None,
+-        subdirectory: str | None = None,
+-    ) -> None:
+-        # In Python 3.10+ make dataclass kw_only=True and remove __init__
+-        object.__setattr__(self, "path", path)
+-        object.__setattr__(self, "editable", editable)
+-        object.__setattr__(self, "subdirectory", subdirectory)
+-
+     @classmethod
+     def _from_dict(cls, d: Mapping[str, Any]) -> Self:
+         return cls(
+@@ -390,33 +359,15 @@ class PackageDirectory:
+         )
+ 
+ 
+-@dataclass(frozen=True, init=False)
++@dataclass(frozen=True, kw_only=True, slots=True)
+ class PackageArchive:
+     url: str | None = None
+     path: str | None = None
+     size: int | None = None
+     upload_time: datetime | None = None
+-    hashes: Mapping[str, str]  # type: ignore[misc]
++    hashes: Mapping[str, str]
+     subdirectory: str | None = None
+ 
+-    def __init__(
+-        self,
+-        *,
+-        url: str | None = None,
+-        path: str | None = None,
+-        size: int | None = None,
+-        upload_time: datetime | None = None,
+-        hashes: Mapping[str, str],
+-        subdirectory: str | None = None,
+-    ) -> None:
+-        # In Python 3.10+ make dataclass kw_only=True and remove __init__
+-        object.__setattr__(self, "url", url)
+-        object.__setattr__(self, "path", path)
+-        object.__setattr__(self, "size", size)
+-        object.__setattr__(self, "upload_time", upload_time)
+-        object.__setattr__(self, "hashes", hashes)
+-        object.__setattr__(self, "subdirectory", subdirectory)
+-
+     @classmethod
+     def _from_dict(cls, d: Mapping[str, Any]) -> Self:
+         package_archive = cls(
+@@ -431,32 +382,14 @@ class PackageArchive:
+         return package_archive
+ 
+ 
+-@dataclass(frozen=True, init=False)
++@dataclass(frozen=True, kw_only=True, slots=True)
+ class PackageSdist:
+     name: str | None = None
+     upload_time: datetime | None = None
+     url: str | None = None
+     path: str | None = None
+     size: int | None = None
+-    hashes: Mapping[str, str]  # type: ignore[misc]
+-
+-    def __init__(
+-        self,
+-        *,
+-        name: str | None = None,
+-        upload_time: datetime | None = None,
+-        url: str | None = None,
+-        path: str | None = None,
+-        size: int | None = None,
+-        hashes: Mapping[str, str],
+-    ) -> None:
+-        # In Python 3.10+ make dataclass kw_only=True and remove __init__
+-        object.__setattr__(self, "name", name)
+-        object.__setattr__(self, "upload_time", upload_time)
+-        object.__setattr__(self, "url", url)
+-        object.__setattr__(self, "path", path)
+-        object.__setattr__(self, "size", size)
+-        object.__setattr__(self, "hashes", hashes)
++    hashes: Mapping[str, str]
+ 
+     @classmethod
+     def _from_dict(cls, d: Mapping[str, Any]) -> Self:
+@@ -483,32 +416,14 @@ class PackageSdist:
+         return filename
+ 
+ 
+-@dataclass(frozen=True, init=False)
++@dataclass(frozen=True, kw_only=True, slots=True)
+ class PackageWheel:
+     name: str | None = None
+     upload_time: datetime | None = None
+     url: str | None = None
+     path: str | None = None
+     size: int | None = None
+-    hashes: Mapping[str, str]  # type: ignore[misc]
+-
+-    def __init__(
+-        self,
+-        *,
+-        name: str | None = None,
+-        upload_time: datetime | None = None,
+-        url: str | None = None,
+-        path: str | None = None,
+-        size: int | None = None,
+-        hashes: Mapping[str, str],
+-    ) -> None:
+-        # In Python 3.10+ make dataclass kw_only=True and remove __init__
+-        object.__setattr__(self, "name", name)
+-        object.__setattr__(self, "upload_time", upload_time)
+-        object.__setattr__(self, "url", url)
+-        object.__setattr__(self, "path", path)
+-        object.__setattr__(self, "size", size)
+-        object.__setattr__(self, "hashes", hashes)
++    hashes: Mapping[str, str]
+ 
+     @classmethod
+     def _from_dict(cls, d: Mapping[str, Any]) -> Self:
+@@ -532,7 +447,7 @@ class PackageWheel:
+         return filename
+ 
+ 
+-@dataclass(frozen=True, init=False)
++@dataclass(frozen=True, kw_only=True, slots=True)
+ class Package:
+     name: NormalizedName
+     version: Version | None = None
+@@ -548,38 +463,6 @@ class Package:
+     attestation_identities: Sequence[Mapping[str, Any]] | None = None
+     tool: Mapping[str, Any] | None = None
+ 
+-    def __init__(
+-        self,
+-        *,
+-        name: NormalizedName,
+-        version: Version | None = None,
+-        marker: Marker | None = None,
+-        requires_python: SpecifierSet | None = None,
+-        dependencies: Sequence[Mapping[str, Any]] | None = None,
+-        vcs: PackageVcs | None = None,
+-        directory: PackageDirectory | None = None,
+-        archive: PackageArchive | None = None,
+-        index: str | None = None,
+-        sdist: PackageSdist | None = None,
+-        wheels: Sequence[PackageWheel] | None = None,
+-        attestation_identities: Sequence[Mapping[str, Any]] | None = None,
+-        tool: Mapping[str, Any] | None = None,
+-    ) -> None:
+-        # In Python 3.10+ make dataclass kw_only=True and remove __init__
+-        object.__setattr__(self, "name", name)
+-        object.__setattr__(self, "version", version)
+-        object.__setattr__(self, "marker", marker)
+-        object.__setattr__(self, "requires_python", requires_python)
+-        object.__setattr__(self, "dependencies", dependencies)
+-        object.__setattr__(self, "vcs", vcs)
+-        object.__setattr__(self, "directory", directory)
+-        object.__setattr__(self, "archive", archive)
+-        object.__setattr__(self, "index", index)
+-        object.__setattr__(self, "sdist", sdist)
+-        object.__setattr__(self, "wheels", wheels)
+-        object.__setattr__(self, "attestation_identities", attestation_identities)
+-        object.__setattr__(self, "tool", tool)
+-
+     @classmethod
+     def _from_dict(cls, d: Mapping[str, Any]) -> Self:
+         package = cls(
+@@ -666,7 +549,7 @@ class Package:
+         return not (self.sdist or self.wheels)
+ 
+ 
+-@dataclass(frozen=True, init=False)
++@dataclass(frozen=True, kw_only=True, slots=True)
+ class Pylock:
+     """A class representing a pylock file."""
+ 
+@@ -676,34 +559,10 @@ class Pylock:
+     extras: Sequence[NormalizedName] | None = None
+     dependency_groups: Sequence[str] | None = None
+     default_groups: Sequence[str] | None = None
+-    created_by: str  # type: ignore[misc]
+-    packages: Sequence[Package]  # type: ignore[misc]
++    created_by: str
++    packages: Sequence[Package]
+     tool: Mapping[str, Any] | None = None
+ 
+-    def __init__(
+-        self,
+-        *,
+-        lock_version: Version,
+-        environments: Sequence[Marker] | None = None,
+-        requires_python: SpecifierSet | None = None,
+-        extras: Sequence[NormalizedName] | None = None,
+-        dependency_groups: Sequence[str] | None = None,
+-        default_groups: Sequence[str] | None = None,
+-        created_by: str,
+-        packages: Sequence[Package],
+-        tool: Mapping[str, Any] | None = None,
+-    ) -> None:
+-        # In Python 3.10+ make dataclass kw_only=True and remove __init__
+-        object.__setattr__(self, "lock_version", lock_version)
+-        object.__setattr__(self, "environments", environments)
+-        object.__setattr__(self, "requires_python", requires_python)
+-        object.__setattr__(self, "extras", extras)
+-        object.__setattr__(self, "dependency_groups", dependency_groups)
+-        object.__setattr__(self, "default_groups", default_groups)
+-        object.__setattr__(self, "created_by", created_by)
+-        object.__setattr__(self, "packages", packages)
+-        object.__setattr__(self, "tool", tool)
+-
+     @classmethod
+     def _from_dict(cls, d: Mapping[str, Any]) -> Self:
+         pylock = cls(
+@@ -836,7 +695,7 @@ class Pylock:
+         # #. If :ref:`pylock-environments` is specified, check that at least one of the
+         #    environment marker expressions is satisfied; an error MUST be raised if no
+         #    expression is satisfied.
+-        if self.environments:
++        if self.environments is not None:
+             for env_marker in self.environments:
+                 if env_marker.evaluate(
+                     cast("dict[str, str]", environment or {}), context="requirement"
+diff --git a/src/pip/_vendor/packaging/ranges.py b/src/pip/_vendor/packaging/ranges.py
+index 8144a65..d52f359 100644
+--- a/src/pip/_vendor/packaging/ranges.py
++++ b/src/pip/_vendor/packaging/ranges.py
+@@ -24,8 +24,8 @@ import typing
+ from typing import (
+     TYPE_CHECKING,
+     Any,
++    Literal,
+     TypeVar,
+-    Union,
+ )
+ 
+ from ._ranges import (
+@@ -55,11 +55,41 @@ if TYPE_CHECKING:
+     from .specifiers import SpecifierSet
+ 
+ 
+-__all__ = ["VersionRange"]
++__all__ = ["RangeRelation", "SortedOrder", "VersionRange"]
+ 
+ T = TypeVar("T")
+-UnparsedVersion = Union[Version, str]
++UnparsedVersion = Version | str
+ UnparsedVersionVar = TypeVar("UnparsedVersionVar", bound=UnparsedVersion)
++SortedOrder = Literal["ascending", "descending"]
++
++
++class RangeRelation(enum.Enum):
++    """How one range's members sit against another's.
++
++    The four members partition the ``(is_subset, is_disjoint)`` space: both
++    hold together only for an empty range, which is a subset of everything
++    and shares a member with nothing.
++    """
++
++    EMPTY = (True, True)
++    SUBSET = (True, False)
++    DISJOINT = (False, True)
++    OVERLAPPING = (False, False)
++
++    def __init__(self, is_subset: bool, is_disjoint: bool) -> None:
++        self.is_subset = is_subset
++        self.is_disjoint = is_disjoint
++
++    def __repr__(self) -> str:
++        return f"RangeRelation.{self.name}"
++
++
++# Bound once so the hot return paths load a module global instead of a class
++# attribute.
++_EMPTY_REL = RangeRelation.EMPTY
++_SUBSET_REL = RangeRelation.SUBSET
++_DISJOINT_REL = RangeRelation.DISJOINT
++_OVERLAPPING_REL = RangeRelation.OVERLAPPING
+ 
+ #: The most ``!=`` exclusion fragments (``!=V`` points or ``!=P.*`` prefixes)
+ #: that :meth:`VersionRange.to_specifier_set` will materialize to spell a
+@@ -144,6 +174,97 @@ def _union_ranges(
+     return merged
+ 
+ 
++def _relate_bounds(
++    left: Sequence[Interval],
++    right: Sequence[Interval],
++) -> RangeRelation:
++    """Return the :class:`RangeRelation` for two sorted interval lists.
++
++    One two-pointer merge answers both without building the intersection or the
++    complement. The lists are canonical (sorted, non-overlapping, and
++    non-touching, since :func:`_union_ranges` merges across empty gaps), so a
++    covered left interval sits wholly inside one right interval rather than
++    spanning two: ``left`` is a subset when every one of its intervals is
++    covered, and the two are disjoint when no overlap is found at all. A partial
++    overlap rules out both, so the walk stops there.
++    """
++    matched = 0
++    left_index = right_index = 0
++    disjoint = True
++    while left_index < len(left) and right_index < len(right):
++        left_lower, left_upper = left[left_index]
++        right_lower, right_upper = right[right_index]
++
++        # ``max`` and ``min`` return their first argument on a tie, so both cuts
++        # are the left ones exactly when the overlap is the whole left interval.
++        lower = max(left_lower, right_lower)
++        upper = min(left_upper, right_upper)
++
++        if not range_is_empty(lower, upper):
++            if lower is left_lower and upper is left_upper:
++                matched += 1
++            else:
++                return _OVERLAPPING_REL
++            disjoint = False
++
++        # Advance whichever side has the smaller upper bound.
++        if left_upper < right_upper:
++            left_index += 1
++        else:
++            right_index += 1
++
++    if matched == len(left):
++        return _EMPTY_REL if disjoint else _SUBSET_REL
++    return _DISJOINT_REL if disjoint else _OVERLAPPING_REL
++
++
++def _subset_bounds(left: Sequence[Interval], right: Sequence[Interval]) -> bool:
++    """Return whether every version in ``left`` is also in ``right``.
++
++    The canonical lists let one two-pointer walk decide containment: skip the
++    right intervals that end too early, then check that the surviving one starts
++    early enough.
++    """
++    right_index = 0
++    right_len = len(right)
++    for left_lower, left_upper in left:
++        # A right interval ending below this one cannot cover it, and the left
++        # list ascends, so it cannot cover any later one either.
++        while right_index < right_len and right[right_index][1] < left_upper:
++            right_index += 1
++        if right_index == right_len:
++            return False
++        if right[right_index][0] > left_lower:
++            return False
++    return True
++
++
++def _disjoint_bounds(left: Sequence[Interval], right: Sequence[Interval]) -> bool:
++    """Return whether no version lies in both ``left`` and ``right``.
++
++    A two-pointer merge that stops at the first overlap.
++    """
++    left_index = right_index = 0
++    left_len = len(left)
++    right_len = len(right)
++    while left_index < left_len and right_index < right_len:
++        left_lower, left_upper = left[left_index]
++        right_lower, right_upper = right[right_index]
++
++        lower = max(left_lower, right_lower)
++        upper = min(left_upper, right_upper)
++        if not range_is_empty(lower, upper):
++            return False
++
++        # Advance whichever side has the smaller upper bound.
++        if left_upper < right_upper:
++            left_index += 1
++        else:
++            right_index += 1
++
++    return True
++
++
+ def _complement_ranges(ranges: Sequence[Interval]) -> list[Interval]:
+     """Complement a sorted, non-overlapping interval list.
+ 
+@@ -293,6 +414,142 @@ def _struct_admits(
+     return matches_bounds_only(bounds, parsed)
+ 
+ 
++def _bisect_predicate(
++    items: Sequence[Any],
++    predicate: Callable[[Version], bool],
++    project: Callable[[Any], Version] | None = None,
++) -> int:
++    """First index whose ``predicate`` is true over an ascending list.
++
++    The predicate must be monotonic (false runs then true runs). Equivalent to
++    ``bisect.bisect_left`` on the mapped booleans, done by hand because the
++    ``key`` parameter for :mod:`bisect` only exists on Python 3.10 and later.
++    ``project`` maps a probed item to the version it sorts by; ``None`` means
++    the items are already :class:`~packaging.version.Version` instances.
++    """
++    low, high = 0, len(items)
++    while low < high:
++        mid = (low + high) // 2
++        item = items[mid]
++        if predicate(item if project is None else project(item)):
++            high = mid
++        else:
++            low = mid + 1
++    return low
++
++
++def _partition_indexes(
++    items: Sequence[Any],
++    lower: LowerBound,
++    upper: UpperBound,
++    project: Callable[[Any], Version] | None = None,
++    *,
++    descending: bool = False,
++) -> tuple[int, int]:
++    """Locate one interval's entries in a version-ordered list.
++
++    Returns the half-open index pair bounding the entries the interval
++    contains, so ``items[start:stop]`` are those entries in list order. On an
++    ascending list ``lower`` cuts the start and ``upper`` cuts the stop; a
++    descending list swaps which bound cuts which end. Both bound predicates
++    are monotonic over a version-ordered list either way, so each cut is one
++    bisection. ``project`` maps an item to the version it sorts by.
++    """
++    above = lower._above
++    below = upper._below
++    start_bound, stop_bound = (below, above) if descending else (above, below)
++
++    start = 0 if start_bound is None else _bisect_predicate(items, start_bound, project)
++    if stop_bound is None:
++        stop = len(items)
++    else:
++        stop = _bisect_predicate(items, lambda v: not stop_bound(v), project)
++    return start, stop
++
++
++def _make_project(
++    key: Callable[[Any], Version | str] | None,
++) -> Callable[[Any], Version]:
++    """Build the item-to-:class:`~packaging.version.Version` map for a sorted walk.
++
++    The bisections compare against bound predicates that only accept a
++    :class:`~packaging.version.Version`, so every probed item is coerced. An
++    item that does not parse cannot sit in version order at all, which is a
++    broken precondition rather than a non-match, so this raises rather than
++    dropping the item the way :meth:`VersionRange.filter` drops it.
++    """
++
++    def project(item: Any) -> Version:  # noqa: ANN401
++        raw: Version | str = item if key is None else key(item)
++        parsed = raw if isinstance(raw, Version) else coerce_version(raw)
++        if parsed is None:
++            raise ValueError(
++                f"{raw!r} does not parse as a version, so the given sequence "
++                f"is not in version order"
++            )
++        return parsed
++
++    return project
++
++
++def _check_order(
++    items: Sequence[Any], project: Callable[[Any], Version], *, descending: bool
++) -> None:
++    """Reject a sequence whose endpoints contradict the declared order.
++
++    One comparison of the two ends, which catches a list handed over in the
++    opposite order to the one named. It cannot prove the whole sequence is
++    ordered, and equal endpoints are accepted under either order.
++    """
++    if len(items) < 2:
++        return
++    first = project(items[0])
++    last = project(items[-1])
++    if last < first if not descending else first < last:
++        expected = "descending" if descending else "ascending"
++        raise ValueError(
++            f"assume_sorted={expected!r} but the sequence runs from {first} to {last}"
++        )
++
++
++def _lattice_release(version: Version, parts: int, *, above: bool) -> Version:
++    """The nearest ``parts``-component release to ``version`` on the lattice.
++
++    Truncates ``version``'s release to ``parts`` components, padding a shorter
++    release with zeros, to land on a lattice point at or below it. With
++    ``above`` the result must be strictly greater than ``version``, so a
++    truncation that lands at or below it is rounded up by one; otherwise a
++    truncation equal to ``version`` is kept and only a strictly smaller one is
++    rounded up.
++    """
++    release = version.release[:parts]
++    padded = (*release, *((0,) * (parts - len(release))))
++    candidate = Version.from_parts(epoch=version.epoch, release=padded)
++    if candidate > version or (not above and candidate == version):
++        return candidate
++    bumped = (*padded[:-1], padded[-1] + 1)
++    return Version.from_parts(epoch=version.epoch, release=bumped)
++
++
++def _release_boundary_point(
++    value: BoundaryVersion | Version | None, parts: int
++) -> Version | None:
++    """The lattice release one interval edge transitions membership at.
++
++    ``None`` for an unbounded (``-inf`` / ``+inf``) edge. A boundary sentinel
++    reports the smallest lattice release strictly above the version it sits
++    over (its final release when that version is a pre-release). A plain
++    version reports its own release projected onto the lattice: the release
++    itself when it is a lattice point, otherwise the smallest lattice release
++    above it.
++    """
++    if value is None:
++        return None
++    if isinstance(value, BoundaryVersion):
++        return _lattice_release(value.version, parts, above=True)
++    return _lattice_release(Version(value.base_version), parts, above=False)
++
++
+ # Repr helpers:
+ 
+ 
+@@ -905,7 +1162,8 @@ class VersionRange:
+     :class:`~packaging.specifiers.SpecifierSet`.
+ 
+     Construct via :meth:`~packaging.specifiers.SpecifierSet.to_range`, or with
+-    the :meth:`full`, :meth:`empty`, and :meth:`singleton` class methods.
++    the :meth:`full`, :meth:`empty`, :meth:`singleton`, and :meth:`from_bounds`
++    class methods.
+     Compose with :meth:`intersection`, :meth:`union`, :meth:`complement`, and
+     :meth:`difference` (or the ``&`` / ``|`` / ``~`` / ``-`` operators). Test
+     membership with ``in`` or :meth:`contains`, filter an iterable with
+@@ -920,9 +1178,9 @@ class VersionRange:
+     that opt-in scoped to those versions, so unrelated pre-releases are not
+     admitted wholesale.
+ 
+-    :meth:`intersection`, :meth:`union`, :meth:`difference`, and the
+-    :meth:`is_subset` / :meth:`is_superset` / :meth:`is_disjoint` predicates
+-    require both operands to share the same configured policy.
++    :meth:`intersection`, :meth:`union`, :meth:`difference`, :meth:`relation`,
++    and the :meth:`is_subset` / :meth:`is_superset` / :meth:`is_disjoint`
++    predicates require both operands to share the same configured policy.
+ 
+     >>> r = SpecifierSet(">=1.0,<2.0").to_range()
+     >>> "1.5" in r
+@@ -998,7 +1256,8 @@ class VersionRange:
+         raise TypeError(
+             "cannot create 'VersionRange' instances directly; use "
+             "SpecifierSet.to_range(), VersionRange.full(), "
+-            "VersionRange.empty(), or VersionRange.singleton() instead"
++            "VersionRange.empty(), VersionRange.singleton(), or "
++            "VersionRange.from_bounds() instead"
+         )
+ 
+     @classmethod
+@@ -1190,6 +1449,73 @@ class VersionRange:
+             prereleases_configured=prereleases,
+         )
+ 
++    @classmethod
++    def from_bounds(
++        cls,
++        lower: Version | str | None = None,
++        upper: Version | str | None = None,
++        *,
++        include_lower: bool = True,
++        include_upper: bool = True,
++        prereleases: bool | None = None,
++    ) -> VersionRange:
++        """Return the raw version-order interval from ``lower`` to ``upper``.
++
++        A single interval in the PEP 440 total order. The bounds are pure order
++        cuts, not specifier semantics: ``None`` on a side is unbounded there.
++        Both ends are inclusive by default, so ``from_bounds(v, v)`` is
++        :meth:`singleton`; pass ``include_lower=False`` or ``include_upper=False``
++        for a half-open interval.
++
++        >>> "2.0" in VersionRange.from_bounds("1.0", "2.0")
++        True
++        >>> "2.0" in VersionRange.from_bounds("1.0", "2.0", include_upper=False)
++        False
++        >>> VersionRange.from_bounds("1.5", "1.5") == VersionRange.singleton("1.5")
++        True
++
++        Membership is decided by the bounds alone, so pre-releases, post-releases,
++        and locals inside them are members even where the matching specifier
++        would exclude them:
++
++        >>> "1.0.post1" in VersionRange.from_bounds("1.0", "2.0", include_lower=False)
++        True
++        >>> "1.0.post1" in SpecifierSet(">1.0,<2.0").to_range()
++        False
++        >>> "2.0rc1" in VersionRange.from_bounds("1.0", "2.0")
++        True
++        >>> "2.0rc1" in SpecifierSet(">=1.0,<2.0").to_range()
++        False
++
++        An inverted pair, or an equal pair with either end exclusive, is the
++        empty range; an unbounded pair is the versions-only full range.
++
++        >>> VersionRange.from_bounds("2.0", "1.0").is_empty
++        True
++        >>> VersionRange.from_bounds() == VersionRange.full(admit_arbitrary=False)
++        True
++
++        :raises packaging.version.InvalidVersion: if ``lower`` or ``upper`` is a
++            string that does not parse as a PEP 440 version.
++        """
++        if lower is not None and not isinstance(lower, Version):
++            lower = Version(lower)
++        if upper is not None and not isinstance(upper, Version):
++            upper = Version(upper)
++
++        if lower is not None and upper is not None:
++            closed = include_lower and include_upper
++            if lower > upper or (lower == upper and not closed):
++                return cls.empty(prereleases=prereleases)
++
++        lower_bound = NEG_INF if lower is None else LowerBound(lower, include_lower)
++        upper_bound = POS_INF if upper is None else UpperBound(upper, include_upper)
++
++        return cls._build(
++            _canonical_floor(((lower_bound, upper_bound),)),
++            prereleases_configured=prereleases,
++        )
++
+     def intersection(self, other: VersionRange) -> VersionRange:
+         """Range containing exactly the versions in both self and other.
+ 
+@@ -1470,6 +1796,15 @@ class VersionRange:
+         False
+         >>> VersionRange.empty().is_subset(outer)
+         True
++
++        A range with an exclusion is a subset of its span, but the span is not a
++        subset of it:
++
++        >>> punctured = SpecifierSet(">=1.0,<2.0,!=1.5").to_range()
++        >>> punctured.is_subset(outer)
++        True
++        >>> outer.is_subset(punctured)
++        False
+         """
+         self._check_policy_compat(other)
+ 
+@@ -1480,12 +1815,52 @@ class VersionRange:
+ 
+         # Plain ranges: subset reduces to bounds containment, no algebra needed.
+         if self._is_plain() and other._is_plain():
+-            return not intersect_ranges(self._bounds, _complement_ranges(other._bounds))
++            return _subset_bounds(self._bounds, other._bounds)
+ 
+         # difference (unlike intersection with the one-way complement) resolves
+         # ``===`` literals against both operands, so it stays correct for them.
+         return self.difference(other).is_empty
+ 
++    def relation(self, other: VersionRange) -> RangeRelation:
++        """Return the :class:`RangeRelation` of ``self`` against ``other``.
++
++        :attr:`~RangeRelation.SUBSET` is containment,
++        :attr:`~RangeRelation.DISJOINT` is separation,
++        :attr:`~RangeRelation.OVERLAPPING` is neither, and
++        :attr:`~RangeRelation.EMPTY` is an empty ``self``, which is a subset
++        of everything and shares a member with nothing.
++
++        Both operands must share the same configured pre-release policy;
++        otherwise :exc:`ValueError` is raised.
++
++        >>> inner = SpecifierSet(">=1.5,<1.8").to_range()
++        >>> outer = SpecifierSet(">=1.0,<2.0").to_range()
++        >>> inner.relation(outer)
++        RangeRelation.SUBSET
++        >>> outer.relation(SpecifierSet(">=5.0").to_range())
++        RangeRelation.DISJOINT
++        >>> VersionRange.empty().relation(outer)
++        RangeRelation.EMPTY
++        """
++        # Identity settles both answers and the policy check with it.
++        if self is other:
++            return _EMPTY_REL if self.is_empty else _SUBSET_REL
++
++        self._check_policy_compat(other)
++
++        if self._is_plain() and other._is_plain():
++            # On plain ranges the bounds decide membership, so equal bounds
++            # settle both answers without a walk.
++            if self._bounds == other._bounds:
++                return _SUBSET_REL if self._bounds else _EMPTY_REL
++            return _relate_bounds(self._bounds, other._bounds)
++
++        # Literals, a live arbitrary admission, or a pre-release-excluding
++        # policy all put members outside the bounds, so defer to the algebra.
++        if self.is_subset(other):
++            return _EMPTY_REL if self.is_disjoint(other) else _SUBSET_REL
++        return _DISJOINT_REL if self.is_disjoint(other) else _OVERLAPPING_REL
++
+     def is_superset(self, other: VersionRange) -> bool:
+         """Return whether every member of other is also a member of self.
+ 
+@@ -1516,12 +1891,19 @@ class VersionRange:
+         True
+         >>> a.is_disjoint(SpecifierSet(">=1.5,<2.5").to_range())
+         False
++
++        A range pinned to a version the other excludes is disjoint from it:
++
++        >>> SpecifierSet("==1.5").to_range().is_disjoint(
++        ...     SpecifierSet(">=1.0,<2.0,!=1.5").to_range()
++        ... )
++        True
+         """
+         self._check_policy_compat(other)
+ 
+         # Plain ranges: disjointness is an empty bounds intersection.
+         if self._is_plain() and other._is_plain():
+-            return not intersect_ranges(self._bounds, other._bounds)
++            return _disjoint_bounds(self._bounds, other._bounds)
+         return self.intersection(other).is_empty
+ 
+     def _same_releases(self, other: VersionRange) -> bool:
+@@ -1540,6 +1922,8 @@ class VersionRange:
+         iterable: Iterable[UnparsedVersionVar],
+         prereleases: bool | None = None,
+         key: None = ...,
++        *,
++        assume_sorted: None = None,
+     ) -> Iterator[UnparsedVersionVar]: ...
+ 
+     @typing.overload
+@@ -1548,6 +1932,28 @@ class VersionRange:
+         iterable: Iterable[T],
+         prereleases: bool | None = None,
+         key: Callable[[T], UnparsedVersion] = ...,
++        *,
++        assume_sorted: None = None,
++    ) -> Iterator[T]: ...
++
++    @typing.overload
++    def filter(
++        self,
++        iterable: Sequence[UnparsedVersionVar],
++        prereleases: bool | None = None,
++        key: None = ...,
++        *,
++        assume_sorted: SortedOrder,
++    ) -> Iterator[UnparsedVersionVar]: ...
++
++    @typing.overload
++    def filter(
++        self,
++        iterable: Sequence[T],
++        prereleases: bool | None = None,
++        key: Callable[[T], UnparsedVersion] = ...,
++        *,
++        assume_sorted: SortedOrder,
+     ) -> Iterator[T]: ...
+ 
+     def filter(
+@@ -1555,6 +1961,8 @@ class VersionRange:
+         iterable: Iterable[Any],
+         prereleases: bool | None = None,
+         key: Callable[[Any], Version | str] | None = None,
++        *,
++        assume_sorted: SortedOrder | None = None,
+     ) -> Iterator[Any]:
+         """Yield items from iterable whose version falls inside the range.
+ 
+@@ -1565,13 +1973,56 @@ class VersionRange:
+         ``prereleases=True`` would yield it). A flushed buffer comes after
+         every in-place yield, so the output is not version-sorted.
+ 
+-        The signature mirrors
++        ``assume_sorted`` names the version order ``iterable`` is already in,
++        and ``iterable`` must then be a sequence in that order whose every entry
++        parses as a version. Each interval's matching entries form one
++        contiguous slice of an ordered sequence, so two bisections per interval
++        locate them and the pre-release policy runs over those alone; that is
++        ``O(intervals * log(len(iterable)))`` plus the matches, rather than a
++        bound test per entry. The yielded items, and their order, are the same
++        either way. A sequence not in the named order gives a wrong answer, in
++        the way :func:`itertools.groupby` does on unsorted input; only a
++        contradiction between the two end entries is caught. A range carrying
++        ``===`` literals decides membership for strings the bounds do not
++        describe, so it falls back to a test per entry and ignores
++        ``assume_sorted``.
++
++        The signature otherwise mirrors
+         :meth:`~packaging.specifiers.SpecifierSet.filter`.
+ 
+         >>> r = SpecifierSet(">=1.0,<2.0").to_range()
+         >>> list(r.filter(["0.9", "1.5", "2.0"]))
+         ['1.5']
++
++        The same listing, newest first, filtered by bisection:
++
++        >>> listing = [Version(v) for v in ("3.0", "2.0", "1.5", "1.0")]
++        >>> list(r.filter(listing, assume_sorted="descending"))
++        [<Version('1.5')>, <Version('1.0')>]
++
++        ``key`` reaches the version inside a richer entry, on either path:
++
++        >>> files = [("1.5", "b.whl"), ("1.0", "a.whl")]
++        >>> list(r.filter(files, key=lambda f: f[0], assume_sorted="descending"))
++        [('1.5', 'b.whl'), ('1.0', 'a.whl')]
++
++        :raises ValueError: if ``assume_sorted`` is neither ``"ascending"`` nor
++            ``"descending"``, or if the two end entries contradict it; both come
++            from the call rather than the iterator. An entry the walk coerces
++            that does not parse as a version raises as it is reached.
++
++        .. versionchanged:: 26.4
++            Added the ``assume_sorted`` keyword.
+         """
++        if assume_sorted is not None and assume_sorted not in (
++            "ascending",
++            "descending",
++        ):
++            raise ValueError(
++                f"assume_sorted must be 'ascending' or 'descending', "
++                f"not {assume_sorted!r}"
++            )
++
+         region: tuple[Interval, ...] = ()
+         if prereleases is None:
+             # The region applies only under the autodetect default; a configured
+@@ -1579,19 +2030,93 @@ class VersionRange:
+             prereleases = self._prereleases_configured
+             region = self._pre_region
+ 
++        # A region spanning the whole bounds force-admits every in-bounds
++        # pre-release, i.e. ``prereleases=True``; take the cheaper no-buffer
++        # path. (Confined to the no-literal branches: the admission path orders
++        # arbitrary strings differently under True than under the region.)
++        whole_region = bool(region) and region == self._bounds
++
++        if assume_sorted is not None and not self._admit and not self._reject:
++            # Arbitrary admission needs no gate: it only concerns strings that
++            # do not parse as a version, which ``_make_project`` rejects.
++            descending = assume_sorted == "descending"
++            sequence = typing.cast("Sequence[Any]", iterable)
++            project = _make_project(key)
++            _check_order(sequence, project, descending=descending)
++
++            if whole_region:
++                return self._filter_sorted(
++                    sequence, project, key, True, (), descending=descending
++                )
++            return self._filter_sorted(
++                sequence, project, key, prereleases, region, descending=descending
++            )
++
+         arbitrary_active = self._arbitrary_active()
+         if not self._admit and not self._reject and not arbitrary_active:
+-            # A region spanning the whole bounds force-admits every in-bounds
+-            # pre-release, i.e. ``prereleases=True``; take the cheaper no-buffer
+-            # path. (Confined to this branch: the admission path orders arbitrary
+-            # strings differently under True than under the region.)
+-            if region and region == self._bounds:
++            if whole_region:
+                 return filter_by_ranges(self._bounds, iterable, key, True)
+             return filter_by_ranges(self._bounds, iterable, key, prereleases, region)
+         return self._filter_with_admission(
+             iterable, key, prereleases, arbitrary_active, region
+         )
+ 
++    def _filter_sorted(
++        self,
++        versions: Sequence[Any],
++        project: Callable[[Any], Version],
++        key: Callable[[Any], Version | str] | None,
++        prereleases: bool | None,
++        region: tuple[Interval, ...],
++        *,
++        descending: bool,
++    ) -> Iterator[Any]:
++        """Filter a version-ordered sequence by bisecting each interval.
++
++        The bounds ascend, so a descending sequence walks them backwards; either
++        way the located slices concatenate in sequence order, which is what
++        :meth:`filter` yields. An interval is located only once the previous one
++        is exhausted, so a caller taking a prefix pays for the prefix.
++        """
++        bounds = tuple(reversed(self._bounds)) if descending else self._bounds
++
++        if prereleases is True:
++            for lower, upper in bounds:
++                start, stop = _partition_indexes(
++                    versions, lower, upper, project, descending=descending
++                )
++                for index in range(start, stop):
++                    yield versions[index]
++            return
++
++        exclude_prereleases = prereleases is False
++        plain = key is None
++        buffered: list[Any] = []
++        found_final = False
++
++        for lower, upper in bounds:
++            start, stop = _partition_indexes(
++                versions, lower, upper, project, descending=descending
++            )
++            for index in range(start, stop):
++                item = versions[index]
++                parsed = item if plain and item.__class__ is Version else project(item)
++                if not parsed.is_prerelease:
++                    found_final = True
++                    yield item
++                elif exclude_prereleases:
++                    continue
++                # PEP 440 default, mirroring ``filter_by_ranges``: buffer
++                # pre-releases and flush only if no final matches. One inside
++                # the opt-in region is force-admitted in place.
++                elif region and matches_bounds_only(region, parsed):
++                    yield item
++                elif not found_final:
++                    buffered.append(item)
++
++        if not found_final:
++            yield from buffered
++
+     def _filter_with_admission(
+         self,
+         iterable: Iterable[Any],
+@@ -1679,6 +2204,123 @@ class VersionRange:
+         if not found_final:
+             yield from all_nonfinal
+ 
++    def snap_bounds(self, versions: Iterable[Version | str]) -> VersionRange:
++        """Snap each finite bound inward onto the given versions.
++
++        Returns a subset of self that agrees with self on membership of every
++        given version: each finite segment end moves inward onto the outermost
++        given version its segment contains, and a bound with no given version
++        to land on is unchanged, as are unbounded ends.
++
++        Solver arithmetic and set algebra leave bounds at versions nobody
++        released; snapping them onto real versions yields the range a human
++        would write, and the subset guarantee means the snapped range never
++        admits a version the original excluded, even if the given list was
++        stale.
++
++        ``versions`` may be any iterable of versions or version strings, in any
++        order; it is sorted internally. ``snap_bounds([])`` returns an equal
++        range.
++
++        >>> r = SpecifierSet(">=1.0,<2.0").to_range()
++        >>> r.snap_bounds(["1.2", "1.5", "1.8"])
++        <VersionRange '[1.2, 1.8]'>
++        >>> SpecifierSet(">=1.0").to_range().snap_bounds(["1.2", "1.5"])
++        <VersionRange '[1.2, +inf)'>
++        >>> r.snap_bounds([]) == r
++        True
++
++        A version-order gap round-trips to the singleton it surrounds:
++
++        >>> versions = [Version("1.0"), Version("2.0"), Version("3.0")]
++        >>> gap = VersionRange.from_bounds(
++        ...     "1.0", "3.0", include_lower=False, include_upper=False
++        ... )
++        >>> gap.snap_bounds(versions) == VersionRange.singleton("2.0")
++        True
++
++        :raises packaging.version.InvalidVersion: if a string does not parse as a
++            PEP 440 version.
++        """
++        anchors = sorted(v if isinstance(v, Version) else Version(v) for v in versions)
++        if not self._bounds:
++            return self
++
++        simplified: list[Interval] = []
++        for lower, upper in self._bounds:
++            first_inside, first_above = _partition_indexes(anchors, lower, upper)
++            if first_inside >= first_above:
++                simplified.append((lower, upper))
++                continue
++            new_lower = (
++                lower
++                if lower.version is None
++                else LowerBound(anchors[first_inside], True)
++            )
++            new_upper = (
++                upper
++                if upper.version is None
++                else UpperBound(anchors[first_above - 1], True)
++            )
++            simplified.append((new_lower, new_upper))
++
++        return self._build(
++            _canonical_floor(tuple(simplified)),
++            admit=self._admit,
++            reject=self._reject,
++            admit_arbitrary=self._admit_arbitrary,
++            pre_region=self._pre_region,
++            prereleases_configured=self._prereleases_configured,
++        )
++
++    def release_intervals(
++        self, parts: int
++    ) -> tuple[tuple[Version | None, Version | None], ...]:
++        """The half-open release intervals on which this range is satisfied.
++
++        Projects the range onto the lattice of releases with ``parts`` numeric
++        components and returns the maximal ``[lower, upper)`` intervals it covers,
++        as ``(lower, upper)`` release pairs. ``None`` on a side is unbounded there.
++        Structure finer than the lattice, such as prereleases or posts between two
++        releases, is not represented.
++
++        >>> SpecifierSet(">=3.11.4").to_range().release_intervals(3)
++        ((<Version('3.11.4')>, None),)
++        >>> SpecifierSet("==3.11.4").to_range().release_intervals(3)
++        ((<Version('3.11.4')>, <Version('3.11.5')>),)
++
++        :raises ValueError: if ``parts`` is less than 1.
++        """
++        if parts < 1:
++            raise ValueError(f"parts must be at least 1, got {parts}")
++
++        intervals: list[tuple[Version | None, Version | None]] = []
++        for lower, upper in self._bounds:
++            lower_point = _release_boundary_point(lower.version, parts)
++            upper_point = _release_boundary_point(upper.version, parts)
++            if (
++                lower_point is not None
++                and upper_point is not None
++                and lower_point >= upper_point
++            ):
++                continue
++            if intervals:
++                prev_lower, prev_upper = intervals[-1]
++                if (
++                    prev_upper is not None
++                    and lower_point is not None
++                    and prev_upper >= lower_point
++                ):
++                    merged_upper = (
++                        None
++                        if upper_point is None
++                        else max(prev_upper, upper_point)
++                    )
++                    intervals[-1] = (prev_lower, merged_upper)
++                    continue
++            intervals.append((lower_point, upper_point))
++        return tuple(intervals)
++
+     @classmethod
+     def _from_specifier_set(cls, specifier_set: SpecifierSet) -> VersionRange:
+         """Build the range accepted by ``specifier_set``.
+diff --git a/src/pip/_vendor/packaging/specifiers.py b/src/pip/_vendor/packaging/specifiers.py
+index a6a61af..6f02085 100644
+--- a/src/pip/_vendor/packaging/specifiers.py
++++ b/src/pip/_vendor/packaging/specifiers.py
+@@ -16,10 +16,8 @@ import typing
+ from typing import (
+     TYPE_CHECKING,
+     Any,
+-    Callable,
+     Final,
+     TypeVar,
+-    Union,
+ )
+ 
+ from ._ranges import (
+@@ -37,13 +35,8 @@ from .utils import canonicalize_version
+ from .version import Version
+ 
+ if TYPE_CHECKING:
+-    import sys
+-    from collections.abc import Iterable, Iterator, Sequence
+-
+-    if sys.version_info >= (3, 10):
+-        from typing import TypeGuard
+-    else:
+-        from typing_extensions import TypeGuard
++    from collections.abc import Callable, Iterable, Iterator, Sequence
++    from typing import TypeGuard
+ 
+     from . import ranges
+     from ._ranges import Interval
+@@ -75,7 +68,7 @@ def _validate_pre(pre: object, /) -> TypeGuard[bool | None]:
+ 
+ 
+ T = TypeVar("T")
+-UnparsedVersion = Union[Version, str]
++UnparsedVersion = Version | str
+ UnparsedVersionVar = TypeVar("UnparsedVersionVar", bound=UnparsedVersion)
+ 
+ 
+@@ -336,9 +329,8 @@ class Specifier(BaseSpecifier):
+         )
+         """
+ 
+-    _regex = re.compile(
+-        r"\s*" + _specifier_regex_str + r"\s*", re.VERBOSE | re.IGNORECASE
+-    )
++    # No surrounding \s*, so _tokenizer can share this object; __init__ strips first.
++    _regex = re.compile(_specifier_regex_str, re.VERBOSE | re.IGNORECASE)
+ 
+     # Legacy unused attribute, kept for backward compatibility
+     _operators: Final = {
+@@ -365,10 +357,11 @@ class Specifier(BaseSpecifier):
+         :raises InvalidSpecifier:
+             If the given specifier is invalid (i.e. bad syntax).
+         """
+-        if not self._regex.fullmatch(spec):
++        stripped = spec.strip()
++        if not self._regex.fullmatch(stripped):
+             raise InvalidSpecifier(f"Invalid specifier: {spec!r}")
+ 
+-        spec = spec.strip()
++        spec = stripped
+         if spec.startswith("==="):
+             operator, version = spec[:3], spec[3:].strip()
+         elif spec.startswith(("~=", "==", "!=", "<=", ">=")):
+diff --git a/src/pip/_vendor/packaging/tags.py b/src/pip/_vendor/packaging/tags.py
+index dd1ea91..b1eec9b 100644
+--- a/src/pip/_vendor/packaging/tags.py
++++ b/src/pip/_vendor/packaging/tags.py
+@@ -448,7 +448,7 @@ def cpython_tags(
+         except ValueError:  # noqa: PERF203
+             pass
+ 
+-    platforms = list(platforms or platform_tags())
++    platforms = list(platform_tags() if platforms is None else platforms)
+     for abi in abis:
+         for platform_ in platforms:
+             yield Tag(interpreter, abi, platform_)
+@@ -555,7 +555,7 @@ def generic_tags(
+         interp_version = interpreter_version(warn=warn)
+         interpreter = f"{interp_name}{interp_version}"
+     abis = _generic_abi() if abis is None else list(abis)
+-    platforms = list(platforms or platform_tags())
++    platforms = list(platform_tags() if platforms is None else platforms)
+     if "none" not in abis:
+         abis.append("none")
+     for abi in abis:
+@@ -629,7 +629,7 @@ def compatible_tags(
+     """
+     if not python_version:
+         python_version = sys.version_info[:2]
+-    platforms = list(platforms or platform_tags())
++    platforms = list(platform_tags() if platforms is None else platforms)
+     for version in _py_interpreter_range(python_version):
+         for platform_ in platforms:
+             yield Tag(version, "none", platform_)
+@@ -913,18 +913,19 @@ def platform_tags() -> Iterator[str]:
+ 
+     .. versionadded:: 21.1
+     """
+-    if platform.system() == "Darwin":
+-        return mac_platforms()
+-    elif platform.system() == "iOS":
+-        return ios_platforms()
+-    elif platform.system() == "Android":
+-        return android_platforms()
+-    elif platform.system() == "Linux":
+-        return _linux_platforms()
+-    elif platform.system() == "Emscripten":
+-        return _emscripten_platforms()
+-    else:
+-        return _generic_platforms()
++    match platform.system():
++        case "Darwin":
++            return mac_platforms()
++        case "iOS":
++            return ios_platforms()
++        case "Android":
++            return android_platforms()
++        case "Linux":
++            return _linux_platforms()
++        case "Emscripten":
++            return _emscripten_platforms()
++        case _:
++            return _generic_platforms()
+ 
+ 
+ def interpreter_name() -> str:
+diff --git a/src/pip/_vendor/packaging/utils.py b/src/pip/_vendor/packaging/utils.py
+index 2f0ce20..9be9ef3 100644
+--- a/src/pip/_vendor/packaging/utils.py
++++ b/src/pip/_vendor/packaging/utils.py
+@@ -5,7 +5,7 @@
+ from __future__ import annotations
+ 
+ import re
+-from typing import NewType, Union, cast
++from typing import NewType, cast
+ 
+ from .tags import InvalidTag, Tag, UnsortedTagsError, parse_tag
+ from .version import InvalidVersion, Version, _TrimmedRelease
+@@ -28,7 +28,7 @@ def __dir__() -> list[str]:
+     return __all__
+ 
+ 
+-BuildTag = Union[tuple[()], tuple[int, str]]
++BuildTag = tuple[()] | tuple[int, str]
+ """
+ A wheel build tag: an empty tuple, or a ``(build number, build tag suffix)`` pair.
+ 
+diff --git a/src/pip/_vendor/packaging/version.py b/src/pip/_vendor/packaging/version.py
+index 5a964bd..791c8ac 100644
+--- a/src/pip/_vendor/packaging/version.py
++++ b/src/pip/_vendor/packaging/version.py
+@@ -12,14 +12,13 @@ from __future__ import annotations
+ import re
+ import sys
+ import typing
++from collections.abc import Callable
+ from typing import (
+     Any,
+-    Callable,
+     Literal,
+     NamedTuple,
+     SupportsInt,
+     TypedDict,
+-    Union,
+ )
+ 
+ if typing.TYPE_CHECKING:
+@@ -66,14 +65,14 @@ def __dir__() -> list[str]:
+     return __all__
+ 
+ 
+-LocalType = tuple[Union[int, str], ...]
++LocalType = tuple[int | str, ...]
+ 
+ CmpLocalType = tuple[tuple[int, str], ...]
+ CmpSuffix = tuple[int, int, int, int, int, int]
+-CmpKey = Union[
+-    tuple[int, tuple[int, ...], CmpSuffix],
+-    tuple[int, tuple[int, ...], CmpSuffix, CmpLocalType],
+-]
++CmpKey = (
++    tuple[int, tuple[int, ...], CmpSuffix]
++    | tuple[int, tuple[int, ...], CmpSuffix, CmpLocalType]
++)
+ VersionComparisonMethod = Callable[[CmpKey, CmpKey], bool]
+ 
+ 
+@@ -431,8 +430,7 @@ class Version(_BaseVersion):
+                 # propagate to the caller.
+                 if "" in version.split("."):
+                     raise InvalidVersion(f"Invalid version: {version!r}") from None
+-                # TODO: remove "no cover" when Python 3.9 is dropped.
+-                raise  # pragma: no cover
++                raise
+ 
+             self._epoch = 0
+             self._pre = None
