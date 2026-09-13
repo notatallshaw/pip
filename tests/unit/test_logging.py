@@ -8,6 +8,9 @@ from unittest.mock import patch
 
 import pytest
 
+from pip._vendor.pyproject_hooks import BuildBackendWarning
+
+from pip._internal.utils import deprecation
 from pip._internal.utils.logging import (
     BrokenStdoutLoggingError,
     IndentingFormatter,
@@ -17,6 +20,39 @@ from pip._internal.utils.logging import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_build_backend_warning_level_is_scoped(
+    caplog: pytest.LogCaptureFixture, fail: bool
+) -> None:
+    caplog.set_level(logging.DEBUG, logger="pip._internal.build_backend")
+
+    def emit_warning() -> None:
+        deprecation._showwarning(
+            "backend warning", BuildBackendWarning, "backend.py", 1
+        )
+
+    emit_warning()
+    try:
+        with deprecation.build_backend_warnings(logging.WARNING):
+            emit_warning()
+            with deprecation.build_backend_warnings(logging.DEBUG):
+                emit_warning()
+            emit_warning()
+            if fail:
+                raise ValueError("backend failed")
+    except ValueError:
+        pass
+    emit_warning()
+
+    assert [record.levelno for record in caplog.records] == [
+        logging.DEBUG,
+        logging.WARNING,
+        logging.DEBUG,
+        logging.WARNING,
+        logging.DEBUG,
+    ]
 
 
 class TestIndentingFormatter:
