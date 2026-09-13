@@ -1,6 +1,8 @@
 # An actual English word
 lousily
 followings
+# Set-theory terminology in the packaging patch
+disjointness
 # A contributor first name
 wil
 Whit
