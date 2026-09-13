@@ -50,6 +50,13 @@
       "version": "1.2.1"
     },
     {
+      "bom-ref": "pkg:pypi/nab-resolver@0.0.17",
+      "name": "nab-resolver",
+      "purl": "pkg:pypi/nab-resolver@0.0.17",
+      "type": "library",
+      "version": "0.0.17"
+    },
+    {
       "bom-ref": "pkg:pypi/packaging@26.3",
       "name": "packaging",
       "purl": "pkg:pypi/packaging@26.3",
@@ -136,6 +143,7 @@
         "pkg:pypi/distro@1.9.0",
         "pkg:pypi/idna@3.18",
         "pkg:pypi/msgpack@1.2.1",
+        "pkg:pypi/nab-resolver@0.0.17",
         "pkg:pypi/packaging@26.3",
         "pkg:pypi/platformdirs@4.11.0",
         "pkg:pypi/pygments@2.20.0",
@@ -167,6 +175,9 @@
     },
     {
       "ref": "pkg:pypi/msgpack@1.2.1"
+    },
+    {
+      "ref": "pkg:pypi/nab-resolver@0.0.17"
     },
     {
       "ref": "pkg:pypi/packaging@26.3"

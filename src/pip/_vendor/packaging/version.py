@@ -4,7 +4,7 @@
 """
 .. testsetup::
 
-    from packaging.version import parse, normalize_pre, Version, _cmpkey
+    from pip._vendor.packaging.version import parse, normalize_pre, Version, _cmpkey
 """
 
 from __future__ import annotations
@@ -369,7 +369,7 @@ class Version(_BaseVersion):
 
         Added a stable pickle format. Pickles created with packaging 26.2+ can
         be unpickled with future releases.  Backward compatibility with pickles
-        from packaging < 26.2 is supported but may be removed in a future
+        from pip._vendor.packaging < 26.2 is supported but may be removed in a future
         release.
     """
 
