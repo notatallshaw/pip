@@ -23,7 +23,11 @@ from pip._internal.req.constructors import install_req_extend_extras
 from pip._internal.req.req_install import InstallRequirement
 from pip._internal.req.req_set import RequirementSet
 from pip._internal.resolution.base import BaseResolver, InstallRequirementProvider
-from pip._internal.resolution.nab.base import Candidate, CatalogueUnsupported
+from pip._internal.resolution.nab.base import (
+    Candidate,
+    CataloguePreparationConflict,
+    CatalogueUnsupported,
+)
 from pip._internal.resolution.nab.catalogue import CatalogueProvider
 from pip._internal.resolution.nab.errors import installation_error
 from pip._internal.resolution.nab.factory import CollectedRootRequirements, Factory
@@ -111,6 +115,17 @@ class Resolver(BaseResolver):
                     return result
         else:
             logger.info("Nab catalogue fallback: installed environment")
+        try:
+            return self._resolve_native(collected, provisional=provisional)
+        except CataloguePreparationConflict:
+            self.factory.discard_catalogue_preparation()
+            logger.info("Nab native retry: URL requires fresh preparation")
+        return self._resolve_native(collected, provisional=provisional)
+
+    def _resolve_native(
+        self, collected: CollectedRootRequirements, *, provisional: bool
+    ) -> Result:
+        """Retry provisional absences with the original native declarations."""
         result = self._resolve_attempt(collected, provisional=provisional)
         if result is None and provisional:
             result = self._resolve_attempt(collected, provisional=False)
