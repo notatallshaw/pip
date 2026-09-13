@@ -19,6 +19,10 @@ class CatalogueUnsupported(Exception):
     """The static attempt needs the compatible candidate model."""
 
 
+class CataloguePreparationConflict(Exception):
+    """A native URL needs fresh request context for a catalogue-prepared artifact."""
+
+
 def format_name(project: NormalizedName, extras: frozenset[NormalizedName]) -> str:
     if not extras:
         return project
