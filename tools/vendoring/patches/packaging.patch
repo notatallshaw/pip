@@ -416,7 +416,7 @@ index a277af2..5f98b80 100644
  
  from typing import TypedDict
 diff --git a/src/pip/_vendor/packaging/markers.py b/src/pip/_vendor/packaging/markers.py
-index 6920805..e8b9be5 100644
+index 51b6036..e8b9be5 100644
 --- a/src/pip/_vendor/packaging/markers.py
 +++ b/src/pip/_vendor/packaging/markers.py
 @@ -9,8 +9,9 @@ import operator
@@ -540,12 +540,7 @@ index 6920805..e8b9be5 100644
  class Marker:
      """Represents a parsed dependency marker expression.
  
-@@ -393,11 +436,11 @@ class Marker:
- 
-         Added a stable pickle format. Pickles created with packaging 26.2+ can
-         be unpickled with future releases.  Backward compatibility with pickles
--        from pip._vendor.packaging < 26.2 is supported but may be removed in a future
-+        from packaging < 26.2 is supported but may be removed in a future
+@@ -397,7 +440,7 @@ class Marker:
          release.
      """
  
@@ -936,22 +931,9 @@ index b797623..f981df9 100644
                  if env_marker.evaluate(
                      cast("dict[str, str]", environment or {}), context="requirement"
 diff --git a/src/pip/_vendor/packaging/ranges.py b/src/pip/_vendor/packaging/ranges.py
-index b7224e4..d52f359 100644
+index 8144a65..d52f359 100644
 --- a/src/pip/_vendor/packaging/ranges.py
 +++ b/src/pip/_vendor/packaging/ranges.py
-@@ -12,9 +12,9 @@ exists.
- 
- .. testsetup::
- 
--    from pip._vendor.packaging.ranges import VersionRange
--    from pip._vendor.packaging.specifiers import SpecifierSet
--    from pip._vendor.packaging.version import Version
-+    from packaging.ranges import VersionRange
-+    from packaging.specifiers import SpecifierSet
-+    from packaging.version import Version
- """
- 
- from __future__ import annotations
 @@ -24,8 +24,8 @@ import typing
  from typing import (
      TYPE_CHECKING,
@@ -1773,34 +1755,10 @@ index b7224e4..d52f359 100644
      @classmethod
      def _from_specifier_set(cls, specifier_set: SpecifierSet) -> VersionRange:
          """Build the range accepted by ``specifier_set``.
-diff --git a/src/pip/_vendor/packaging/requirements.py b/src/pip/_vendor/packaging/requirements.py
-index a877831..adcc8ad 100644
---- a/src/pip/_vendor/packaging/requirements.py
-+++ b/src/pip/_vendor/packaging/requirements.py
-@@ -58,7 +58,7 @@ class Requirement:
- 
-         Added a stable pickle format. Pickles created with packaging 26.2+ can
-         be unpickled with future releases.  Backward compatibility with pickles
--        from pip._vendor.packaging < 26.2 is supported but may be removed in a future
-+        from packaging < 26.2 is supported but may be removed in a future
-         release.
- 
-     .. versionchanged:: 26.3
 diff --git a/src/pip/_vendor/packaging/specifiers.py b/src/pip/_vendor/packaging/specifiers.py
-index 534a70e..6f02085 100644
+index a6a61af..6f02085 100644
 --- a/src/pip/_vendor/packaging/specifiers.py
 +++ b/src/pip/_vendor/packaging/specifiers.py
-@@ -4,8 +4,8 @@
- """
- .. testsetup::
- 
--    from pip._vendor.packaging.specifiers import Specifier, SpecifierSet, InvalidSpecifier
--    from pip._vendor.packaging.version import Version
-+    from packaging.specifiers import Specifier, SpecifierSet, InvalidSpecifier
-+    from packaging.version import Version
- """
- 
- from __future__ import annotations
 @@ -16,10 +16,8 @@ import typing
  from typing import (
      TYPE_CHECKING,
@@ -1837,15 +1795,6 @@ index 534a70e..6f02085 100644
  UnparsedVersionVar = TypeVar("UnparsedVersionVar", bound=UnparsedVersion)
  
  
-@@ -233,7 +226,7 @@ class Specifier(BaseSpecifier):
- 
-         Added a stable pickle format. Pickles created with packaging 26.2+ can
-         be unpickled with future releases.  Backward compatibility with pickles
--        from pip._vendor.packaging < 26.2 is supported but may be removed in a future
-+        from packaging < 26.2 is supported but may be removed in a future
-         release.
-     """
- 
 @@ -336,9 +329,8 @@ class Specifier(BaseSpecifier):
          )
          """
@@ -1873,18 +1822,9 @@ index 534a70e..6f02085 100644
              operator, version = spec[:3], spec[3:].strip()
          elif spec.startswith(("~=", "==", "!=", "<=", ">=")):
 diff --git a/src/pip/_vendor/packaging/tags.py b/src/pip/_vendor/packaging/tags.py
-index 5ba4a4d..b1eec9b 100644
+index dd1ea91..b1eec9b 100644
 --- a/src/pip/_vendor/packaging/tags.py
 +++ b/src/pip/_vendor/packaging/tags.py
-@@ -129,7 +129,7 @@ class Tag:
- 
-         Added a stable pickle format. Pickles created with packaging 26.2+ can
-         be unpickled with future releases.  Backward compatibility with pickles
--        from pip._vendor.packaging < 26.2 is supported but may be removed in a future
-+        from packaging < 26.2 is supported but may be removed in a future
-         release.
-     """
- 
 @@ -448,7 +448,7 @@ def cpython_tags(
          except ValueError:  # noqa: PERF203
              pass
@@ -1967,18 +1907,9 @@ index 2f0ce20..9be9ef3 100644
  A wheel build tag: an empty tuple, or a ``(build number, build tag suffix)`` pair.
  
 diff --git a/src/pip/_vendor/packaging/version.py b/src/pip/_vendor/packaging/version.py
-index a0d57d9..791c8ac 100644
+index 5a964bd..791c8ac 100644
 --- a/src/pip/_vendor/packaging/version.py
 +++ b/src/pip/_vendor/packaging/version.py
-@@ -4,7 +4,7 @@
- """
- .. testsetup::
- 
--    from pip._vendor.packaging.version import parse, normalize_pre, Version, _cmpkey
-+    from packaging.version import parse, normalize_pre, Version, _cmpkey
- """
- 
- from __future__ import annotations
 @@ -12,14 +12,13 @@ from __future__ import annotations
  import re
  import sys
@@ -2014,15 +1945,6 @@ index a0d57d9..791c8ac 100644
 +)
  VersionComparisonMethod = Callable[[CmpKey, CmpKey], bool]
  
- 
-@@ -370,7 +369,7 @@ class Version(_BaseVersion):
- 
-         Added a stable pickle format. Pickles created with packaging 26.2+ can
-         be unpickled with future releases.  Backward compatibility with pickles
--        from pip._vendor.packaging < 26.2 is supported but may be removed in a future
-+        from packaging < 26.2 is supported but may be removed in a future
-         release.
-     """
  
 @@ -431,8 +430,7 @@ class Version(_BaseVersion):
                  # propagate to the caller.
