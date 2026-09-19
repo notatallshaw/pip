@@ -151,7 +151,6 @@ class Resolver(BaseResolver):
         except (
             CatalogueUnsupported,
             MetadataInvalid,
-            InvalidInstalledPackage,
         ) as error:
             logger.info("Nab catalogue fallback: %s: %s", type(error).__name__, error)
             return None
@@ -204,6 +203,8 @@ class Resolver(BaseResolver):
             ):
                 return None
         except (ResolutionError, PipError) as error:
+            if isinstance(error, InvalidInstalledPackage):
+                raise
             if resolver.provisional_absences:
                 return None
             if not isinstance(error, ResolutionError):

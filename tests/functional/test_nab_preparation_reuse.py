@@ -154,14 +154,14 @@ def test_fallback_rechecks_failed_metadata_in_native_order(
     assert preparation_count(result.stdout, rejected) == 2
 
 
-def test_explicit_root_restores_native_dependency_handling(
+def test_explicit_root_with_transitive_url_uses_native_resolution(
     script: PipTestEnvironment,
 ) -> None:
     older, _ = late_url_wheels(script)
     result = tracked_install(script, older)
 
     script.assert_installed(app="1.0", dep="3.0")
-    assert "CatalogueUnsupported: explicit root" in result.stdout
+    assert "CatalogueUnsupported: URL dependency" in result.stdout
     assert preparation_count(result.stdout, older) == 1
     assert result.stdout.splitlines().count("NATIVE True") == 1
     assert "NATIVE False" not in result.stdout

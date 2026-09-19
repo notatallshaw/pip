@@ -33,6 +33,11 @@ from pip._internal.resolution.nab.base import (
     Constraint,
     Requirement,
 )
+from pip._internal.resolution.nab.candidates import (
+    BaseCandidate,
+    ExtrasCandidate,
+    as_base_candidate,
+)
 from pip._internal.resolution.nab.factory import (
     CandidateCatalogue,
     CollectedRootRequirements,
@@ -40,6 +45,7 @@ from pip._internal.resolution.nab.factory import (
 )
 from pip._internal.resolution.nab.provider import PipProvider
 from pip._internal.resolution.nab.reporter import PipDebuggingReporter, PipReporter
+from pip._internal.resolution.nab.requirements import SpecifierWithoutExtrasRequirement
 from pip._internal.utils.packaging import get_requirement
 
 if TYPE_CHECKING:
@@ -138,6 +144,9 @@ class CatalogueProvider(BaseProvider[str, Version]):
         self.universes: dict[str, list[Version]] = {}
         self.prepared_counts: dict[str, int] = {}
         self.requested_order = False
+        self.explicit_bases: dict[str, BaseCandidate] = {}
+        self.explicit_candidates: dict[str, Candidate] = {}
+        self.collect_explicit_sources()
         self.roots = self.ranges(collected.requirements, roots=True)
         self.constraints: dict[str, VersionRange] = {}
         for package, constraint in collected.constraints.items():
@@ -148,24 +157,43 @@ class CatalogueProvider(BaseProvider[str, Version]):
             )
             self.constraints[package] = constraint.specifier.to_range()
 
+    def collect_explicit_sources(self) -> None:
+        """Fix input sources before translating any named requirements."""
+        for requirement in self.collected.requirements:
+            candidate, _ = requirement.get_candidate_lookup()
+            if candidate is None:
+                continue
+            base = (
+                candidate.base
+                if isinstance(candidate, ExtrasCandidate)
+                else as_base_candidate(candidate)
+            )
+            if base is None:
+                raise CatalogueUnsupported("unsupported explicit candidate")
+            previous = self.explicit_bases.setdefault(base.name, base)
+            if previous != base:
+                raise CatalogueUnsupported("conflicting explicit sources")
+            self.explicit_candidates[candidate.name] = candidate
+
     def ranges(
         self, requirements: Iterable[Requirement], *, roots: bool = False
     ) -> dict[str, VersionRange]:
-        """Translate declarations without granting URL candidates eligibility."""
+        """Translate declarations into ranges over the fixed candidate sources."""
         ranges: dict[str, VersionRange] = {}
         for requirement in requirements:
             candidate, ireq = requirement.get_candidate_lookup()
             if candidate is not None:
-                if roots:
-                    raise CatalogueUnsupported("explicit root")
                 self.remember(candidate)
                 allowed = VersionRange.singleton(candidate.version)
             elif ireq is not None:
                 if ireq.link or ireq.hash_options or ireq.config_settings:
                     raise CatalogueUnsupported("requirement preparation options")
-                self.templates.setdefault(requirement.name, ireq)
-                if roots:
-                    self.templates.setdefault(requirement.project_name, ireq)
+                if not roots or not isinstance(
+                    requirement, SpecifierWithoutExtrasRequirement
+                ):
+                    self.templates.setdefault(requirement.name, ireq)
+                    if roots:
+                        self.templates.setdefault(requirement.project_name, ireq)
                 self.check_yanked(
                     requirement.name, ireq.specifier, "yanked requirement pin"
                 )
@@ -182,6 +210,8 @@ class CatalogueProvider(BaseProvider[str, Version]):
 
     def check_yanked(self, package: str, specifier: SpecifierSet, reason: str) -> None:
         """Defer index admission checks while installed metadata may suffice."""
+        if self.explicit_bases and package.partition("[")[0] in self.explicit_bases:
+            return
         if (
             package not in self.catalogues
             and self.installed_version(package) is not None
@@ -215,6 +245,25 @@ class CatalogueProvider(BaseProvider[str, Version]):
             return install_req_extend_extras(template, get_requirement(package).extras)
         return template
 
+    def explicit_candidate(self, package: str) -> Candidate | None:
+        """Return the source fixed by an input requirement, including its extras."""
+        if not self.explicit_bases:
+            return None
+        candidate = self.explicit_candidates.get(package)
+        if candidate is not None:
+            return candidate
+        base, bracket, _ = package.partition("[")
+        candidate = self.explicit_bases.get(base)
+        if candidate is None or not bracket:
+            return candidate
+        candidate = self.factory.make_extras_candidate(
+            self.explicit_bases[base],
+            frozenset(get_requirement(package).extras),
+            comes_from=self.preparation_template(package),
+        )
+        self.explicit_candidates[package] = candidate
+        return candidate
+
     def installed_version(self, package: str) -> Version | None:
         """Cache installed availability independently of finder versions."""
         if package not in self.installed_versions:
@@ -245,6 +294,14 @@ class CatalogueProvider(BaseProvider[str, Version]):
                 ),
                 None,
             )
+        explicit = self.explicit_candidate(package)
+        if explicit is not None:
+            if explicit.version not in version_range:
+                return None
+            self.remember(explicit)
+            if self.precheck_dependencies(package, explicit.version):
+                return None
+            return explicit.version
         installed = self.installed_version(package)
         if installed is not None and installed not in version_range:
             installed = None
@@ -340,6 +397,9 @@ class CatalogueProvider(BaseProvider[str, Version]):
                 name == package and version in version_range
                 for name, version in self.candidates
             )
+        explicit = self.explicit_candidate(package)
+        if explicit is not None:
+            return explicit.version in version_range
         installed = self.installed_version(package)
         if installed is not None and installed in version_range:
             return True
@@ -410,6 +470,9 @@ class CatalogueProvider(BaseProvider[str, Version]):
                 name == package and version in version_range
                 for name, version in self.candidates
             )
+        explicit = self.explicit_candidate(package)
+        if explicit is not None:
+            return int(explicit.version in version_range)
         installed = self.installed_version(package)
         installed_matches = installed is not None and installed in version_range
         if (
@@ -491,6 +554,7 @@ class CatalogueProvider(BaseProvider[str, Version]):
                 return False
             if (
                 candidate.version.is_prerelease
+                and candidate.project_name not in self.explicit_bases
                 and not self.factory.catalogue_prerelease_admitted(
                     candidate, requirements, base
                 )
