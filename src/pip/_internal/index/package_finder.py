@@ -1097,6 +1097,10 @@ class PackageFinder:
         )
         raise BestVersionAlreadyInstalled
 
+    def has_locked_link(self, project_name: str) -> bool:
+        """Return whether a lock file fixes this project's artifact."""
+        return canonicalize_name(project_name) in self._locked_links
+
     def add_locked_link(self, project_name: NormalizedName, locked_link: Link) -> None:
         assert not self._all_candidates
         if project_name in self._locked_links:

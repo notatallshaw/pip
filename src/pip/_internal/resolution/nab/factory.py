@@ -148,6 +148,9 @@ class Factory:
         self._force_reinstall = force_reinstall
         self._ignore_requires_python = ignore_requires_python
         self.catalogue_only = False
+        self.catalogue_sources: dict[str, BaseCandidate] = {}
+        self.catalogue_expanding_sources = False
+        self.catalogue_yank_pins: dict[str, SpecifierSet] = {}
         self._catalogue_yanked_versions: dict[str, frozenset[Version]] = {}
         self._catalogue_preparation: _CataloguePreparation | None = None
         self._catalogue_candidate_ids: set[int] = set()
@@ -190,6 +193,9 @@ class Factory:
             yield
         finally:
             self.catalogue_only = False
+            self.catalogue_sources = {}
+            self.catalogue_yank_pins = {}
+            self.catalogue_expanding_sources = False
             self._build_failures = failures
             self._catalogue_preparation = preparation
             self._catalogue_candidate_ids = {
@@ -461,7 +467,10 @@ class Factory:
         )
 
     def catalogue_candidates(
-        self, identifier: str, template: InstallRequirement | None
+        self,
+        identifier: str,
+        template: InstallRequirement | None,
+        hashes: Hashes | None = None,
     ) -> CandidateCatalogue:
         """Snapshot finder order without preparing artifacts or requiring a parent."""
         requirement = get_requirement(identifier)
@@ -470,17 +479,33 @@ class Factory:
             template = self._make_install_req_from_spec(identifier, None)
         # SpecifierSet equality ignores prerelease overrides.
         evaluator = self._finder.make_candidate_evaluator(
-            project_name=name, specifier=SpecifierSet(prereleases=True)
+            project_name=name, specifier=SpecifierSet(prereleases=True), hashes=hashes
         )
         candidates = evaluator.get_applicable_candidates(
             self._finder.find_all_candidates(name)
         )
+        pinned = self.catalogue_yank_pins.get(name)
+        allow_yanked = False
+        if pinned is not None:
+            matching = [
+                candidate
+                for candidate in candidates
+                if pinned.contains(candidate.version, prereleases=True)
+            ]
+            allow_yanked = bool(matching) and all(
+                candidate.link.is_yanked for candidate in matching
+            )
         return CandidateCatalogue(
             self,
             [
                 candidate
                 for candidate in reversed(candidates)
                 if not candidate.link.is_yanked
+                or (
+                    allow_yanked
+                    and pinned is not None
+                    and pinned.contains(candidate.version, prereleases=True)
+                )
             ],
             name,
             frozenset(requirement.extras),
@@ -519,7 +544,9 @@ class Factory:
         version: Version,
     ) -> Candidate | None:
         if link.is_yanked:
-            raise CatalogueUnsupported("yanked candidate")
+            pinned = self.catalogue_yank_pins.get(name)
+            if pinned is None or not pinned.contains(version, prereleases=True):
+                raise CatalogueUnsupported("yanked candidate")
         return self._make_candidate_from_link(link, extras, template, name, version)
 
     def catalogue_prerelease_policy(self, identifier: str) -> bool | None:
@@ -579,17 +606,13 @@ class Factory:
             assert base_cand is not None, "no extras here"
             yield self.make_extras_candidate(base_cand, extras)
 
-    def _iter_candidates_from_constraints(
+    def candidates_from_constraints(
         self,
         identifier: str,
         constraint: Constraint,
         template: InstallRequirement,
     ) -> Iterator[Candidate]:
-        """Produce explicit candidates from constraints.
-
-        This creates "fake" InstallRequirement objects that are basically clones
-        of what "should" be the template, but with original_link set to link.
-        """
+        """Prepare constraint links using the request's provenance and options."""
         extras: frozenset[str] = frozenset()
         base_identifier = identifier
         with contextlib.suppress(InvalidRequirement):
@@ -654,7 +677,7 @@ class Factory:
         if ireqs:
             try:
                 explicit_candidates.update(
-                    self._iter_candidates_from_constraints(
+                    self.candidates_from_constraints(
                         identifier,
                         constraint,
                         template=ireqs[0],
@@ -699,8 +722,19 @@ class Factory:
             self.catalogue_only
             and ireq.link is not None
             and ireq.match_markers(requested_extras)
+            and not self.catalogue_expanding_sources
         ):
-            raise CatalogueUnsupported("URL dependency")
+            known = (
+                self.catalogue_sources.get(canonicalize_name(ireq.name))
+                if ireq.name
+                else None
+            )
+            if (
+                known is None
+                or known.source_link is None
+                or not links_equivalent(known.source_link, ireq.link)
+            ):
+                raise CatalogueUnsupported("URL dependency")
         if not ireq.match_markers(requested_extras):
             logger.info(
                 "Ignoring %s: markers '%s' don't match your environment",
@@ -975,6 +1009,24 @@ class Factory:
                 is_satisfied_by=lambda r, c: True,
             )
         )
+
+    def get_input_conflict_error(
+        self, causes: Sequence[RequirementCause], constraints: dict[str, Constraint]
+    ) -> InstallationError:
+        """Render mandatory input conflicts with lock-file-specific diagnostics."""
+        project = causes[0].requirement.project_name
+        if self._finder.has_locked_link(project):
+            candidates = self._finder.find_all_candidates(project)
+            if len(candidates) == 1:
+                for requirement, parent in causes:
+                    _, ireq = requirement.get_candidate_lookup()
+                    if ireq is not None and not ireq.specifier.contains(
+                        candidates[0].version, prereleases=True
+                    ):
+                        return self._report_single_requirement_conflict(
+                            requirement, parent
+                        )
+        return self.get_installation_error(causes, constraints)
 
     def get_installation_error(
         self,
