@@ -83,7 +83,7 @@ def test_constraint_pin_keeps_the_yanked_release_available(
         "dep",
         allow_stderr_warning=True,
     )
-    assert "yanked constraint pin" in result.stdout
+    assert "Nab catalogue success" in result.stdout
     script.assert_installed(dep="2.0")
 
 
@@ -125,3 +125,22 @@ def test_rejected_parent_does_not_leave_yanked_eligibility(
     )
     assert "yanked requirement pin" in result.stdout
     script.assert_installed(app="1.0", dep="1.0")
+
+
+def test_rejected_pin_cannot_admit_a_yanked_release_for_another_parent(
+    script: PipTestEnvironment,
+) -> None:
+    listing = yanked_listing(
+        script,
+        [
+            ("dep", "1.0", []),
+            ("dep", "2.0", []),
+            ("app", "2.0", ["dep==2.0", "missing==1"]),
+            ("app", "1.0", ["dep>=2"]),
+        ],
+    )
+    result = script.pip(
+        "install", "--no-index", "--find-links", listing, "app", expect_error=True
+    )
+    assert "yanked requirement pin" in result.stdout
+    script.assert_not_installed("app", "dep")

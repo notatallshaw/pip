@@ -124,29 +124,45 @@ packages. Additional extras use that fixed source, and named requirements and
 constraints must still accept its version. Pip does not list index alternatives
 for a project whose source is fixed by an input.
 
+Input hashes and build settings are applied during candidate selection and
+preparation. Source constraints are prepared when their project is needed;
+unused constraints do not cause downloads. Exact input pins can admit yanked
+releases under pip's candidate rules.
+
+Pip also follows URL dependencies of explicit input candidates before solving.
+During solving, dependencies can reuse a matching source already fixed and
+prepared for the request. Candidate metadata remains tied to its source.
+
+Invalid dependency metadata excludes that candidate version when pip's
+candidate rules permit it. An inconsistent artifact, such as a wheel whose
+metadata version disagrees with its filename, can be skipped while another
+artifact of that version is tried.
+
 ### Fallback: changing candidate sources or admission
 
-Some requests need choices that the fast path cannot represent. For example,
-a dependency may introduce a URL containing another build of the same package
-version, with different metadata. The fallback keeps those sources separate
-and lets pip supply candidates as the requirements develop.
+The fallback keeps source identities separate and queries candidates under the
+active requirements. Pip uses it under the following conditions:
 
-| Request or outcome | What pip does |
+| Condition | Reason |
 | --- | --- |
-| Named requirements, installed packages, and local, editable or URL inputs | Starts with the fast path. |
-| Dependency metadata introduces a URL, source replacement or unsupported preparation option | Retries the original request with the fallback. |
-| The fast path cannot find a solution, or its result fails pip's checks | Retries with the fallback before reporting a resolution failure. |
+| A dependency introduces a URL outside the prepared fixed sources and explicit-input URL closure | Its source may depend on which parent version is selected. |
+| A candidate's source must change under the same package/version key | The metadata attached to a learned clause must remain fixed. |
+| A source constraint cannot provide a fixed candidate after preparation | Native queries apply the original candidate rejection and source rules. |
+| A transitive pin may admit a yanked release not covered by the fixed input pins | Eligibility can disappear when its parent is rejected. |
+| An installed package requires replacing itself | Native handling preserves pip's treatment of that installation's dependency obligations. |
+| Invalid metadata is encountered in a fixed source, or in an index alternative when an installed version exists | Native preparation and installed-candidate iteration have different rejection rules. |
+| A failed solve still has unexamined candidate metadata or installed choices | Unread metadata may supply another source or admission condition. |
+| The completed selection fails original requirements, constraints, prerelease or artifact checks | Pip retries with native candidate admission. |
 
-An installed package whose dependencies require replacing that package also
-uses the fallback. Hash/source constraints and some yanked-release cases need
-its candidate checks. Invalid installed metadata, build failures and terminal index errors are
-reported normally.
+Conflicting fixed inputs are reported directly. A failed solve can also be
+reported directly when pip has complete metadata for the relevant fixed
+candidate domain. These checks retain pip's conflict and lock-file diagnostics.
+Invalid installed metadata, build failures and terminal index errors are
+reported directly.
 
-A failed fast attempt does not prove the request is impossible: metadata that
-has not been read yet may supply a missing candidate. Fallback starts with fresh
-solver state and the original requirements and options. Successful preparation
-can be reused, but decisions and learned conflicts from the fast attempt are
-discarded.
+Fallback starts with fresh solver state and the original requirements and
+options. Successful preparation can be reused, but decisions and learned
+conflicts from the fast attempt are discarded.
 
 ### Provider implementation
 

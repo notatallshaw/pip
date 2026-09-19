@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from pip._vendor.nab_resolver.candidate_provider import CandidateProvider
 from pip._vendor.nab_resolver.errors import ResolutionError
@@ -15,6 +15,41 @@ from pip._internal.resolution.nab.base import Constraint, Requirement, Requireme
 from pip._internal.resolution.nab.factory import Factory
 from pip._internal.resolution.nab.host import NativeHost, Request
 from pip._internal.resolution.nab.ranges import CandidateKey
+
+if TYPE_CHECKING:
+    from pip._internal.resolution.nab.catalogue import CatalogueProvider
+
+
+def catalogue_installation_error(
+    error: ResolutionError, provider: CatalogueProvider
+) -> Exception:
+    """Render a closed-catalogue proof using the original pip requirements."""
+    if error.incompatibility is None:
+        return InstallationError(str(error))
+    selected = _select_requested_pairs(_external_clauses(error.incompatibility))
+    records: list[RequirementCause] = []
+    for parent, child, parent_range in selected:
+        if parent is None:
+            records.extend(
+                RequirementCause(req, None)
+                for req in provider.collected.requirements
+                if req.name == child
+            )
+            continue
+        for (package, version), (requirements, _) in provider.dependencies.items():
+            if package != parent or version not in parent_range:
+                continue
+            candidate = provider.candidates[package, version]
+            records.extend(
+                RequirementCause(req, candidate)
+                for req in requirements
+                if req.name == child
+            )
+    if not records:
+        return InstallationError(str(error))
+    return provider.factory.get_installation_error(
+        records, provider.collected.constraints
+    )
 
 
 def installation_error(

@@ -17,8 +17,9 @@ further dependencies as it reads that metadata.
 
 Requests start on nab's fast path, including installed packages and local,
 editable or URL inputs. Pip automatically retries with more flexible candidate
-handling when dependency metadata introduces a URL or the fast path cannot
-resolve or validate the request. Both paths use nab;
+handling when dependencies introduce sources or admission rules outside its
+fixed candidate model, or when an inconclusive result needs native candidate
+checks. Both paths use nab;
 no additional option is needed. The [resolver algorithm](more-dependency-resolution.md#the-resolver-algorithm)
 explains when fallback occurs.
 
