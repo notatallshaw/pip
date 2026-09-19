@@ -102,10 +102,11 @@ Pip uses nab's PubGrub solver with a fast path and an automatic fallback.
 Both use pip's package preparation and installation code. Pip chooses the path;
 users do not need to select one.
 
-### Fast path: installed packages and index choices
+### Fast path: fixed candidate sources
 
-Ordinary named requirements start here, including requests that consider
-installed packages. The fast path does not require `--ignore-installed`.
+Requests start here, including named requirements, installed packages, and
+local, editable or URL projects supplied on the command line or in requirements
+files. The fast path does not require `--ignore-installed`.
 
 Pip first tries a suitable installed version when the upgrade options allow it.
 It reads that distribution's metadata and asks the finder for other versions
@@ -117,7 +118,13 @@ known to agree. Installed versions are part of that set, including versions
 that are no longer on the index. Before the finder has supplied the complete
 list, dependency clauses stay tied to the selected version.
 
-### Fallback: more flexible candidate handling
+A local, editable or URL input fixes that project's source before solving.
+Its metadata supplies dependencies in the same solve as installed and indexed
+packages. Additional extras use that fixed source, and named requirements and
+constraints must still accept its version. Pip does not list index alternatives
+for a project whose source is fixed by an input.
+
+### Fallback: changing candidate sources or admission
 
 Some requests need choices that the fast path cannot represent. For example,
 a dependency may introduce a URL containing another build of the same package
@@ -126,15 +133,14 @@ and lets pip supply candidates as the requirements develop.
 
 | Request or outcome | What pip does |
 | --- | --- |
-| Named requirements, with or without installed packages | Starts with the fast path. |
-| Local, editable or URL projects supplied as roots | Uses the fallback. |
-| A URL dependency, source replacement or unsupported preparation option appears | Retries the original request with the fallback. |
+| Named requirements, installed packages, and local, editable or URL inputs | Starts with the fast path. |
+| Dependency metadata introduces a URL, source replacement or unsupported preparation option | Retries the original request with the fallback. |
 | The fast path cannot find a solution, or its result fails pip's checks | Retries with the fallback before reporting a resolution failure. |
 
 An installed package whose dependencies require replacing that package also
 uses the fallback. Hash/source constraints and some yanked-release cases need
-its candidate checks. Build failures and terminal index errors are reported
-normally.
+its candidate checks. Invalid installed metadata, build failures and terminal index errors are
+reported normally.
 
 A failed fast attempt does not prove the request is impossible: metadata that
 has not been read yet may supply a missing candidate. Fallback starts with fresh

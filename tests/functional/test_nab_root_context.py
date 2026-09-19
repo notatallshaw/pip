@@ -6,6 +6,28 @@ from tests.lib import PipTestEnvironment, create_basic_wheel_for_package
 from tests.lib.wheel import make_wheel
 
 
+def test_pinned_extra_root_keeps_requirement_file_chain(
+    script: PipTestEnvironment,
+) -> None:
+    create_basic_wheel_for_package(script, "app", "1", extras={"feature": ["child==1"]})
+    create_basic_wheel_for_package(script, "child", "1")
+    requirements = script.scratch_path / "requirements.txt"
+    requirements.write_text("app[feature]==1\n")
+
+    result = script.pip(
+        "install",
+        "--no-index",
+        "--find-links",
+        script.scratch_path,
+        "-r",
+        requirements,
+    )
+
+    assert "Nab catalogue success" in result.stdout
+    assert f"(from app[feature]==1->-r {requirements} (line 1))" in result.stdout
+    assert "app[feature]==1->app[feature]==1" not in result.stdout
+
+
 @pytest.mark.parametrize("late_url", [False, True])
 def test_root_extras_keep_requested_metadata_after_transitive_preparation(
     script: PipTestEnvironment, late_url: bool
