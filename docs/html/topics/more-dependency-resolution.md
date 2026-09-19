@@ -5,14 +5,6 @@ In certain situations, pip can take a long time to determine what to install,
 and this article is intended to help readers understand what is happening
 "behind the scenes" during that process.
 
-```{note}
-This document is a work in progress. The details included are accurate (at the
-time of writing), but there is additional information, in particular around
-pip's interface with resolvelib, which has not yet been included.
-
-Contributions to improve this document are welcome.
-```
-
 ## The dependency resolution problem
 
 The process of finding a set of packages to install, given a set of dependencies
@@ -30,21 +22,13 @@ you have if you hit a problem situation like this a little later.
 
 ## Python specific issues
 
-Many algorithms for handling dependency resolution assume that you know the
-full details of the problem at the start - that is, you know all of the
-dependencies up front. Unfortunately, that is not the case for Python packages.
-With the current package index structure, dependency metadata is only available
-by downloading the package file, and extracting the data from it. And in the
-case of source distributions, the situation is even worse as the project must
-be built after being downloaded in order to determine the dependencies.
+Dependency metadata is discovered during resolution. Pip can fetch separate
+metadata files when the index provides them, read metadata from downloaded
+distributions, or ask a source distribution's build backend to prepare it.
 
-Work is ongoing to try to make metadata more readily available at lower cost,
-but at the time of writing, this has not been completed.
-
-As downloading projects is a costly operation, pip cannot pre-compute the full
-dependency tree. This means that we are unable to use a number of techniques
-for solving the dependency resolution problem. In practice, we have to use a
-*backtracking algorithm*.
+Fetching and preparing every available release would be costly. Pip instead
+reads metadata as it considers candidates and backtracks when their
+dependencies conflict.
 
 ## Dependency metadata
 
@@ -60,13 +44,12 @@ There are other pieces of data (e.g., extras, python version restrictions, wheel
 compatibility tags) which are used as well, but they do not fundamentally
 alter the process, so we will ignore them here.
 
-The most important information is the project name and version. Those two pieces
-of information identify an individual "candidate" for installation, and must
-uniquely identify such a candidate. Name and version must be available from the
-moment the candidate object is created. This is not an issue for distribution
-files (sdists and wheels) as that data is available from the filename, but for
-unpackaged source trees, pip needs to call the build backend to ask for that
-data. This is done before resolution proper starts.
+The most important information is the project name and version. Together with
+its source, they identify a candidate for installation. Name and version must
+be available from the moment the candidate object is created. This is not an
+issue for distribution files (sdists and wheels) as that data is available from
+the filename, but for unpackaged source trees, pip needs to call the build
+backend to ask for that data. This is done before resolution proper starts.
 
 The dependency data is *not* requested in advance (as noted above, doing so
 would be prohibitively costly, and for a backtracking algorithm it isn't
@@ -96,11 +79,10 @@ by another component of pip, the "finder". The finder is responsible for
 feeding candidates to the resolver, and has a key role to play in selecting
 suitable candidates.
 
-Note that the resolver is *only* relevant for packages fetched from an index.
-Candidates coming from other sources (local source directories, {ref}`direct
-URL references <pypug:dependency-specifiers>`) do *not* go through the finder,
-and are merged with the candidates provided by the finder as part of the resolver's
-"provider" implementation.
+Candidates from local source directories and
+{ref}`direct URL references <pypug:dependency-specifiers>` do not go through
+the finder. They still participate in resolution, alongside candidates
+obtained through the finder.
 
 As well as determining what versions exist in the index for a given project,
 the finder selects the best distribution file to use for that candidate. This
@@ -116,71 +98,108 @@ over older versions, for example.
 
 ## The resolver algorithm
 
-The resolver itself is based on a separate package, [resolvelib](https://pypi.org/project/resolvelib/).
-This implements an abstract backtracking resolution algorithm, in a way that is
-independent of the specifics of Python packages - those specifics are abstracted
-away by pip before calling the resolver.
+Pip uses nab's PubGrub solver with a fast path and an automatic fallback.
+Both use pip's package preparation and installation code. Pip chooses the path;
+users do not need to select one.
 
-Pip's interface to resolvelib is in the form of a "provider", which is the
-interface between pip's model of packages and the resolution algorithm. The
-provider deals in "candidates" and "requirements" and implements the following
-operations:
+### Fast path: fixed candidate sources
 
-* `identify` - implements identity for candidates and requirements. It is this
-  operation that implements the rule that candidates are identified by their
-  name and version, for example.
-* `get_preference` - this provides information to the resolver to help it choose
-  which requirement to look at "next" when working through the resolution
-  process.
-* `narrow_requirement_selection` - this provides a way to limit the number of
-  identifiers passed to `get_preference`.
-* `find_matches` - given a set of constraints, determine what candidates exist
-  that satisfy them. This is essentially where the finder interacts with the
-  resolver.
-* `is_satisfied_by` - checks if a candidate satisfies a requirement. This is
-  basically the implementation of what a requirement means.
-* `get_dependencies` - get the dependency metadata for a candidate. This is
-  the implementation of the process of getting and reading package metadata.
+Requests start here, including named requirements, installed packages, and
+local, editable or URL projects supplied on the command line or in requirements
+files.
 
-Of these methods, the only non-trivial ones are the `get_preference` and
-`narrow_requirement_selection` methods. These implement heuristics used
-to guide the resolution, telling it which requirement to try to satisfy next.
-It's these methods that are responsible for trying to guess which route through
-the dependency tree will be most productive. As noted above, it's doing this
-with limited information. See the following diagram:
+Pip first tries a suitable installed version when the upgrade options allow it.
+It reads that distribution's metadata and asks the finder for other versions
+only when needed. Metadata for downloaded candidates is also prepared on demand.
+
+For each package, this path works with a fixed set of choices during the solve.
+That lets nab reuse dependency information across versions whose metadata is
+known to agree. Installed versions are part of that set, including versions
+that are no longer on the index. Before the finder has supplied the complete
+list, dependency clauses stay tied to the selected version.
+
+A local, editable or URL input fixes that project's source before solving.
+Its metadata supplies dependencies in the same solve as installed and indexed
+packages. Additional extras use that fixed source, and named requirements and
+constraints must still accept its version. Pip does not list index alternatives
+for a project whose source is fixed by an input.
+
+Input hashes and build settings are applied during candidate selection and
+preparation. Source constraints are prepared when their project is needed;
+unused constraints do not cause downloads. Exact input pins can admit yanked
+releases under pip's candidate rules.
+
+Pip also follows URL dependencies of explicit input candidates before solving.
+During solving, dependencies can reuse a matching source already fixed and
+prepared for the request. Candidate metadata remains tied to its source.
+
+Invalid dependency metadata excludes that candidate version when pip's
+candidate rules permit it. An inconsistent artifact, such as a wheel whose
+metadata version disagrees with its filename, can be skipped while another
+artifact of that version is tried.
+
+### Fallback: changing candidate sources or admission
+
+The fallback keeps source identities separate and queries candidates under the
+active requirements. Pip uses it under the following conditions:
+
+| Condition | Reason |
+| --- | --- |
+| A dependency introduces a URL outside the prepared fixed sources and explicit-input URL closure | Its source may depend on which parent version is selected. |
+| A candidate's source must change under the same package/version key | The metadata attached to a learned clause must remain fixed. |
+| A source constraint cannot provide a fixed candidate after preparation | Native queries apply the original candidate rejection and source rules. |
+| A transitive pin may admit a yanked release not covered by the fixed input pins | Eligibility can disappear when its parent is rejected. |
+| An installed package requires replacing itself | Native handling preserves pip's treatment of that installation's dependency obligations. |
+| Invalid metadata is encountered in a fixed source, or in an index alternative when an installed version exists | Native preparation and installed-candidate iteration have different rejection rules. |
+| A failed solve still has unexamined candidate metadata or installed choices | Unread metadata may supply another source or admission condition. |
+| The completed selection fails original requirements, constraints, prerelease or artifact checks | Pip retries with native candidate admission. |
+
+Conflicting fixed inputs are reported directly. A failed solve can also be
+reported directly when pip has complete metadata for the relevant fixed
+candidate domain. These checks retain pip's conflict and lock-file diagnostics.
+Invalid installed metadata, build failures and terminal index errors are
+reported directly.
+
+Fallback starts with fresh solver state and the original requirements and
+options. Successful preparation can be reused, but decisions and learned
+conflicts from the fast attempt are discarded.
+
+### Provider implementation
+
+`CatalogueProvider` implements the fast path using ordinary version ranges.
+It checks dependencies before committing a candidate, usually considers packages
+with fewer matching choices first, and checks the completed selection against
+pip's original requirements and candidate rules. A preferred installation can
+be tried before counting finder choices. After repeated preparation of a
+transitive package, it can restart once with command-line requirement order
+taking precedence.
+
+The fallback uses `NativeHost` and nab's `CandidateProvider`. Pip's factory
+supplies candidates from installed distributions, indexes, direct URLs and
+editable projects. The host attaches source identities to the version ranges,
+so equal versions with different metadata remain separate choices.
+
+Each fallback attempt creates a new host, provider and solver. A failed
+catalogue solve goes directly to definitive native resolution. Other fallback
+cases may first try provisional candidate availability and retry if those
+assumptions fail validation. If a URL request conflicts with reused index
+preparation, pip discards that preparation context and retries once to preserve
+the URL's provenance.
+
+Nab prioritizes packages involved in contextual query failures and can
+temporarily demote repeated dependency blockers. Within that feedback ordering,
+the native host uses the following preferences:
+
+* Direct URL requirements.
+* Exact pins using `===` or `==` without a wildcard.
+* Upper version bounds using `<`, `<=`, `~=`, or `==` with a wildcard.
+* Command-line requirement order.
+* Other version restrictions, such as `>=` or `!=`.
+* Package name.
+
+The finder orders candidates within a package, subject to upgrade and
+installed-package preferences. These choices happen before all transitive
+metadata is available. In the diagram below, selecting between A->B and A->C may
+happen before pip has read the dependencies shown in grey.
 
 ![](deps.png)
-
-When the provider is asked to choose between the red requirements (A->B and
-A->C) it doesn't know anything about the dependencies of B or C (i.e., the
-grey parts of the graph).
-
-Pip's current implementation of the provider implements
-`narrow_requirement_selection` as follows:
-
-* If Requires-Python is present only consider that
-* If there are causes of resolution conflict (backtrack causes) then
-    only consider them until there are no longer any resolution conflicts
-* If any identifiers have appeared unresolved in backtrack causes at
-    least 5 times, only consider those so they get pinned before other
-    packages pick a version
-
-Pip's current implementation of the provider implements `get_preference`
-for known requirements with the following preferences in the following order:
-
-* Any requirement that has appeared in repeated conflicts (see
-    ``narrow_requirement_selection`` above).
-* Any requirement that is "direct", e.g., points to an explicit URL.
-* Any requirement that is "pinned", i.e., contains the operator ``===``
-    or ``==`` without a wildcard.
-* Any requirement that imposes an upper version limit, i.e., contains the
-    operator ``<``, ``<=``, ``~=``, or ``==`` with a wildcard. Because
-    pip prioritizes the latest version, preferring explicit upper bounds
-    can rule out infeasible candidates sooner. This does not imply that
-    upper bounds are good practice; they can make dependency management
-    and resolution harder.
-* Order user-specified requirements as they are specified, placing
-    other requirements afterward.
-* Any "non-free" requirement, i.e., one that contains at least one
-    operator, such as ``>=`` or ``!=``.
-* Alphabetical order for consistency (aids debuggability).
