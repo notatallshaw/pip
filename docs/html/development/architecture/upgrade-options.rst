@@ -56,8 +56,7 @@ without ``--upgrade``.
 Resolve as if installed distributions were absent, and do not uninstall them
 before writing the selected distributions.
 
-These options apply to both nab providers. Ordinary installed-package requests
-can use the fast path without ``--ignore-installed``. See
+These options apply to both nab providers. See
 :doc:`../../topics/more-dependency-resolution` for the automatic fallback rules.
 
 
