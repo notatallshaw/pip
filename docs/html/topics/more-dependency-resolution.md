@@ -98,59 +98,71 @@ over older versions, for example.
 
 ## The resolver algorithm
 
-The resolver uses nab's PubGrub algorithm through two providers. Both leave
-package preparation and installation policy with pip.
+Pip uses nab's PubGrub solver with a fast path and an automatic fallback.
+Both use pip's package preparation and installation code. Pip chooses the path;
+users do not need to select one.
 
-### Fixed-catalogue resolution
+### Fast path: installed packages and index choices
 
-For named requirements, pip first resolves against installed distributions and
-fixed lists of finder candidates. Metadata is still prepared on demand; a fixed
-candidate list does not mean every dependency is known in advance. The provider
-checks dependencies before committing a candidate and reuses metadata when
-backtracking. It usually considers packages with fewer matching versions first.
-After repeated preparation of versions of a transitive package, it can restart
-once with command-line requirement order taking precedence over non-singleton
-candidate counts.
+Ordinary named requirements start here, including requests that consider
+installed packages. The fast path does not require `--ignore-installed`.
 
-A suitable installed distribution is preferred unless the upgrade policy calls
-for newer candidates. Pip reads its installed metadata and delays loading finder
-candidates until they are needed. Before a complete version list is available,
-dependency clauses stay tied to the selected version. Once the list is loaded,
-installed versions also delimit the gaps across which clauses can be widened.
+Pip first tries a suitable installed version when the upgrade options allow it.
+It reads that distribution's metadata and asks the finder for other versions
+only when needed. Metadata for downloaded candidates is also prepared on demand.
 
-Pip rechecks the selected artifacts against native requirements, constraints,
-prerelease admission and finder preference before accepting the result. A URL
-dependency, an unsupported preparation option, a failure to resolve, or failed
-final admission sends the original request to the native provider. An
-unsuccessful fixed-catalogue solve is not proof that the original request is
-impossible: an unvisited package can declare a URL that supplies a missing
-candidate.
+For each package, this path works with a fixed set of choices during the solve.
+That lets nab reuse dependency information across versions whose metadata is
+known to agree. Installed versions are part of that set, including versions
+that are no longer on the index. Before the finder has supplied the complete
+list, dependency clauses stay tied to the selected version.
 
-### Native resolution and fallback
+### Fallback: more flexible candidate handling
 
-Requests with explicit root candidates use native resolution. Installed metadata
-that introduces a URL dependency also triggers fallback. Pip supplies requirements
-and prepared candidates through `NativeHost`, while nab tracks version and source
-restrictions, learns conflicts, and backtracks.
+Some requests need choices that the fast path cannot represent. For example,
+a dependency may introduce a URL containing another build of the same package
+version, with different metadata. The fallback keeps those sources separate
+and lets pip supply candidates as the requirements develop.
 
-Fallback starts with a new host, provider and solver. It can reuse successfully
-prepared artifacts in the request's factory, but not fixed-catalogue clauses,
-absence conclusions or failed-preparation exclusions. Source eligibility is
-determined again from the original request and the dependencies considered by
-native resolution. A failed catalogue solve goes directly to definitive native
-resolution; other fallback paths can first try provisional availability and
-retry if validation rejects its assumptions.
+| Request or outcome | What pip does |
+| --- | --- |
+| Named requirements, with or without installed packages | Starts with the fast path. |
+| Local, editable or URL projects supplied as roots | Uses the fallback. |
+| A URL dependency, source replacement or unsupported preparation option appears | Retries the original request with the fallback. |
+| The fast path cannot find a solution, or its result fails pip's checks | Retries with the fallback before reporting a resolution failure. |
 
-If a native URL request encounters a catalogue-prepared candidate with index
-origin, pip discards the reused candidate contexts and restarts native
-resolution once to preserve URL provenance.
+An installed package whose dependencies require replacing that package also
+uses the fallback. Hash/source constraints and some yanked-release cases need
+its candidate checks. Build failures and terminal index errors are reported
+normally.
 
-Pip owns package preparation and installation policy. The factory obtains
-candidates from the finder, installed distributions, direct URLs, and editable
-projects. The host assigns source identities, translates requirements into
-ranges, and supplies dependency metadata when nab requests a candidate. A
-version from an installed distribution and the same version from a URL can have
-different metadata, so their source identities remain distinct.
+A failed fast attempt does not prove the request is impossible: metadata that
+has not been read yet may supply a missing candidate. Fallback starts with fresh
+solver state and the original requirements and options. Successful preparation
+can be reused, but decisions and learned conflicts from the fast attempt are
+discarded.
+
+### Provider implementation
+
+`CatalogueProvider` implements the fast path using ordinary version ranges.
+It checks dependencies before committing a candidate, usually considers packages
+with fewer matching choices first, and checks the completed selection against
+pip's original requirements and candidate rules. A preferred installation can
+be tried before counting finder choices. After repeated preparation of a
+transitive package, it can restart once with command-line requirement order
+taking precedence.
+
+The fallback uses `NativeHost` and nab's `CandidateProvider`. Pip's factory
+supplies candidates from installed distributions, indexes, direct URLs and
+editable projects. The host attaches source identities to the version ranges,
+so equal versions with different metadata remain separate choices.
+
+Each fallback attempt creates a new host, provider and solver. A failed
+catalogue solve goes directly to definitive native resolution. Other fallback
+cases may first try provisional candidate availability and retry if those
+assumptions fail validation. If a URL request conflicts with reused index
+preparation, pip discards that preparation context and retries once to preserve
+the URL's provenance.
 
 Nab prioritizes packages involved in contextual query failures and can
 temporarily demote repeated dependency blockers. Within that feedback ordering,

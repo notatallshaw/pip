@@ -11,12 +11,15 @@ When a user does a `pip install` (e.g. `pip install tea`), pip needs to work
 out the package's dependencies (e.g. `spoon`, `hot-water`, `tea-leaves` etc.)
 and what the versions of each of those dependencies it should install.
 
-At the start of a `pip install` run, pip does not have all the dependency
-information of the requested packages. It needs to work out the dependencies
-of the requested packages, the dependencies of those dependencies, and so on.
-Over the course of the dependency resolution process, pip will need to download
-distribution files of the packages which are used to get the dependencies of a
-package.
+Pip uses metadata from suitable installed packages, index metadata files,
+downloaded distributions or a source project's build backend. It discovers
+further dependencies as it reads that metadata.
+
+Ordinary requests use nab's fast path, including when packages are already
+installed. Pip automatically uses a more flexible fallback for local, editable
+or URL projects and for cases the fast path cannot resolve. Both paths use nab;
+no additional option is needed. The [resolver algorithm](more-dependency-resolution.md#the-resolver-algorithm)
+explains when fallback occurs.
 
 ## Backtracking
 
