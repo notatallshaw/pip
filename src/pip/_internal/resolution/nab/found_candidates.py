@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Iterable, Iterator
 
-from pip._vendor.packaging.version import _BaseVersion
+from pip._vendor.packaging.version import Version
 
 from pip._internal.exceptions import MetadataInvalid
 
@@ -21,26 +21,31 @@ from .base import Candidate
 
 logger = logging.getLogger(__name__)
 
-IndexCandidateInfo = tuple[_BaseVersion, Callable[[], Candidate | None]]
+IndexCandidateInfo = tuple[Version, Callable[[], Candidate | None]]
+
+
+def warn_invalid_metadata(version: Version, error: MetadataInvalid) -> None:
+    """Report the metadata error when pip excludes a candidate version."""
+    logger.warning(
+        "Ignoring version %s of %s since it has invalid metadata:\n"
+        "%s\n"
+        "Please use pip<24.1 if you need to use this version.",
+        version,
+        error.ireq.name,
+        error,
+    )
 
 
 def _iter_built(infos: Iterator[IndexCandidateInfo]) -> Iterator[Candidate]:
     """Prepare index candidates in finder order, skipping duplicate versions."""
-    versions_found: set[_BaseVersion] = set()
+    versions_found: set[Version] = set()
     for version, func in infos:
         if version in versions_found:
             continue
         try:
             candidate = func()
         except MetadataInvalid as e:
-            logger.warning(
-                "Ignoring version %s of %s since it has invalid metadata:\n"
-                "%s\n"
-                "Please use pip<24.1 if you need to use this version.",
-                version,
-                e.ireq.name,
-                e,
-            )
+            warn_invalid_metadata(version, e)
             # Mark version as found to avoid trying other candidates with the same
             # version, since they most likely have invalid metadata as well.
             versions_found.add(version)
@@ -62,7 +67,7 @@ def _iter_built_with_prepended(
     normal ordering, except skipped when the version is already installed.
     """
     yield installed
-    versions_found: set[_BaseVersion] = {installed.version}
+    versions_found: set[Version] = {installed.version}
     for version, func in infos:
         if version in versions_found:
             continue
@@ -86,7 +91,7 @@ def _iter_built_with_inserted(
     the installed candidate exactly once before we start yielding older or
     equivalent candidates, or after all other candidates if they are all newer.
     """
-    versions_found: set[_BaseVersion] = set()
+    versions_found: set[Version] = set()
     for version, func in infos:
         if version in versions_found:
             continue

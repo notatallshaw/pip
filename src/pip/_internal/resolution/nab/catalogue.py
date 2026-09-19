@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import copy
 import logging
 from bisect import bisect_left, bisect_right
-from collections import defaultdict
+from collections import defaultdict, deque
 from collections.abc import Iterable, Mapping, Sequence
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, NoReturn, cast
 
+from pip._vendor.nab_resolver.errors import ResolutionError
 from pip._vendor.nab_resolver.priority import compute_tier
 from pip._vendor.nab_resolver.resolver import (
     BaseProvider,
@@ -25,24 +27,35 @@ from pip._vendor.packaging.ranges import VersionRange
 from pip._vendor.packaging.specifiers import SpecifierSet
 from pip._vendor.packaging.version import Version
 
-from pip._internal.req.constructors import install_req_extend_extras
+from pip._internal.exceptions import (
+    DistributionNotFound,
+    MetadataInvalid,
+    UnsupportedWheel,
+)
+from pip._internal.req.constructors import (
+    install_req_extend_extras,
+    install_req_from_line,
+)
 from pip._internal.req.req_install import InstallRequirement
 from pip._internal.resolution.nab.base import (
     Candidate,
     CatalogueUnsupported,
     Constraint,
     Requirement,
+    RequirementCause,
 )
 from pip._internal.resolution.nab.candidates import (
     BaseCandidate,
     ExtrasCandidate,
     as_base_candidate,
 )
+from pip._internal.resolution.nab.errors import catalogue_installation_error
 from pip._internal.resolution.nab.factory import (
     CandidateCatalogue,
     CollectedRootRequirements,
     Factory,
 )
+from pip._internal.resolution.nab.found_candidates import warn_invalid_metadata
 from pip._internal.resolution.nab.provider import PipProvider
 from pip._internal.resolution.nab.reporter import PipDebuggingReporter, PipReporter
 from pip._internal.resolution.nab.requirements import SpecifierWithoutExtrasRequirement
@@ -146,16 +159,80 @@ class CatalogueProvider(BaseProvider[str, Version]):
         self.requested_order = False
         self.explicit_bases: dict[str, BaseCandidate] = {}
         self.explicit_candidates: dict[str, Candidate] = {}
+        self.source_causes: dict[str, RequirementCause] = {}
+        self.unavailable_sources: set[str] = set()
+        self.rejected_versions: dict[str, set[Version]] = {}
+        self.fixed_options: dict[str, Constraint] = {}
+        self.collect_fixed_options()
         self.collect_explicit_sources()
+        self.factory.catalogue_sources = self.explicit_bases
         self.roots = self.ranges(collected.requirements, roots=True)
         self.constraints: dict[str, VersionRange] = {}
         for package, constraint in collected.constraints.items():
-            if constraint.links or constraint.hashes:
-                raise CatalogueUnsupported("source or hash constraint")
             self.deferred_yanked.setdefault(package, []).append(
                 (constraint.specifier, "yanked constraint pin")
             )
             self.constraints[package] = constraint.specifier.to_range()
+
+    def collect_fixed_options(self) -> None:
+        """Combine input hashes and pins before any catalogue is queried."""
+        self.fixed_options = dict(self.collected.constraints)
+        for requirement in self.collected.requirements:
+            _, ireq = requirement.get_candidate_lookup()
+            if ireq is None:
+                continue
+            name = requirement.project_name
+            self.fixed_options[name] = (
+                self.fixed_options.get(name, Constraint.empty()) & ireq
+            )
+        for package, policy in self.fixed_options.items():
+            if any(
+                item.operator == "==="
+                or (item.operator == "==" and not item.version.endswith(".*"))
+                for item in policy.specifier
+            ):
+                self.factory.catalogue_yank_pins[package] = policy.specifier
+
+    def reject_input(self, package: str) -> NoReturn:
+        """Report a contradiction proved solely by mandatory input declarations."""
+        causes = [
+            RequirementCause(req, None)
+            for req in self.collected.requirements
+            if req.project_name == package
+        ]
+        if causes:
+            raise self.factory.get_input_conflict_error(
+                causes, self.collected.constraints
+            )
+        raise DistributionNotFound(f"Conflicting fixed sources for {package}")
+
+    def expand_fixed_sources(self) -> None:
+        """Prepare the URL closure of mandatory explicit input candidates."""
+        queue = deque(self.explicit_candidates.values())
+        seen: set[str] = set()
+        self.factory.catalogue_expanding_sources = True
+        try:
+            while queue:
+                parent = queue.popleft()
+                if parent.name in seen:
+                    continue
+                seen.add(parent.name)
+                requirements = tuple(self.native.get_dependencies(parent))
+                for requirement in requirements:
+                    candidate, _ = requirement.get_candidate_lookup()
+                    if candidate is None or candidate.name.startswith("<"):
+                        continue
+                    self.register_source(
+                        candidate, RequirementCause(requirement, parent)
+                    )
+                    queue.append(candidate)
+                self.remember(parent)
+                self.dependencies[parent.name, parent.version] = (
+                    requirements,
+                    self.ranges(requirements),
+                )
+        finally:
+            self.factory.catalogue_expanding_sources = False
 
     def collect_explicit_sources(self) -> None:
         """Fix input sources before translating any named requirements."""
@@ -163,17 +240,24 @@ class CatalogueProvider(BaseProvider[str, Version]):
             candidate, _ = requirement.get_candidate_lookup()
             if candidate is None:
                 continue
-            base = (
-                candidate.base
-                if isinstance(candidate, ExtrasCandidate)
-                else as_base_candidate(candidate)
+            self.register_source(candidate, RequirementCause(requirement, None))
+
+    def register_source(self, candidate: Candidate, cause: RequirementCause) -> None:
+        """Record the requirement that fixes a mandatory candidate's source."""
+        base = (
+            candidate.base
+            if isinstance(candidate, ExtrasCandidate)
+            else as_base_candidate(candidate)
+        )
+        if base is None:
+            raise CatalogueUnsupported("unsupported explicit candidate")
+        previous = self.explicit_bases.setdefault(base.name, base)
+        if previous != base:
+            raise self.factory.get_installation_error(
+                [self.source_causes[base.name], cause], self.collected.constraints
             )
-            if base is None:
-                raise CatalogueUnsupported("unsupported explicit candidate")
-            previous = self.explicit_bases.setdefault(base.name, base)
-            if previous != base:
-                raise CatalogueUnsupported("conflicting explicit sources")
-            self.explicit_candidates[candidate.name] = candidate
+        self.source_causes.setdefault(base.name, cause)
+        self.explicit_candidates[candidate.name] = candidate
 
     def ranges(
         self, requirements: Iterable[Requirement], *, roots: bool = False
@@ -186,8 +270,8 @@ class CatalogueProvider(BaseProvider[str, Version]):
                 self.remember(candidate)
                 allowed = VersionRange.singleton(candidate.version)
             elif ireq is not None:
-                if ireq.link or ireq.hash_options or ireq.config_settings:
-                    raise CatalogueUnsupported("requirement preparation options")
+                if ireq.link:
+                    raise CatalogueUnsupported("unfixed requirement source")
                 if not roots or not isinstance(
                     requirement, SpecifierWithoutExtrasRequirement
                 ):
@@ -210,15 +294,23 @@ class CatalogueProvider(BaseProvider[str, Version]):
 
     def check_yanked(self, package: str, specifier: SpecifierSet, reason: str) -> None:
         """Defer index admission checks while installed metadata may suffice."""
-        if self.explicit_bases and package.partition("[")[0] in self.explicit_bases:
+        base_name = package.partition("[")[0]
+        constraint = self.collected.constraints.get(base_name)
+        if base_name in self.explicit_bases or (
+            constraint is not None and constraint.links
+        ):
             return
         if (
             package not in self.catalogues
             and self.installed_version(package) is not None
         ):
             self.deferred_yanked.setdefault(package, []).append((specifier, reason))
-        elif self.factory.catalogue_requires_yanked(package, specifier):
-            raise CatalogueUnsupported(reason)
+        else:
+            fixed_pin = package.partition("[")[0] in self.factory.catalogue_yank_pins
+            if not fixed_pin and self.factory.catalogue_requires_yanked(
+                package, specifier
+            ):
+                raise CatalogueUnsupported(reason)
 
     def remember(self, candidate: Candidate) -> None:
         key = candidate.name, candidate.version
@@ -230,10 +322,19 @@ class CatalogueProvider(BaseProvider[str, Version]):
         """Return the request's fixed artifact list, loading it on first use."""
         if package not in self.catalogues:
             for specifier, reason in self.deferred_yanked.pop(package, ()):
-                if self.factory.catalogue_requires_yanked(package, specifier):
+                fixed_pin = (
+                    package.partition("[")[0] in self.factory.catalogue_yank_pins
+                )
+                if not fixed_pin and self.factory.catalogue_requires_yanked(
+                    package, specifier
+                ):
                     raise CatalogueUnsupported(reason)
             self.catalogues[package] = self.factory.catalogue_candidates(
-                package, self.preparation_template(package)
+                package,
+                self.preparation_template(package),
+                self.fixed_options.get(
+                    package.partition("[")[0], Constraint.empty()
+                ).hashes,
             )
         return self.catalogues[package]
 
@@ -241,12 +342,33 @@ class CatalogueProvider(BaseProvider[str, Version]):
         """Combine base provenance with the identifier's extras for preparation."""
         base, bracket, _ = package.partition("[")
         template = self.templates.get(base, self.templates.get(package))
+        policy = self.collected.constraints.get(base)
+        if (
+            template is not None
+            and policy is not None
+            and not template.hash_options
+            and any(policy.hash_options.values())
+        ):
+            template = copy.copy(template)
+            template.hash_options = {
+                key: list(values) for key, values in policy.hash_options.items()
+            }
         if template is not None and bracket:
             return install_req_extend_extras(template, get_requirement(package).extras)
         return template
 
     def explicit_candidate(self, package: str) -> Candidate | None:
         """Return the source fixed by an input requirement, including its extras."""
+        base_name = package.partition("[")[0]
+        if base_name in self.unavailable_sources:
+            return None
+        constraint = self.collected.constraints.get(base_name)
+        if (
+            base_name not in self.explicit_bases
+            and constraint is not None
+            and constraint.links
+        ):
+            self.load_constraint_source(base_name, constraint)
         if not self.explicit_bases:
             return None
         candidate = self.explicit_candidates.get(package)
@@ -263,6 +385,27 @@ class CatalogueProvider(BaseProvider[str, Version]):
         )
         self.explicit_candidates[package] = candidate
         return candidate
+
+    def load_constraint_source(self, package: str, constraint: Constraint) -> None:
+        """Prepare a constrained source or record incompatible wheel tags."""
+        template = self.preparation_template(package) or install_req_from_line(package)
+        candidates = self.factory.candidates_from_constraints(
+            package, constraint, template
+        )
+        try:
+            candidate = next(
+                (item for item in candidates if constraint.is_satisfied_by(item)),
+                None,
+            )
+        except UnsupportedWheel:
+            self.unavailable_sources.add(package)
+            return
+        if candidate is None:
+            raise CatalogueUnsupported("rejected source constraint")
+        constrained_base = as_base_candidate(candidate)
+        assert constrained_base is not None
+        self.explicit_bases[package] = constrained_base
+        self.explicit_candidates[package] = constrained_base
 
     def installed_version(self, package: str) -> Version | None:
         """Cache installed availability independently of finder versions."""
@@ -302,6 +445,8 @@ class CatalogueProvider(BaseProvider[str, Version]):
             if self.precheck_dependencies(package, explicit.version):
                 return None
             return explicit.version
+        if package.partition("[")[0] in self.unavailable_sources:
+            return None
         installed = self.installed_version(package)
         if installed is not None and installed not in version_range:
             installed = None
@@ -316,6 +461,8 @@ class CatalogueProvider(BaseProvider[str, Version]):
         )
         for artifact in choices:
             version = artifact.version
+            if version in self.rejected_versions.get(package, ()):
+                continue
             if installed is not None and installed >= version:
                 return self.select_installed(package)
             key = package, version
@@ -327,9 +474,16 @@ class CatalogueProvider(BaseProvider[str, Version]):
                     and package not in self.roots
                 ):
                     raise _TryRequestedOrder(package)
-                candidate = catalogue.prepare(artifact)
+                try:
+                    candidate = catalogue.prepare(artifact)
+                except MetadataInvalid as error:
+                    if self.installed_version(package) is not None:
+                        raise
+                    warn_invalid_metadata(version, error)
+                    self.rejected_versions.setdefault(package, set()).add(version)
+                    continue
                 if candidate is None:
-                    raise CatalogueUnsupported("artifact preparation rejected")
+                    continue
                 self.remember(candidate)
                 self.prepared_counts[package] = prepared + 1
             if self.precheck_dependencies(package, version):
@@ -400,6 +554,8 @@ class CatalogueProvider(BaseProvider[str, Version]):
         explicit = self.explicit_candidate(package)
         if explicit is not None:
             return explicit.version in version_range
+        if package.partition("[")[0] in self.unavailable_sources:
+            return False
         installed = self.installed_version(package)
         if installed is not None and installed in version_range:
             return True
@@ -473,6 +629,8 @@ class CatalogueProvider(BaseProvider[str, Version]):
         explicit = self.explicit_candidate(package)
         if explicit is not None:
             return int(explicit.version in version_range)
+        if package.partition("[")[0] in self.unavailable_sources:
+            return 0
         installed = self.installed_version(package)
         installed_matches = installed is not None and installed in version_range
         if (
@@ -510,6 +668,11 @@ class CatalogueProvider(BaseProvider[str, Version]):
         self, reporter: PipReporter | PipDebuggingReporter
     ) -> Solution[str, Version]:
         reporter.starting()
+        for package, allowed in self.roots.items():
+            constraint = self.constraints.get(package, VersionRange.full())
+            if (allowed & constraint).is_empty:
+                self.reject_input(package.partition("[")[0])
+        self.expand_fixed_sources()
         try:
             return self._solve_once(reporter)
         except _TryRequestedOrder as error:
@@ -525,12 +688,52 @@ class CatalogueProvider(BaseProvider[str, Version]):
         self, reporter: PipReporter | PipDebuggingReporter
     ) -> Solution[str, Version]:
         """Run a fresh solver over the retained fixed-catalogue metadata."""
-        return Resolver(
-            self,
-            range_type=VersionRange,
-            root_version=Version("0"),
-            observer=CatalogueObserver(self, reporter),
-        ).solve(self.roots, self.constraints)
+        try:
+            return Resolver(
+                self,
+                range_type=VersionRange,
+                root_version=Version("0"),
+                observer=CatalogueObserver(self, reporter),
+            ).solve(self.roots, self.constraints)
+        except ResolutionError as error:
+            if self.has_complete_metadata():
+                logger.info("Nab catalogue certified failure")
+                raise catalogue_installation_error(error, self) from error
+            raise
+
+    def has_complete_metadata(self) -> bool:
+        """Check metadata coverage for the fixed domain used by this attempt."""
+        if any(version is not None for version in self.installed_versions.values()):
+            return False
+        referenced = set(self.roots)
+        for _, dependencies in self.dependencies.values():
+            referenced.update(dependencies)
+        covered = (
+            set(self.catalogues)
+            | set(self.explicit_candidates)
+            | self.unavailable_sources
+        )
+        if any(
+            not package.startswith("<") and package not in covered
+            for package in referenced
+        ):
+            return False
+        for package, catalogue in self.catalogues.items():
+            allowed = self.roots.get(
+                package, VersionRange.full()
+            ) & self.constraints.get(package, VersionRange.full())
+            for artifact in catalogue.candidates:
+                # Versions excluded by fixed inputs cannot introduce a dependency.
+                if artifact.version not in allowed:
+                    continue
+                if (package, artifact.version) in self.dependencies:
+                    continue
+                if artifact.version not in self.rejected_versions.get(package, ()):
+                    return False
+        return all(
+            (candidate.name, candidate.version) in self.dependencies
+            for candidate in self.explicit_candidates.values()
+        )
 
     def validate(self, solution: Solution[str, Version]) -> bool:
         """Recheck native requirements and artifact order for the selected versions."""
@@ -546,11 +749,13 @@ class CatalogueProvider(BaseProvider[str, Version]):
                 requirement.is_satisfied_by(candidate)
                 for requirement in requirements[name]
             ):
+                logger.info("Nab catalogue admission: %s violates a requirement", name)
                 return False
             base = self.collected.constraints.get(
                 candidate.project_name, Constraint.empty()
             )
             if not base.is_satisfied_by(candidate):
+                logger.info("Nab catalogue admission: %s violates a constraint", name)
                 return False
             if (
                 candidate.version.is_prerelease
@@ -559,6 +764,9 @@ class CatalogueProvider(BaseProvider[str, Version]):
                     candidate, requirements, base
                 )
             ):
+                logger.info(
+                    "Nab catalogue admission: %s has an ineligible prerelease", name
+                )
                 return False
             pinned = Constraint(
                 base.specifier & SpecifierSet(f"=={version}"),
@@ -574,6 +782,10 @@ class CatalogueProvider(BaseProvider[str, Version]):
                 lambda requirement, candidate: requirement.is_satisfied_by(candidate),
             )
             if next(iter(choices), None) != candidate:
+                logger.info(
+                    "Nab catalogue admission: %s has a different preferred artifact",
+                    name,
+                )
                 return False
         return True
 

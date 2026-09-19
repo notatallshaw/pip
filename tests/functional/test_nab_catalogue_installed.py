@@ -277,7 +277,7 @@ def test_deferred_yanked_pin_is_checked_before_replacing_an_installation(
         allow_stderr_warning=True,
     )
 
-    assert "yanked requirement pin" in result.stdout
+    assert "Nab catalogue success" in result.stdout
     script.assert_installed(sample="2")
 
 

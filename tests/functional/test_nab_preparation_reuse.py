@@ -136,7 +136,7 @@ def test_definitive_fallback_discovers_a_url_after_static_failure(
     assert "NATIVE_ACTIVE_EXCEPTION" not in result.stdout
 
 
-def test_fallback_rechecks_failed_metadata_in_native_order(
+def test_catalogue_rejects_an_artifact_without_repreparing_it(
     script: PipTestEnvironment,
 ) -> None:
     create_basic_wheel_for_package(script, "pkg", "1.0")
@@ -150,20 +150,20 @@ def test_fallback_rechecks_failed_metadata_in_native_order(
     )
 
     script.assert_installed(pkg="1.0")
-    assert "CatalogueUnsupported: artifact preparation rejected" in result.stdout
-    assert preparation_count(result.stdout, rejected) == 2
+    assert "Nab catalogue success" in result.stdout
+    assert preparation_count(result.stdout, rejected) == 1
 
 
-def test_explicit_root_with_transitive_url_uses_native_resolution(
+def test_explicit_root_url_closure_uses_catalogue(
     script: PipTestEnvironment,
 ) -> None:
     older, _ = late_url_wheels(script)
     result = tracked_install(script, older)
 
     script.assert_installed(app="1.0", dep="3.0")
-    assert "CatalogueUnsupported: URL dependency" in result.stdout
+    assert "Nab catalogue success" in result.stdout
     assert preparation_count(result.stdout, older) == 1
-    assert result.stdout.splitlines().count("NATIVE True") == 1
+    assert "NATIVE True" not in result.stdout
     assert "NATIVE False" not in result.stdout
 
 
