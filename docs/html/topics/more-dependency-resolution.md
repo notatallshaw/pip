@@ -106,7 +106,7 @@ users do not need to select one.
 
 Requests start here, including named requirements, installed packages, and
 local, editable or URL projects supplied on the command line or in requirements
-files. The fast path does not require `--ignore-installed`.
+files.
 
 Pip first tries a suitable installed version when the upgrade options allow it.
 It reads that distribution's metadata and asks the finder for other versions
