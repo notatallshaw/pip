@@ -25,6 +25,7 @@ from pip._vendor.packaging.ranges import VersionRange
 from pip._vendor.packaging.specifiers import SpecifierSet
 from pip._vendor.packaging.version import Version
 
+from pip._internal.req.constructors import install_req_extend_extras
 from pip._internal.req.req_install import InstallRequirement
 from pip._internal.resolution.nab.base import (
     Candidate,
@@ -39,6 +40,7 @@ from pip._internal.resolution.nab.factory import (
 )
 from pip._internal.resolution.nab.provider import PipProvider
 from pip._internal.resolution.nab.reporter import PipDebuggingReporter, PipReporter
+from pip._internal.utils.packaging import get_requirement
 
 if TYPE_CHECKING:
     DependencyRecord = tuple[tuple[Requirement, ...], dict[str, VersionRange]]
@@ -125,6 +127,8 @@ class CatalogueProvider(BaseProvider[str, Version]):
         self.native = native
         self.collected = collected
         self.catalogues: dict[str, CandidateCatalogue] = {}
+        self.installed_versions: dict[str, Version | None] = {}
+        self.deferred_yanked: dict[str, list[tuple[SpecifierSet, str]]] = {}
         self.candidates: dict[tuple[str, Version], Candidate] = {}
         self.dependencies: dict[tuple[str, Version], DependencyRecord] = {}
         self.templates: dict[str, InstallRequirement] = {}
@@ -139,8 +143,9 @@ class CatalogueProvider(BaseProvider[str, Version]):
         for package, constraint in collected.constraints.items():
             if constraint.links or constraint.hashes:
                 raise CatalogueUnsupported("source or hash constraint")
-            if factory.catalogue_requires_yanked(package, constraint.specifier):
-                raise CatalogueUnsupported("yanked constraint pin")
+            self.deferred_yanked.setdefault(package, []).append(
+                (constraint.specifier, "yanked constraint pin")
+            )
             self.constraints[package] = constraint.specifier.to_range()
 
     def ranges(
@@ -158,19 +163,32 @@ class CatalogueProvider(BaseProvider[str, Version]):
             elif ireq is not None:
                 if ireq.link or ireq.hash_options or ireq.config_settings:
                     raise CatalogueUnsupported("requirement preparation options")
-                if self.factory.catalogue_requires_yanked(
-                    requirement.name, ireq.specifier
-                ):
-                    raise CatalogueUnsupported("yanked requirement pin")
                 self.templates.setdefault(requirement.name, ireq)
                 if roots:
                     self.templates.setdefault(requirement.project_name, ireq)
+                self.check_yanked(
+                    requirement.name, ireq.specifier, "yanked requirement pin"
+                )
                 allowed = ireq.specifier.to_range()
             else:
                 allowed = VersionRange.empty()
             name = requirement.name
+            if name != requirement.project_name:
+                constraint = self.collected.constraints.get(requirement.project_name)
+                if constraint is not None:
+                    allowed &= constraint.specifier.to_range()
             ranges[name] = ranges.get(name, VersionRange.full()) & allowed
         return ranges
+
+    def check_yanked(self, package: str, specifier: SpecifierSet, reason: str) -> None:
+        """Defer index admission checks while installed metadata may suffice."""
+        if (
+            package not in self.catalogues
+            and self.installed_version(package) is not None
+        ):
+            self.deferred_yanked.setdefault(package, []).append((specifier, reason))
+        elif self.factory.catalogue_requires_yanked(package, specifier):
+            raise CatalogueUnsupported(reason)
 
     def remember(self, candidate: Candidate) -> None:
         key = candidate.name, candidate.version
@@ -181,10 +199,37 @@ class CatalogueProvider(BaseProvider[str, Version]):
     def catalogue(self, package: str) -> CandidateCatalogue:
         """Return the request's fixed artifact list, loading it on first use."""
         if package not in self.catalogues:
+            for specifier, reason in self.deferred_yanked.pop(package, ()):
+                if self.factory.catalogue_requires_yanked(package, specifier):
+                    raise CatalogueUnsupported(reason)
             self.catalogues[package] = self.factory.catalogue_candidates(
-                package, self.templates.get(package)
+                package, self.preparation_template(package)
             )
         return self.catalogues[package]
+
+    def preparation_template(self, package: str) -> InstallRequirement | None:
+        """Combine base provenance with the identifier's extras for preparation."""
+        base, bracket, _ = package.partition("[")
+        template = self.templates.get(base, self.templates.get(package))
+        if template is not None and bracket:
+            return install_req_extend_extras(template, get_requirement(package).extras)
+        return template
+
+    def installed_version(self, package: str) -> Version | None:
+        """Cache installed availability independently of finder versions."""
+        if package not in self.installed_versions:
+            self.installed_versions[package] = self.factory.installed_version(package)
+        return self.installed_versions[package]
+
+    def select_installed(self, package: str) -> Version | None:
+        """Prepare installed metadata only after choosing its version."""
+        candidate = self.factory.installed_candidate(
+            package, self.preparation_template(package)
+        )
+        self.remember(candidate)
+        if self.precheck_dependencies(candidate.name, candidate.version):
+            return None
+        return candidate.version
 
     def choose_version(
         self, package: str, version_range: RangeProtocol[Version]
@@ -200,6 +245,11 @@ class CatalogueProvider(BaseProvider[str, Version]):
                 ),
                 None,
             )
+        installed = self.installed_version(package)
+        if installed is not None and installed not in version_range:
+            installed = None
+        if installed is not None and not self.native.eligible_for_upgrade(package):
+            return self.select_installed(package)
         catalogue = self.catalogue(package)
         # _solve_once binds this provider to VersionRange's prerelease filtering.
         choices = cast(VersionRange, version_range).filter(
@@ -209,6 +259,8 @@ class CatalogueProvider(BaseProvider[str, Version]):
         )
         for artifact in choices:
             version = artifact.version
+            if installed is not None and installed >= version:
+                return self.select_installed(package)
             key = package, version
             if key not in self.candidates:
                 prepared = self.prepared_counts.get(package, 0)
@@ -226,7 +278,7 @@ class CatalogueProvider(BaseProvider[str, Version]):
             if self.precheck_dependencies(package, version):
                 return None
             return version
-        return None
+        return self.select_installed(package) if installed is not None else None
 
     def receive_partial_solution_hint(
         self,
@@ -288,6 +340,9 @@ class CatalogueProvider(BaseProvider[str, Version]):
                 name == package and version in version_range
                 for name, version in self.candidates
             )
+        installed = self.installed_version(package)
+        if installed is not None and installed in version_range:
+            return True
         return any(
             candidate.version in version_range
             for candidate in self.catalogue(package).candidates
@@ -300,6 +355,12 @@ class CatalogueProvider(BaseProvider[str, Version]):
         if key not in self.dependencies:
             candidate = self.candidates[key]
             requirements = tuple(self.native.get_dependencies(candidate))
+            if candidate.is_installed and any(
+                requirement.name == package
+                and not requirement.is_satisfied_by(candidate)
+                for requirement in requirements
+            ):
+                raise CatalogueUnsupported("installed self replacement")
             ranges = self.ranges(requirements)
             self.dependencies[key] = requirements, ranges
         return self.dependencies[key][1]
@@ -316,20 +377,7 @@ class CatalogueProvider(BaseProvider[str, Version]):
     ):
         key = package, version_range
         if key not in self.matching_counts:
-            if package.startswith("<"):
-                count = sum(
-                    name == package and version in version_range
-                    for name, version in self.candidates
-                )
-            else:
-                count = len(
-                    {
-                        candidate.version
-                        for candidate in self.catalogue(package).candidates
-                        if candidate.version in version_range
-                    }
-                )
-            self.matching_counts[key] = count
+            self.matching_counts[key] = self.matching_count(package, version_range)
         tier = compute_tier(
             package,
             conflict_counts.get(package, 0),
@@ -353,13 +401,44 @@ class CatalogueProvider(BaseProvider[str, Version]):
             package,
         )
 
-    def widen_decision(self, package: str, version: Version) -> VersionRange | None:
+    def matching_count(
+        self, package: str, version_range: RangeProtocol[Version]
+    ) -> int:
+        """Count known choices, trying a preferred installation before listing."""
         if package.startswith("<"):
+            return sum(
+                name == package and version in version_range
+                for name, version in self.candidates
+            )
+        installed = self.installed_version(package)
+        installed_matches = installed is not None and installed in version_range
+        if (
+            installed_matches
+            and package not in self.catalogues
+            and not self.native.eligible_for_upgrade(package)
+        ):
+            return 1
+        versions = {
+            candidate.version
+            for candidate in self.catalogue(package).candidates
+            if candidate.version in version_range
+        }
+        if installed_matches:
+            assert installed is not None
+            versions.add(installed)
+        return len(versions)
+
+    def widen_decision(self, package: str, version: Version) -> VersionRange | None:
+        if package.startswith("<") or package not in self.catalogues:
             return None
         if package not in self.universes:
-            self.universes[package] = sorted(
-                {candidate.version for candidate in self.catalogue(package).candidates}
-            )
+            versions = {
+                candidate.version for candidate in self.catalogue(package).candidates
+            }
+            installed = self.installed_version(package)
+            if installed is not None:
+                versions.add(installed)
+            self.universes[package] = sorted(versions)
         return cached_dependency_span(
             package, version, self.universes[package], self.dependencies
         )
@@ -427,7 +506,7 @@ class CatalogueProvider(BaseProvider[str, Version]):
                 name,
                 requirements,
                 pinned,
-                False,
+                candidate.is_installed,
                 lambda requirement, candidate: requirement.is_satisfied_by(candidate),
             )
             if next(iter(choices), None) != candidate:

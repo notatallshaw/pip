@@ -1071,13 +1071,13 @@ def test_new_resolver_build_directory_error_zazo_19(script: PipTestEnvironment) 
         "3.0.0",
         depends=["pkg-b<2"],
     )
-    create_basic_wheel_for_package(script, "pkg_a", "2.0.0")
-    create_basic_wheel_for_package(script, "pkg_a", "1.0.0")
+    create_basic_wheel_for_package(script, "pkg_a", "2.0.0", depends=["pkg-b<1"])
+    create_basic_wheel_for_package(script, "pkg_a", "1.0.0", depends=["pkg-b<1"])
 
     create_basic_sdist_for_package(script, "pkg_b", "2.0.0")
     create_basic_sdist_for_package(script, "pkg_b", "1.0.0")
 
-    script.pip(
+    result = script.pip(
         "install",
         "--no-build-isolation",
         "--no-cache-dir",
@@ -1088,6 +1088,8 @@ def test_new_resolver_build_directory_error_zazo_19(script: PipTestEnvironment) 
         "pkg-b",
     )
     script.assert_installed(pkg_a="3.0.0", pkg_b="1.0.0")
+    assert "pkg_b-2.0.0.tar.gz" in result.stdout
+    assert "pkg_b-1.0.0.tar.gz" in result.stdout
 
 
 def test_new_resolver_upgrade_same_version(script: PipTestEnvironment) -> None:

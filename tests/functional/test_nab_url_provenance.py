@@ -16,7 +16,7 @@ def install_to_prefix(
     report_path = script.scratch_path / f"{label}-report.json"
     result = script.pip(
         "install",
-        *(("--ignore-installed",) if label == "fast" else ()),
+        *(("--ignore-installed",) if label == "ignore-installed" else ()),
         "--prefix",
         prefix,
         "--no-compile",
@@ -80,7 +80,7 @@ def test_url_fallback_preserves_origin_after_catalogue_preparation(
         )
 
     requirements = ["app[feature]" if root_extra else "app", other_root]
-    for label in ("native", "fast"):
+    for label in ("installed", "ignore-installed"):
         script.assert_not_installed("app", "bridge", "dep")
         result, report, prefix = install_to_prefix(script, label, requirements)
         assert {
@@ -97,9 +97,6 @@ def test_url_fallback_preserves_origin_after_catalogue_preparation(
             assert report["app"]["requested_extras"] == ["feature"], label
 
         retry = "Nab native retry: URL requires fresh preparation"
-        if label == "native":
-            assert retry not in result.stdout
-            continue
         assert result.stdout.count(retry) == 1
         if hidden_url:
             assert "Nab catalogue fallback: ResolutionError" in result.stdout
@@ -122,7 +119,7 @@ def test_rejected_url_parent_does_not_change_ordinary_origin(
         ),
     ).save_to_dir(script.scratch_path)
 
-    for label in ("native", "fast"):
+    for label in ("installed", "ignore-installed"):
         result, report, prefix = install_to_prefix(
             script, label, ["dep[feature]==1.0", "app"]
         )
@@ -135,7 +132,7 @@ def test_rejected_url_parent_does_not_change_ordinary_origin(
         assert report["dep"]["requested"] is True
         assert report["dep"]["requested_extras"] == ["feature"]
         assert (metadata / "REQUESTED").exists()
-        if label == "fast":
+        if label == "ignore-installed":
             assert (
                 result.stdout.count("Nab native retry: URL requires fresh preparation")
                 == 1
