@@ -49,6 +49,9 @@ class PipProvider:
         self._ignore_dependencies = ignore_dependencies
         self._upgrade_strategy = upgrade_strategy
         self._user_requested = user_requested
+        self._user_requested_projects = {
+            identifier.partition("[")[0] for identifier in user_requested
+        }
 
     def get_preference(
         self,
@@ -121,18 +124,16 @@ class PipProvider:
             identifier=identifier,
             requirements=requirements,
             constraint=constraint,
-            prefers_installed=(not self._eligible_for_upgrade(identifier)),
+            prefers_installed=(not self.eligible_for_upgrade(identifier)),
             is_satisfied_by=_is_satisfied_by,
         )
 
-    def _eligible_for_upgrade(self, identifier: str) -> bool:
+    def eligible_for_upgrade(self, identifier: str) -> bool:
         """Allow upgrades for all packages, requested packages, or neither."""
         if self._upgrade_strategy == "eager":
             return True
         if self._upgrade_strategy == "only-if-needed":
-            return (
-                _get_with_identifier(self._user_requested, identifier, None) is not None
-            )
+            return identifier.partition("[")[0] in self._user_requested_projects
         return False
 
     def get_dependencies(self, candidate: Candidate) -> Iterable[Requirement]:

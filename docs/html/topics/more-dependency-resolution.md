@@ -103,14 +103,20 @@ package preparation and installation policy with pip.
 
 ### Fixed-catalogue resolution
 
-For eligible `--ignore-installed` requests, pip first resolves against fixed
-lists of finder candidates. Metadata is still prepared on demand; a fixed
+For named requirements, pip first resolves against installed distributions and
+fixed lists of finder candidates. Metadata is still prepared on demand; a fixed
 candidate list does not mean every dependency is known in advance. The provider
 checks dependencies before committing a candidate and reuses metadata when
 backtracking. It usually considers packages with fewer matching versions first.
 After repeated preparation of versions of a transitive package, it can restart
 once with command-line requirement order taking precedence over non-singleton
 candidate counts.
+
+A suitable installed distribution is preferred unless the upgrade policy calls
+for newer candidates. Pip reads its installed metadata and delays loading finder
+candidates until they are needed. Before a complete version list is available,
+dependency clauses stay tied to the selected version. Once the list is loaded,
+installed versions also delimit the gaps across which clauses can be widened.
 
 Pip rechecks the selected artifacts against native requirements, constraints,
 prerelease admission and finder preference before accepting the result. A URL
@@ -122,9 +128,9 @@ candidate.
 
 ### Native resolution and fallback
 
-Requests that consider installed distributions, and requests with explicit root
-candidates, use native resolution. Pip supplies requirements and prepared
-candidates through `NativeHost`, while nab tracks version and source
+Requests with explicit root candidates use native resolution. Installed metadata
+that introduces a URL dependency also triggers fallback. Pip supplies requirements
+and prepared candidates through `NativeHost`, while nab tracks version and source
 restrictions, learns conflicts, and backtracks.
 
 Fallback starts with a new host, provider and solver. It can reuse successfully

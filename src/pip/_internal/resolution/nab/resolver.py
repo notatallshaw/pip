@@ -16,7 +16,7 @@ from pip._vendor.packaging.utils import canonicalize_name
 from pip._vendor.packaging.version import Version
 
 from pip._internal.cache import WheelCache
-from pip._internal.exceptions import PipError
+from pip._internal.exceptions import InvalidInstalledPackage, MetadataInvalid, PipError
 from pip._internal.index.package_finder import PackageFinder
 from pip._internal.operations.prepare import RequirementPreparer
 from pip._internal.req.constructors import install_req_extend_extras
@@ -93,7 +93,6 @@ class Resolver(BaseResolver):
             py_version_info=py_version_info,
         )
         self.factory = self._make_factory()
-        self.ignore_installed = ignore_installed
         self.ignore_dependencies = ignore_dependencies
         self.only_dependencies = only_dependencies
         self.upgrade_strategy = upgrade_strategy
@@ -102,19 +101,14 @@ class Resolver(BaseResolver):
     def _resolve(self, collected: CollectedRootRequirements) -> Result:
         """Choose native fallback policy from the catalogue solve outcome."""
         provisional = True
-        if self.ignore_installed:
-            try:
-                result = self._resolve_catalogue(collected)
-            except ResolutionError as error:
-                logger.info(
-                    "Nab catalogue fallback: %s: %s", type(error).__name__, error
-                )
-                provisional = False
-            else:
-                if result is not None:
-                    return result
+        try:
+            result = self._resolve_catalogue(collected)
+        except ResolutionError as error:
+            logger.info("Nab catalogue fallback: %s: %s", type(error).__name__, error)
+            provisional = False
         else:
-            logger.info("Nab catalogue fallback: installed environment")
+            if result is not None:
+                return result
         try:
             return self._resolve_native(collected, provisional=provisional)
         except CataloguePreparationConflict:
@@ -154,7 +148,11 @@ class Resolver(BaseResolver):
                 if not provider.validate(solution):
                     logger.info("Nab catalogue fallback: final admission")
                     return None
-        except (CatalogueUnsupported, PipError) as error:
+        except (
+            CatalogueUnsupported,
+            MetadataInvalid,
+            InvalidInstalledPackage,
+        ) as error:
             logger.info("Nab catalogue fallback: %s: %s", type(error).__name__, error)
             return None
         logger.info("Nab catalogue success")
