@@ -59,3 +59,36 @@ def test_root_extras_keep_requested_metadata_after_transitive_preparation(
     assert app["requested"] is True
     assert app["requested_extras"] == ["feature"]
     assert script.site_packages / "app-2.0.dist-info/REQUESTED" in result.files_created
+
+
+@pytest.mark.parametrize("ignore_installed", [False, True])
+def test_transitive_extra_preparation_keeps_the_base_root_requested(
+    script: PipTestEnvironment, ignore_installed: bool
+) -> None:
+    for version in ("1.0", "2.0"):
+        create_basic_wheel_for_package(
+            script, "app", version, extras={"feature": ["child==1"]}
+        )
+    create_basic_wheel_for_package(script, "bridge", "1", depends=["app[feature]"])
+    create_basic_wheel_for_package(script, "child", "1")
+    report_path = script.scratch_path / "report.json"
+
+    result = script.pip(
+        "install",
+        "--no-index",
+        "--find-links",
+        script.scratch_path,
+        *(("--ignore-installed",) if ignore_installed else ()),
+        "--report",
+        report_path,
+        "app",
+        "bridge",
+    )
+
+    assert "Nab catalogue success" in result.stdout
+    script.assert_installed(app="2.0", bridge="1", child="1")
+    report = json.loads(report_path.read_text())
+    app = next(item for item in report["install"] if item["metadata"]["name"] == "app")
+    assert app["requested"] is True
+    assert app["requested_extras"] == ["feature"]
+    assert (script.site_packages_path / "app-2.0.dist-info/REQUESTED").is_file()

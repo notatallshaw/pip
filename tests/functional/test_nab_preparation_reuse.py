@@ -167,13 +167,13 @@ def test_explicit_root_restores_native_dependency_handling(
     assert "NATIVE False" not in result.stdout
 
 
-def test_installed_environment_bypass_keeps_provisional_policy(
+def test_empty_environment_uses_catalogue_without_ignore_installed(
     script: PipTestEnvironment,
 ) -> None:
     create_basic_wheel_for_package(script, "pkg", "1.0")
     result = tracked_install(script, "pkg", ignore_installed=False)
 
     script.assert_installed(pkg="1.0")
-    assert "Nab catalogue fallback: installed environment" in result.stdout
-    assert result.stdout.splitlines().count("NATIVE True") == 1
+    assert "Nab catalogue success" in result.stdout
+    assert "NATIVE True" not in result.stdout
     assert "NATIVE False" not in result.stdout

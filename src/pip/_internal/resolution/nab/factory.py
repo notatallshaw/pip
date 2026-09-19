@@ -434,6 +434,32 @@ class Factory:
             prefers_installed,
         )
 
+    def installed_version(self, identifier: str) -> Version | None:
+        """Read installed availability without preparing or reporting a candidate."""
+        if self._force_reinstall or not self._installed_dists:
+            return None
+        name, _, _ = identifier.partition("[")
+        dist = self._installed_dists.get(canonicalize_name(name))
+        if dist is None:
+            return None
+        try:
+            return dist.version
+        except InvalidVersion as error:
+            raise InvalidInstalledPackage(dist=dist, invalid_exc=error) from error
+
+    def installed_candidate(
+        self, identifier: str, template: InstallRequirement | None
+    ) -> Candidate:
+        """Prepare the installed representative selected by the catalogue."""
+        requirement = get_requirement(identifier)
+        name = canonicalize_name(requirement.name)
+        dist = self._installed_dists[name]
+        if template is None:
+            template = self._make_install_req_from_spec(identifier, None)
+        return self._make_candidate_from_dist(
+            dist, frozenset(requirement.extras), template
+        )
+
     def catalogue_candidates(
         self, identifier: str, template: InstallRequirement | None
     ) -> CandidateCatalogue:
