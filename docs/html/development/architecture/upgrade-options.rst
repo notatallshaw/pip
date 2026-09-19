@@ -7,11 +7,6 @@ installs it in the user's environment. There are many choices (which
 are `still evolving`_) involved in deciding which file to install, and
 these are controlled by a variety of options.
 
-.. note::
-
-    This section of the documentation needs to be updated per
-    :ref:`Resolver changes 2020`.
-
 Controlling what gets installed
 ===============================
 
@@ -21,11 +16,11 @@ resolution algorithm itself, rather than the input to that algorithm.
 
 ``--upgrade``
 
-Allow installing a newer version of an installed package. In principle, this
-option actually affects "what gets considered", in the sense that it allows
-the resolver to see other versions of installed packages. Without
-``--upgrade``, the resolver will only see the installed version as a
-candidate.
+Prefer newer versions for packages named on the command line or in a
+requirements file. A request for ``package[extra]`` also makes the base package
+eligible for upgrade. Without ``--upgrade``, pip prefers a suitable installed
+version, but can replace it when the request or its dependencies require a
+different choice.
 
 ``--upgrade-strategy``
 
@@ -35,11 +30,7 @@ option mentioned below). The base behaviour is to allow
 packages specified on pip's command line to be upgraded. This option controls
 what *other* packages can be upgraded:
 
-* ``eager`` - all packages will be upgraded to the latest possible version.
-  It should be noted here that pip's current resolution algorithm isn't even
-  aware of packages other than those specified on the command line, and
-  those identified as dependencies. This may or may not be true of the new
-  resolver.
+* ``eager`` - prefer newer versions for requested packages and their dependencies.
 * ``only-if-needed`` - packages are only upgraded if they are named in the
   pip command or a requirement file (i.e, they are direct requirements), or
   an upgraded parent needs a later version of the dependency than is
@@ -56,14 +47,18 @@ what *other* packages can be upgraded:
 
 ``--force-reinstall``
 
-Doesn't affect resolution, but if the resolved result is the same as what is
-currently installed, uninstall and reinstall it rather than leaving the
-current version in place. This occurs even if ``--upgrade`` is not set.
+Exclude installed distributions from candidate selection and install the
+selected distributions again, even if the versions match. This applies even
+without ``--upgrade``.
 
 ``--ignore-installed``
 
-Act as if the currently installed version isn't there - so don't care about
-``--upgrade``, and don't uninstall before (re-)installing.
+Resolve as if installed distributions were absent, and do not uninstall them
+before writing the selected distributions.
+
+These options apply to both nab providers. Ordinary installed-package requests
+can use the fast path without ``--ignore-installed``. See
+:doc:`../../topics/more-dependency-resolution` for the automatic fallback rules.
 
 
 Controlling what gets considered
