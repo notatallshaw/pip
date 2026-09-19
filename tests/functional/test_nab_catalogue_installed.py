@@ -1,8 +1,26 @@
+import json
+import zipfile
 from pathlib import Path
 
 import pytest
 
-from tests.lib import PipTestEnvironment, create_basic_wheel_for_package
+from tests.lib import PipTestEnvironment, TestData, create_basic_wheel_for_package
+
+
+def test_invalid_installed_metadata_stops_resolution(
+    script: PipTestEnvironment, data: TestData
+) -> None:
+    with zipfile.ZipFile(
+        data.packages / "require_invalid_version-1.0-py3-none-any.whl"
+    ) as wheel:
+        wheel.extractall(script.site_packages_path)
+
+    result = script.pip(
+        "install", "--no-index", "require-invalid-version", expect_error=True
+    )
+
+    assert "invalid-installed-package" in result.stderr
+    assert "Nab catalogue fallback" not in result.stdout
 
 
 def install_initial(
@@ -54,12 +72,28 @@ def test_catalogue_installed_selection_policy(
     create_basic_wheel_for_package(script, "sample", "1")
     create_basic_wheel_for_package(script, "sample", "2")
 
+    report = script.scratch_path / "report.json"
     result = script.pip(
-        "install", "--no-index", "--find-links", script.scratch_path, *options, "sample"
+        "install",
+        "--no-index",
+        "--find-links",
+        script.scratch_path,
+        "--report",
+        report,
+        *options,
+        "sample",
     )
 
     assert "Nab catalogue success" in result.stdout
-    script.assert_installed(sample=expected)
+    if "--ignore-installed" in options:
+        assert (
+            json.loads(report.read_text())["install"][0]["metadata"]["version"]
+            == expected
+        )
+        assert (script.site_packages_path / "sample-1.dist-info").is_dir()
+        assert (script.site_packages_path / "sample-2.dist-info").is_dir()
+    else:
+        script.assert_installed(sample=expected)
 
 
 @pytest.mark.parametrize("strategy,expected", [("only-if-needed", "1"), ("eager", "2")])

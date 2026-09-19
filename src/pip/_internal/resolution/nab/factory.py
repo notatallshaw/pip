@@ -217,7 +217,7 @@ class Factory:
         msg = f"{link.filename} is not a supported wheel on this platform."
         raise UnsupportedWheel(msg)
 
-    def _make_extras_candidate(
+    def make_extras_candidate(
         self,
         base: BaseCandidate,
         extras: frozenset[str],
@@ -245,7 +245,7 @@ class Factory:
             self._installed_candidate_cache[dist.canonical_name] = base
         if not extras:
             return base
-        return self._make_extras_candidate(base, extras, comes_from=template)
+        return self.make_extras_candidate(base, extras, comes_from=template)
 
     def _make_candidate_from_link(
         self,
@@ -260,7 +260,7 @@ class Factory:
         )
         if not extras or base is None:
             return base
-        return self._make_extras_candidate(base, extras, comes_from=template)
+        return self.make_extras_candidate(base, extras, comes_from=template)
 
     def _make_base_candidate_from_link(
         self,
@@ -577,7 +577,7 @@ class Factory:
             # get a BaseCandidate here, unless there's a bug elsewhere.
             base_cand = as_base_candidate(lookup_cand)
             assert base_cand is not None, "no extras here"
-            yield self._make_extras_candidate(base_cand, extras)
+            yield self.make_extras_candidate(base_cand, extras)
 
     def _iter_candidates_from_constraints(
         self,
@@ -609,7 +609,7 @@ class Factory:
             if base_candidate is None:
                 continue
             if extras:
-                yield self._make_extras_candidate(base_candidate, extras)
+                yield self.make_extras_candidate(base_candidate, extras)
             else:
                 yield base_candidate
 
@@ -739,7 +739,7 @@ class Factory:
                 if ireq.extras:
                     # require the extras on top of the base candidate
                     yield self.make_requirement_from_candidate(
-                        self._make_extras_candidate(cand, frozenset(ireq.extras))
+                        self.make_extras_candidate(cand, frozenset(ireq.extras))
                     )
 
     def collect_root_requirements(
