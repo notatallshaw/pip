@@ -49,7 +49,10 @@ from pip._internal.resolution.nab.candidates import (
     ExtrasCandidate,
     as_base_candidate,
 )
-from pip._internal.resolution.nab.errors import catalogue_installation_error
+from pip._internal.resolution.nab.errors import (
+    catalogue_installation_error,
+    yanked_installation_error,
+)
 from pip._internal.resolution.nab.factory import (
     CandidateCatalogue,
     CollectedRootRequirements,
@@ -59,6 +62,8 @@ from pip._internal.resolution.nab.found_candidates import warn_invalid_metadata
 from pip._internal.resolution.nab.provider import PipProvider
 from pip._internal.resolution.nab.reporter import PipDebuggingReporter, PipReporter
 from pip._internal.resolution.nab.requirements import SpecifierWithoutExtrasRequirement
+from pip._internal.resolution.nab.yank_preference import IncompletePreferenceError
+from pip._internal.resolution.nab.yanked_resolution import YankProxyProvider
 from pip._internal.utils.packaging import get_requirement
 
 if TYPE_CHECKING:
@@ -66,6 +71,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 _REORDER_AFTER_VERSIONS = 8
+
+
+class _TryYankedResolution(Exception):
+    """Continue fixed-catalogue search with conditional yank permission."""
 
 
 class _TryRequestedOrder(Exception):
@@ -147,7 +156,9 @@ class CatalogueProvider(BaseProvider[str, Version]):
         self.collected = collected
         self.catalogues: dict[str, CandidateCatalogue] = {}
         self.installed_versions: dict[str, Version | None] = {}
-        self.deferred_yanked: dict[str, list[tuple[SpecifierSet, str]]] = {}
+        self.yank_resolution = False
+        self.yanked_selection: set[str] = set()
+        self.yank_admission_sources: dict[str, tuple[str, ...]] = {}
         self.candidates: dict[tuple[str, Version], Candidate] = {}
         self.dependencies: dict[tuple[str, Version], DependencyRecord] = {}
         self.templates: dict[str, InstallRequirement] = {}
@@ -169,9 +180,6 @@ class CatalogueProvider(BaseProvider[str, Version]):
         self.roots = self.ranges(collected.requirements, roots=True)
         self.constraints: dict[str, VersionRange] = {}
         for package, constraint in collected.constraints.items():
-            self.deferred_yanked.setdefault(package, []).append(
-                (constraint.specifier, "yanked constraint pin")
-            )
             self.constraints[package] = constraint.specifier.to_range()
 
     def collect_fixed_options(self) -> None:
@@ -185,13 +193,6 @@ class CatalogueProvider(BaseProvider[str, Version]):
             self.fixed_options[name] = (
                 self.fixed_options.get(name, Constraint.empty()) & ireq
             )
-        for package, policy in self.fixed_options.items():
-            if any(
-                item.operator == "==="
-                or (item.operator == "==" and not item.version.endswith(".*"))
-                for item in policy.specifier
-            ):
-                self.factory.catalogue_yank_pins[package] = policy.specifier
 
     def reject_input(self, package: str) -> NoReturn:
         """Report a contradiction proved solely by mandatory input declarations."""
@@ -278,9 +279,6 @@ class CatalogueProvider(BaseProvider[str, Version]):
                     self.templates.setdefault(requirement.name, ireq)
                     if roots:
                         self.templates.setdefault(requirement.project_name, ireq)
-                self.check_yanked(
-                    requirement.name, ireq.specifier, "yanked requirement pin"
-                )
                 allowed = ireq.specifier.to_range()
             else:
                 allowed = VersionRange.empty()
@@ -292,26 +290,6 @@ class CatalogueProvider(BaseProvider[str, Version]):
             ranges[name] = ranges.get(name, VersionRange.full()) & allowed
         return ranges
 
-    def check_yanked(self, package: str, specifier: SpecifierSet, reason: str) -> None:
-        """Defer index admission checks while installed metadata may suffice."""
-        base_name = package.partition("[")[0]
-        constraint = self.collected.constraints.get(base_name)
-        if base_name in self.explicit_bases or (
-            constraint is not None and constraint.links
-        ):
-            return
-        if (
-            package not in self.catalogues
-            and self.installed_version(package) is not None
-        ):
-            self.deferred_yanked.setdefault(package, []).append((specifier, reason))
-        else:
-            fixed_pin = package.partition("[")[0] in self.factory.catalogue_yank_pins
-            if not fixed_pin and self.factory.catalogue_requires_yanked(
-                package, specifier
-            ):
-                raise CatalogueUnsupported(reason)
-
     def remember(self, candidate: Candidate) -> None:
         key = candidate.name, candidate.version
         previous = self.candidates.setdefault(key, candidate)
@@ -321,14 +299,6 @@ class CatalogueProvider(BaseProvider[str, Version]):
     def catalogue(self, package: str) -> CandidateCatalogue:
         """Return the request's fixed artifact list, loading it on first use."""
         if package not in self.catalogues:
-            for specifier, reason in self.deferred_yanked.pop(package, ()):
-                fixed_pin = (
-                    package.partition("[")[0] in self.factory.catalogue_yank_pins
-                )
-                if not fixed_pin and self.factory.catalogue_requires_yanked(
-                    package, specifier
-                ):
-                    raise CatalogueUnsupported(reason)
             self.catalogues[package] = self.factory.catalogue_candidates(
                 package,
                 self.preparation_template(package),
@@ -336,7 +306,12 @@ class CatalogueProvider(BaseProvider[str, Version]):
                     package.partition("[")[0], Constraint.empty()
                 ).hashes,
             )
-        return self.catalogues[package]
+        catalogue = self.catalogues[package]
+        if not self.yank_resolution and any(
+            item.link.is_yanked for item in catalogue.candidates
+        ):
+            raise _TryYankedResolution(package)
+        return catalogue
 
     def preparation_template(self, package: str) -> InstallRequirement | None:
         """Combine base provenance with the identifier's extras for preparation."""
@@ -674,15 +649,51 @@ class CatalogueProvider(BaseProvider[str, Version]):
                 self.reject_input(package.partition("[")[0])
         self.expand_fixed_sources()
         try:
+            try:
+                return self._solve_once(reporter)
+            except _TryRequestedOrder as error:
+                logger.info(
+                    "Nab catalogue reordered after repeated preparation of %s",
+                    str(error),
+                )
+                self.requested_order = True
+                self.solution_ranges = {}
+                self.pending_dependencies.clear()
             return self._solve_once(reporter)
-        except _TryRequestedOrder as error:
-            logger.info(
-                "Nab catalogue reordered after repeated preparation of %s", str(error)
-            )
-            self.requested_order = True
+        except _TryYankedResolution:
+            self.yank_resolution = True
             self.solution_ranges = {}
             self.pending_dependencies.clear()
-        return self._solve_once(reporter)
+            return self.solve_yanked(reporter)
+
+    def solve_yanked(
+        self, reporter: PipReporter | PipDebuggingReporter
+    ) -> Solution[str, Version]:
+        """Resolve withdrawal groups with grounded permissions and live alternatives."""
+        declarations = []
+        for requirement in self.collected.requirements:
+            _, ireq = requirement.get_candidate_lookup()
+            if ireq is not None and ireq.req is not None:
+                declarations.append(ireq.req)
+        declarations.extend(
+            get_requirement(name + str(constraint.specifier))
+            for name, constraint in self.collected.constraints.items()
+        )
+        proxy = YankProxyProvider(self, declarations)
+        try:
+            pins, _ = proxy.resolve()
+        except IncompletePreferenceError:
+            raise
+        except ResolutionError as error:
+            raise yanked_installation_error(error, proxy) from error
+        edges = tuple(
+            (name, child)
+            for name, version in pins.items()
+            for child in self.dependencies[name, version][1]
+        )
+        for name, version in pins.items():
+            reporter.pinning(self.candidates[name, version])
+        return Solution(pins, edges, tuple(self.roots))
 
     def _solve_once(
         self, reporter: PipReporter | PipDebuggingReporter
@@ -759,6 +770,7 @@ class CatalogueProvider(BaseProvider[str, Version]):
                 return False
             if (
                 candidate.version.is_prerelease
+                and not self.yank_resolution
                 and candidate.project_name not in self.explicit_bases
                 and not self.factory.catalogue_prerelease_admitted(
                     candidate, requirements, base
@@ -774,6 +786,13 @@ class CatalogueProvider(BaseProvider[str, Version]):
                 base.hash_options,
                 base.links,
             )
+            if (
+                self.yank_resolution
+                and candidate.project_name not in self.explicit_bases
+            ):
+                if not self.validate_yanked_artifact(name, candidate):
+                    return False
+                continue
             choices = self.factory.find_candidates(
                 name,
                 requirements,
@@ -788,6 +807,26 @@ class CatalogueProvider(BaseProvider[str, Version]):
                 )
                 return False
         return True
+
+    def validate_yanked_artifact(self, package: str, candidate: Candidate) -> bool:
+        """Check finder order within the solver's permitted withdrawal group."""
+        if candidate.is_installed or package.startswith("<"):
+            return True
+        withdrawn = package in self.yanked_selection
+        catalogue = self.catalogue(package)
+        for artifact in catalogue.candidates:
+            if (
+                artifact.version != candidate.version
+                or artifact.link.is_yanked != withdrawn
+            ):
+                continue
+            try:
+                prepared = catalogue.prepare(artifact)
+            except MetadataInvalid:
+                return False
+            if prepared is not None:
+                return prepared == candidate
+        return False
 
     def selected(self, solution: Solution[str, Version]) -> Mapping[str, Candidate]:
         return {

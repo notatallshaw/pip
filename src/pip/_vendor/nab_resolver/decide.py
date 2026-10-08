@@ -58,6 +58,14 @@ def choose_package_to_decide(
             resolver.provider.begin_decision_scan()
         return None
 
+    # Readiness can depend on decisions changed by propagation or backtracking.
+    scan_hint = getattr(resolver.provider, "receive_decision_scan_hint", None)
+    if scan_hint is not None:
+        scan_hint(
+            resolver.solution.positive_ranges(),
+            resolver.solution.decisions(),
+        )
+
     key_inputs_arrived = resolver.provider.begin_decision_scan()
 
     conflict_counts = resolver.stats.package_conflict_counts
