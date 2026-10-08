@@ -609,7 +609,7 @@ index 9dd16ee..16f3954 100644
  
      Prefers ``is_ready`` packages so resolution keeps making progress while
      other listings/metadata are still in flight.  ``begin_decision_scan`` marks
-@@ -36,12 +42,20 @@ def choose_package_to_decide(resolver: Resolver[Any, Any]) -> Any | None:
+@@ -36,12 +42,28 @@ def choose_package_to_decide(resolver: Resolver[Any, Any]) -> Any | None:
      across scans, so one that moves without the solution or ``priority_epoch``
      moving is never read again.
  
@@ -629,8 +629,16 @@ index 9dd16ee..16f3954 100644
 +            resolver.provider.begin_decision_scan()
          return None
  
++    # Readiness can depend on decisions changed by propagation or backtracking.
++    scan_hint = getattr(resolver.provider, "receive_decision_scan_hint", None)
++    if scan_hint is not None:
++        scan_hint(
++            resolver.solution.positive_ranges(),
++            resolver.solution.decisions(),
++        )
++
      key_inputs_arrived = resolver.provider.begin_decision_scan()
-@@ -71,21 +85,36 @@ def choose_package_to_decide(resolver: Resolver[Any, Any]) -> Any | None:
+@@ -71,21 +93,36 @@ def choose_package_to_decide(resolver: Resolver[Any, Any]) -> Any | None:
              tiebreak_cache[package] = tiebreak
          return (ready_penalty, priority, tiebreak)
  
@@ -670,7 +678,7 @@ index 9dd16ee..16f3954 100644
      """
      current_range = resolver.solution.get(package) or resolver.range_type.full()
      constraint = resolver.constraints.get(package)
-@@ -93,15 +122,23 @@ def choose_version(resolver: Resolver[Any, Any], package: Any) -> Any | None:
+@@ -93,15 +130,23 @@ def choose_version(resolver: Resolver[Any, Any], package: Any) -> Any | None:
          current_range = current_range & constraint
  
      provider = resolver.provider
@@ -697,7 +705,7 @@ index 9dd16ee..16f3954 100644
  
  
  def _normalize_terms(
-@@ -129,6 +166,8 @@ def absorb_pending_clauses(resolver: Resolver[Any, Any]) -> bool:
+@@ -129,6 +174,8 @@ def absorb_pending_clauses(resolver: Resolver[Any, Any]) -> bool:
      the default ``NO_VERSIONS`` clause this turn.
      """
      clauses = list(resolver.provider.consume_pending_clauses())
@@ -706,7 +714,7 @@ index 9dd16ee..16f3954 100644
      for incompatibility in clauses:
          _normalize_terms(resolver, incompatibility)
          add_incompatibility(resolver, incompatibility)
-@@ -178,9 +217,13 @@ def _constraint_hid_a_version(
+@@ -178,9 +225,13 @@ def _constraint_hid_a_version(
  
  
  def record_no_versions(
@@ -722,7 +730,7 @@ index 9dd16ee..16f3954 100644
  
      Skipped when the provider already supplied context-aware clauses;
      otherwise the broad clause would persist past the backjump that lifts
-@@ -188,6 +231,12 @@ def record_no_versions(
+@@ -188,6 +239,12 @@ def record_no_versions(
      """
      if had_pending:
          return
@@ -735,7 +743,7 @@ index 9dd16ee..16f3954 100644
  
      current_range = resolver.solution.get(package) or resolver.term_top
      resolver.observer.on_no_versions(package, current_range)
-@@ -211,3 +260,74 @@ def record_no_versions(
+@@ -211,3 +268,74 @@ def record_no_versions(
              constraint_range=constraint_range,
          ),
      )
