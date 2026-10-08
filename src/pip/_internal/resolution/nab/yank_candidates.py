@@ -255,7 +255,7 @@ class YankCandidates:
             try:
                 prepared = catalogue.prepare(artifact)
             except MetadataInvalid as error:
-                if provider.installed_version(package) is not None:
+                if provider.installed_version_matches_inputs(package):
                     raise
                 warn_invalid_metadata(version, error)
                 self.rejections.append(str(error))

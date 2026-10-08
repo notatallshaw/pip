@@ -388,6 +388,18 @@ class CatalogueProvider(BaseProvider[str, Version]):
             self.installed_versions[package] = self.factory.installed_version(package)
         return self.installed_versions[package]
 
+    def installed_version_matches_inputs(self, package: str) -> bool:
+        """Check whether fixed input version bounds admit the installation."""
+        installed = self.installed_version(package)
+        if installed is None:
+            return False
+        base = package.partition("[")[0]
+        allowed = self.roots.get(base, VersionRange.full())
+        if package != base:
+            allowed &= self.roots.get(package, VersionRange.full())
+        allowed &= self.constraints.get(base, VersionRange.full())
+        return installed in allowed
+
     def select_installed(self, package: str) -> Version | None:
         """Prepare installed metadata only after choosing its version."""
         candidate = self.factory.installed_candidate(
@@ -452,7 +464,7 @@ class CatalogueProvider(BaseProvider[str, Version]):
                 try:
                     candidate = catalogue.prepare(artifact)
                 except MetadataInvalid as error:
-                    if self.installed_version(package) is not None:
+                    if self.installed_version_matches_inputs(package):
                         raise
                     warn_invalid_metadata(version, error)
                     self.rejected_versions.setdefault(package, set()).add(version)
@@ -714,7 +726,10 @@ class CatalogueProvider(BaseProvider[str, Version]):
 
     def has_complete_metadata(self) -> bool:
         """Check metadata coverage for the fixed domain used by this attempt."""
-        if any(version is not None for version in self.installed_versions.values()):
+        if any(
+            self.installed_version_matches_inputs(package)
+            for package in self.installed_versions
+        ):
             return False
         referenced = set(self.roots)
         for _, dependencies in self.dependencies.values():
