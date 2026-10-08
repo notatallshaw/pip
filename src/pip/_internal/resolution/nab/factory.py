@@ -150,8 +150,6 @@ class Factory:
         self.catalogue_only = False
         self.catalogue_sources: dict[str, BaseCandidate] = {}
         self.catalogue_expanding_sources = False
-        self.catalogue_yank_pins: dict[str, SpecifierSet] = {}
-        self._catalogue_yanked_versions: dict[str, frozenset[Version]] = {}
         self._catalogue_preparation: _CataloguePreparation | None = None
         self._catalogue_candidate_ids: set[int] = set()
 
@@ -194,7 +192,6 @@ class Factory:
         finally:
             self.catalogue_only = False
             self.catalogue_sources = {}
-            self.catalogue_yank_pins = {}
             self.catalogue_expanding_sources = False
             self._build_failures = failures
             self._catalogue_preparation = preparation
@@ -484,55 +481,12 @@ class Factory:
         candidates = evaluator.get_applicable_candidates(
             self._finder.find_all_candidates(name)
         )
-        pinned = self.catalogue_yank_pins.get(name)
-        allow_yanked = False
-        if pinned is not None:
-            matching = [
-                candidate
-                for candidate in candidates
-                if pinned.contains(candidate.version, prereleases=True)
-            ]
-            allow_yanked = bool(matching) and all(
-                candidate.link.is_yanked for candidate in matching
-            )
         return CandidateCatalogue(
             self,
-            [
-                candidate
-                for candidate in reversed(candidates)
-                if not candidate.link.is_yanked
-                or (
-                    allow_yanked
-                    and pinned is not None
-                    and pinned.contains(candidate.version, prereleases=True)
-                )
-            ],
+            list(reversed(candidates)),
             name,
             frozenset(requirement.extras),
             template,
-        )
-
-    def catalogue_requires_yanked(
-        self, identifier: str, specifier: SpecifierSet
-    ) -> bool:
-        """Detect a declaration that could opt into an excluded yanked release."""
-        pinned = any(
-            item.operator == "==="
-            or (item.operator == "==" and not item.version.endswith(".*"))
-            for item in specifier
-        )
-        if not pinned:
-            return False
-        name = canonicalize_name(get_requirement(identifier).name)
-        if name not in self._catalogue_yanked_versions:
-            self._catalogue_yanked_versions[name] = frozenset(
-                item.version
-                for item in self._finder.find_all_candidates(name)
-                if item.link.is_yanked
-            )
-        return any(
-            specifier.contains(version, prereleases=True)
-            for version in self._catalogue_yanked_versions[name]
         )
 
     def _prepare_catalogue_candidate(
@@ -543,10 +497,6 @@ class Factory:
         name: NormalizedName,
         version: Version,
     ) -> Candidate | None:
-        if link.is_yanked:
-            pinned = self.catalogue_yank_pins.get(name)
-            if pinned is None or not pinned.contains(version, prereleases=True):
-                raise CatalogueUnsupported("yanked candidate")
         return self._make_candidate_from_link(link, extras, template, name, version)
 
     def catalogue_prerelease_policy(self, identifier: str) -> bool | None:

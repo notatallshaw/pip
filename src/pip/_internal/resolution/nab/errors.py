@@ -8,16 +8,89 @@ from typing import TYPE_CHECKING, Any, cast
 from pip._vendor.nab_resolver.candidate_provider import CandidateProvider
 from pip._vendor.nab_resolver.errors import ResolutionError
 from pip._vendor.nab_resolver.root import ROOT
-from pip._vendor.nab_resolver.types import Incompatibility
+from pip._vendor.nab_resolver.types import Incompatibility, IncompatibilityCause, Term
+from pip._vendor.packaging.ranges import VersionRange
 
 from pip._internal.exceptions import InstallationError
 from pip._internal.resolution.nab.base import Constraint, Requirement, RequirementCause
 from pip._internal.resolution.nab.factory import Factory
 from pip._internal.resolution.nab.host import NativeHost, Request
 from pip._internal.resolution.nab.ranges import CandidateKey
+from pip._internal.resolution.nab.yanked_resolution import (
+    MetadataProxy,
+    YankProxyProvider,
+)
 
 if TYPE_CHECKING:
     from pip._internal.resolution.nab.catalogue import CatalogueProvider
+
+
+def yanked_installation_error(
+    error: ResolutionError, proxy: YankProxyProvider
+) -> Exception:
+    """Render withdrawal-group proofs using the original pip declarations."""
+    selected = _select_requested_pairs(_yanked_external_clauses(error, proxy))
+    provider = proxy.catalogue.provider
+    records: list[RequirementCause] = []
+    for parent, child, parent_range in selected:
+        if parent is None:
+            records.extend(
+                RequirementCause(req, None)
+                for req in provider.collected.requirements
+                if req.name == child
+            )
+            continue
+        for choice, native in proxy.catalogue.prepared.items():
+            if choice.package != parent or choice.version not in parent_range:
+                continue
+            requirements, _ = proxy.catalogue.dependencies[choice]
+            records.extend(
+                RequirementCause(req, native)
+                for req in requirements
+                if req.name == child
+            )
+    if not records:
+        return InstallationError(str(error))
+    return provider.factory.get_installation_error(
+        records, provider.collected.constraints
+    )
+
+
+def _yanked_external_clauses(
+    error: ResolutionError, proxy: YankProxyProvider
+) -> list[Incompatibility[Any, Any]]:
+    """Translate candidate tokens and metadata proxies into package versions."""
+    clauses: list[Incompatibility[Any, Any]] = []
+    for clause in _external_clauses(error.incompatibility):
+        if clause.cause not in {
+            IncompatibilityCause.ROOT,
+            IncompatibilityCause.DEPENDENCY,
+        }:
+            continue
+        terms: list[Term[Any, Any]] = []
+        for term in clause.terms:
+            package = term.package
+            if isinstance(package, MetadataProxy):
+                candidate = proxy.items[package.candidate]
+                package = candidate.package
+                allowed = VersionRange.singleton(candidate.version)
+            elif isinstance(package, str):
+                allowed = VersionRange.empty()
+                for token, candidate in proxy.items.items():
+                    if candidate.package == package and token in term.constraint:
+                        allowed |= VersionRange.singleton(candidate.version)
+            elif package is ROOT:
+                terms.append(
+                    Term(ROOT, VersionRange.full(), positive=term.is_positive())
+                )
+                continue
+            else:
+                break
+            terms.append(Term(package, allowed, positive=term.is_positive()))
+        else:
+            if terms:
+                clauses.append(Incompatibility(terms, cause=clause.cause))
+    return clauses
 
 
 def catalogue_installation_error(

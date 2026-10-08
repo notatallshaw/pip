@@ -126,8 +126,19 @@ for a project whose source is fixed by an input.
 
 Input hashes and build settings are applied during candidate selection and
 preparation. Source constraints are prepared when their project is needed;
-unused constraints do not cause downloads. Exact input pins can admit yanked
-releases under pip's candidate rules.
+unused constraints do not cause downloads.
+
+Yanked files need an exact `==` or `===` pin from an input, a constraint on a
+required package, or a selected dependency. Wildcards and range bounds do not
+permit them. Permission from a rejected parent is discarded; inactive markers
+and extras do not grant it.
+
+The fast path uses Nab's yanking policy. It can retain a selected parent that
+exactly pins a yanked dependency. For independently requested packages, it
+prefers a working live file even if another package must be downgraded.
+Unlike pip's original resolver, it can try a permitted yank after matching live
+files fail dependency resolution, and can discover a dependency's pin after
+encountering a broader requirement for the same package.
 
 Pip also follows URL dependencies of explicit input candidates before solving.
 During solving, dependencies can reuse a matching source already fixed and
@@ -148,7 +159,6 @@ active requirements. Pip uses it under the following conditions:
 | A dependency introduces a URL outside the prepared fixed sources and explicit-input URL closure | Its source may depend on which parent version is selected. |
 | A candidate's source must change under the same package/version key | The metadata attached to a learned clause must remain fixed. |
 | A source constraint cannot provide a fixed candidate after preparation | Native queries apply the original candidate rejection and source rules. |
-| A transitive pin may admit a yanked release not covered by the fixed input pins | Eligibility can disappear when its parent is rejected. |
 | An installed package requires replacing itself | Native handling preserves pip's treatment of that installation's dependency obligations. |
 | Invalid metadata is encountered in a fixed source, or in an index alternative when an installed version exists | Native preparation and installed-candidate iteration have different rejection rules. |
 | A failed solve still has unexamined candidate metadata or installed choices | Unread metadata may supply another source or admission condition. |
