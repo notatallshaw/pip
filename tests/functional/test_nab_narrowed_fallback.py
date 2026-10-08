@@ -1,4 +1,5 @@
 import hashlib
+from pathlib import Path
 
 import pytest
 
@@ -185,3 +186,161 @@ def test_metadata_rejection_scope_preserves_artifact_alternatives(
 
     assert "Nab catalogue success" in result.stdout
     script.assert_installed(pkg=expected)
+
+
+def installed_metadata_listing(
+    script: PipTestEnvironment, *, yanked: bool, reject_all: bool = False
+) -> Path:
+    """Install app1 and offer index metadata errors in either catalogue mode."""
+    installed = create_basic_wheel_for_package(script, "app", "1")
+    script.pip("install", "--no-index", installed)
+
+    valid = create_basic_wheel_for_package(script, "app", "2")
+    rejected = script.scratch_path / "app-3-py3-none-any.whl"
+    make_wheel(
+        name="app", version="3", metadata_updates={"Requires-Dist": "broken>=?"}
+    ).save_to(rejected)
+    if reject_all:
+        make_wheel(
+            name="app", version="2", metadata_updates={"Requires-Dist": "broken>=?"}
+        ).save_to(valid)
+    if not yanked:
+        return script.scratch_path
+
+    withdrawn = create_basic_wheel_for_package(script, "app", "4")
+    listing = script.scratch_path / "links.html"
+    listing.write_text(
+        f'<a href="{valid.name}">{valid.name}</a>\n'
+        f'<a href="{rejected.name}">{rejected.name}</a>\n'
+        f'<a href="{withdrawn.name}" data-yanked="withdrawn">{withdrawn.name}</a>\n'
+    )
+    return listing
+
+
+@pytest.mark.parametrize("yanked", [False, True])
+@pytest.mark.parametrize("bound", ["root", "constraint", "extras", "extra-base"])
+def test_invalid_index_metadata_stays_fast_when_inputs_exclude_installation(
+    script: PipTestEnvironment, bound: str, yanked: bool
+) -> None:
+    listing = installed_metadata_listing(script, yanked=yanked)
+    arguments: list[str | Path]
+    if bound == "constraint":
+        constraint = script.scratch_path / "constraints.txt"
+        constraint.write_text("app>=2,<4\n")
+        arguments = ["--constraint", constraint, "app"]
+    elif bound == "extra-base":
+        arguments = ["app[feature]", "app>=2,<4"]
+    else:
+        arguments = ["app[feature]>=2,<4" if bound == "extras" else "app>=2,<4"]
+
+    result = script.pip(
+        "install",
+        "--no-index",
+        "--find-links",
+        listing,
+        *arguments,
+        allow_stderr_warning=True,
+    )
+
+    assert "Nab catalogue success" in result.stdout
+    assert "Nab catalogue fallback" not in result.stdout
+    assert (
+        result.stderr.count("Ignoring version 3 of app since it has invalid metadata")
+        == 1
+    )
+    script.assert_installed(app="2")
+
+
+@pytest.mark.parametrize("yanked", [False, True])
+def test_invalid_index_metadata_preserves_eligible_installation_errors(
+    script: PipTestEnvironment, yanked: bool
+) -> None:
+    listing = installed_metadata_listing(script, yanked=yanked)
+    result = script.pip(
+        "install",
+        "--no-index",
+        "--find-links",
+        listing,
+        "--upgrade",
+        "app",
+        expect_error=True,
+    )
+
+    assert "Nab catalogue fallback: MetadataInvalid" in result.stdout
+    assert "has invalid metadata" in result.stderr
+    script.assert_installed(app="1")
+
+
+def test_dependency_exclusion_keeps_installed_metadata_fallback(
+    script: PipTestEnvironment,
+) -> None:
+    listing = installed_metadata_listing(script, yanked=False)
+    create_basic_wheel_for_package(script, "bridge", "1", depends=["app>=2,<4"])
+    result = script.pip(
+        "install",
+        "--no-index",
+        "--find-links",
+        listing,
+        "app",
+        "bridge",
+        allow_stderr_warning=True,
+    )
+
+    assert "Nab catalogue fallback: MetadataInvalid" in result.stdout
+    script.assert_installed(app="2", bridge="1")
+
+
+@pytest.mark.parametrize("yanked", [False, True])
+def test_excluded_installation_does_not_repeat_metadata_rejections_on_failure(
+    script: PipTestEnvironment, yanked: bool
+) -> None:
+    listing = installed_metadata_listing(script, yanked=yanked, reject_all=True)
+    result = script.pip(
+        "install",
+        "--no-index",
+        "--find-links",
+        listing,
+        "app>=2,<4",
+        expect_error=True,
+    )
+
+    assert "Nab catalogue fallback" not in result.stdout
+    for version in ("2", "3"):
+        assert (
+            result.stderr.count(
+                f"Ignoring version {version} of app since it has invalid metadata"
+            )
+            == 1
+        )
+    script.assert_installed(app="1")
+
+
+def test_excluded_installation_does_not_certify_an_unread_url_source(
+    script: PipTestEnvironment,
+) -> None:
+    installed = create_basic_wheel_for_package(script, "dep", "1")
+    script.pip("install", "--no-index", installed)
+    index = script.scratch_path / "index"
+    index.mkdir()
+    supplied = create_basic_wheel_for_package(script, "dep", "3")
+    make_wheel(
+        name="bridge",
+        version="1",
+        metadata=(
+            "Metadata-Version: 2.2\nName: bridge\nVersion: 1\n"
+            f"Requires-Dist: dep @ {supplied.as_uri()}\n"
+        ),
+    ).save_to(index / "bridge-1-py3-none-any.whl")
+
+    result = script.pip(
+        "install",
+        "--no-index",
+        "--find-links",
+        index,
+        "dep>=3",
+        "bridge",
+    )
+
+    assert "Nab catalogue fallback: ResolutionError" in result.stdout
+    assert "Nab catalogue certified failure" not in result.stdout
+    script.assert_installed(dep="3", bridge="1")

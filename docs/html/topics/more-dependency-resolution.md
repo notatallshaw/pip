@@ -147,7 +147,9 @@ prepared for the request. Candidate metadata remains tied to its source.
 Invalid dependency metadata excludes that candidate version when pip's
 candidate rules permit it. An inconsistent artifact, such as a wheel whose
 metadata version disagrees with its filename, can be skipped while another
-artifact of that version is tried.
+artifact of that version is tried. An installed version excluded by fixed input
+version bounds does not change these rejection rules or require another solve
+to report a conclusive failure.
 
 ### Fallback: changing candidate sources or admission
 
@@ -160,7 +162,7 @@ active requirements. Pip uses it under the following conditions:
 | A candidate's source must change under the same package/version key | The metadata attached to a learned clause must remain fixed. |
 | A source constraint cannot provide a fixed candidate after preparation | Native queries apply the original candidate rejection and source rules. |
 | An installed package requires replacing itself | Native handling preserves pip's treatment of that installation's dependency obligations. |
-| Invalid metadata is encountered in a fixed source, or in an index alternative when an installed version exists | Native preparation and installed-candidate iteration have different rejection rules. |
+| Invalid metadata is encountered in a fixed source, or in an index alternative when fixed input bounds admit the installed version | Native preparation and installed-candidate iteration have different rejection rules. |
 | A failed solve still has unexamined candidate metadata or installed choices | Unread metadata may supply another source or admission condition. |
 | The completed selection fails original requirements, constraints, prerelease or artifact checks | Pip retries with native candidate admission. |
 
