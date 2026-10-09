@@ -22,6 +22,7 @@ from pip._vendor.rich.markup import escape
 from pip._internal.cache import CacheEntry, WheelCache
 from pip._internal.exceptions import (
     DistributionNotFound,
+    HashError,
     InstallationError,
     InvalidInstalledPackage,
     MetadataInconsistent,
@@ -56,6 +57,7 @@ from .base import (
     Constraint,
     Requirement,
     RequirementCause,
+    intersect_hash_options,
 )
 from .candidates import (
     AlreadyInstalledCandidate,
@@ -149,6 +151,8 @@ class Factory:
         self._ignore_requires_python = ignore_requires_python
         self.catalogue_only = False
         self.catalogue_sources: dict[str, BaseCandidate] = {}
+        self.catalogue_constraint_links: dict[str, frozenset[Link]] = {}
+        self._input_options: dict[str, Constraint] = {}
         self.catalogue_expanding_sources = False
         self._catalogue_preparation: _CataloguePreparation | None = None
         self._catalogue_candidate_ids: set[int] = set()
@@ -192,6 +196,7 @@ class Factory:
         finally:
             self.catalogue_only = False
             self.catalogue_sources = {}
+            self.catalogue_constraint_links = {}
             self.catalogue_expanding_sources = False
             self._build_failures = failures
             self._catalogue_preparation = preparation
@@ -275,6 +280,7 @@ class Factory:
         # TODO: Check already installed candidate, and use it if the link and
         # editable flag match.
 
+        name, template = self._input_hash_template(link, template, name)
         if link in self._build_failures:
             # We already tried this candidate before, and it does not build.
             # Don't bother trying again.
@@ -300,7 +306,9 @@ class Factory:
                     self._build_failures[link] = e
                     return None
 
-            return self._editable_candidate_cache[link]
+            editable = self._editable_candidate_cache[link]
+            self._check_input_hashes(editable, template)
+            return editable
         else:
             if (
                 not self.catalogue_only
@@ -327,7 +335,63 @@ class Factory:
                     )
                     self._build_failures[link] = e
                     return None
-            return self._link_candidate_cache[link]
+            candidate = self._link_candidate_cache[link]
+            self._check_input_hashes(candidate, template)
+            return candidate
+
+    def _input_hash_template(
+        self,
+        link: Link,
+        template: InstallRequirement,
+        name: NormalizedName | None,
+    ) -> tuple[NormalizedName | None, InstallRequirement]:
+        """Return a source name and preparation template with its input hashes."""
+        if name is None and not template.hash_options:
+            matching = [
+                package
+                for package, options in self._input_options.items()
+                if options.hash_options
+                and options.links
+                and all(links_equivalent(link, required) for required in options.links)
+            ]
+            if len(matching) == 1:
+                name = canonicalize_name(matching[0])
+        options = self._input_options.get(name) if name is not None else None
+        if options is None or not options.hash_options:
+            return name, template
+        if options.links and not all(
+            links_equivalent(link, required) for required in options.links
+        ):
+            return name, template
+        hash_options = intersect_hash_options(
+            options.hash_options, template.hash_options
+        )
+        if hash_options != template.hash_options:
+            template = copy.copy(template)
+            template.hash_options = hash_options
+        return name, template
+
+    def _check_input_hashes(
+        self,
+        candidate: LinkCandidate | EditableCandidate,
+        template: InstallRequirement,
+    ) -> None:
+        """Check additional input hashes discovered with an archive's package name."""
+        _, wanted = self._input_hash_template(
+            candidate.source_link, template, candidate.project_name
+        )
+        prepared = candidate.get_install_requirement()
+        if not wanted.hash_options or wanted.hash_options == prepared.hash_options:
+            return
+        # Hash mode downloads the archive before preparing metadata.
+        assert prepared.local_file_path is not None
+        try:
+            wanted.hashes(trust_internet=False).check_against_path(
+                prepared.local_file_path
+            )
+        except HashError as error:
+            error.req = wanted
+            raise
 
     def _iter_found_candidates(
         self,
@@ -656,6 +720,19 @@ class Factory:
             and all(is_satisfied_by(req, c) for req in requirements[identifier])
         )
 
+    def _catalogue_source_is_fixed(self, ireq: InstallRequirement) -> bool:
+        """Check a dependency URL against fixed roots and input constraint links."""
+        if ireq.name is None or ireq.link is None:
+            return False
+        name = canonicalize_name(ireq.name)
+        known = self.catalogue_sources.get(name)
+        if known is not None:
+            return known.source_link is not None and links_equivalent(
+                known.source_link, ireq.link
+            )
+        links = self.catalogue_constraint_links.get(name, frozenset())
+        return bool(links) and all(links_equivalent(link, ireq.link) for link in links)
+
     def _make_requirements_from_install_req(
         self, ireq: InstallRequirement, requested_extras: Iterable[str]
     ) -> Iterator[Requirement]:
@@ -674,16 +751,7 @@ class Factory:
             and ireq.match_markers(requested_extras)
             and not self.catalogue_expanding_sources
         ):
-            known = (
-                self.catalogue_sources.get(canonicalize_name(ireq.name))
-                if ireq.name
-                else None
-            )
-            if (
-                known is None
-                or known.source_link is None
-                or not links_equivalent(known.source_link, ireq.link)
-            ):
+            if not self._catalogue_source_is_fixed(ireq):
                 raise CatalogueUnsupported("URL dependency")
         if not ireq.match_markers(requested_extras):
             logger.info(
@@ -726,11 +794,12 @@ class Factory:
                         self.make_extras_candidate(cand, frozenset(ireq.extras))
                     )
 
-    def collect_root_requirements(
+    def _collect_constraints(
         self, root_ireqs: list[InstallRequirement]
-    ) -> CollectedRootRequirements:
-        collected = CollectedRootRequirements([], {}, {})
-        for i, ireq in enumerate(root_ireqs):
+    ) -> dict[str, Constraint]:
+        """Collect active input constraints before any root source is prepared."""
+        constraints: dict[str, Constraint] = {}
+        for ireq in root_ireqs:
             if ireq.constraint:
                 # Ensure we only accept valid constraints
                 problem = check_invalid_constraint_type(ireq)
@@ -740,11 +809,40 @@ class Factory:
                     continue
                 assert ireq.name, "Constraint must be named"
                 name = canonicalize_name(ireq.name)
-                if name in collected.constraints:
-                    collected.constraints[name] &= ireq
+                if name in constraints:
+                    constraints[name] &= ireq
                 else:
-                    collected.constraints[name] = Constraint.from_ireq(ireq)
-            else:
+                    constraints[name] = Constraint.from_ireq(ireq)
+        return constraints
+
+    def _set_input_options(
+        self,
+        root_ireqs: list[InstallRequirement],
+        constraints: dict[str, Constraint],
+    ) -> None:
+        """Retain fixed hash policies and discard incomplete hash-mode preparations."""
+        self._input_options = dict(constraints)
+        for ireq in root_ireqs:
+            if not ireq.constraint and ireq.name is not None and ireq.match_markers():
+                name = canonicalize_name(ireq.name)
+                self._input_options[name] = (
+                    self._input_options.get(name, Constraint.empty()) & ireq
+                )
+        if self.preparer.require_hashes:
+            self._link_candidate_cache = {
+                link: candidate
+                for link, candidate in self._link_candidate_cache.items()
+                if candidate.get_install_requirement().local_file_path is not None
+            }
+
+    def collect_root_requirements(
+        self, root_ireqs: list[InstallRequirement]
+    ) -> CollectedRootRequirements:
+        constraints = self._collect_constraints(root_ireqs)
+        self._set_input_options(root_ireqs, constraints)
+        collected = CollectedRootRequirements([], constraints, {})
+        for i, ireq in enumerate(root_ireqs):
+            if not ireq.constraint:
                 reqs = list(
                     self._make_requirements_from_install_req(
                         ireq,

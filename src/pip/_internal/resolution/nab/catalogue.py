@@ -186,6 +186,11 @@ class CatalogueProvider(BaseProvider[str, Version]):
         self.collect_fixed_options()
         self.collect_explicit_sources()
         self.factory.catalogue_sources = self.explicit_bases
+        self.factory.catalogue_constraint_links = {
+            name: constraint.links
+            for name, constraint in collected.constraints.items()
+            if constraint.links
+        }
         self.roots = self.ranges(collected.requirements, roots=True)
         self.constraints: dict[str, VersionRange] = {}
         for package, constraint in collected.constraints.items():

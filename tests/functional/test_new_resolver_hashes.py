@@ -207,10 +207,7 @@ def test_new_resolver_hash_intersect_empty_from_constraint(
         expect_error=True,
     )
 
-    message = (
-        "Hashes are required in --require-hashes mode, but they are missing "
-        "from some requirements."
-    )
+    message = "THESE PACKAGES DO NOT MATCH THE HASHES FROM THE REQUIREMENTS FILE."
     assert message in result.stderr, str(result)
 
 

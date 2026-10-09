@@ -10,7 +10,7 @@ from pip._vendor.packaging.version import Version
 
 from pip._internal.models.link import Link, links_equivalent
 from pip._internal.req.req_install import InstallRequirement
-from pip._internal.utils.hashes import Hashes
+from pip._internal.utils.hashes import FAVORITE_HASH, Hashes
 
 CandidateLookup = tuple[Optional["Candidate"], InstallRequirement | None]
 
@@ -28,6 +28,22 @@ def format_name(project: NormalizedName, extras: frozenset[NormalizedName]) -> s
         return project
     extras_expr = ",".join(sorted(extras))
     return f"{project}[{extras_expr}]"
+
+
+def intersect_hash_options(
+    left: dict[str, list[str]], right: dict[str, list[str]]
+) -> dict[str, list[str]]:
+    """Intersect declarations while preserving an empty set of permitted hashes."""
+    if not left:
+        return {algorithm: list(values) for algorithm, values in right.items()}
+    if not right:
+        return {algorithm: list(values) for algorithm, values in left.items()}
+    shared = {
+        algorithm: [value for value in values if value in right[algorithm]]
+        for algorithm, values in left.items()
+        if algorithm in right
+    }
+    return shared or {FAVORITE_HASH: []}
 
 
 @dataclass(frozen=True)
@@ -59,16 +75,11 @@ class Constraint:
         if not isinstance(other, InstallRequirement):
             return NotImplemented
         specifier = self.specifier & other.specifier
-        hashes = self.hashes & other.hashes(trust_internet=False)
-        if not self.hash_options:
-            hash_options = {alg: list(v) for alg, v in other.hash_options.items()}
-        elif not other.hash_options:
-            hash_options = {alg: list(v) for alg, v in self.hash_options.items()}
-        else:
-            hash_options = {
-                alg: [v for v in other.hash_options[alg] if v in self.hash_options[alg]]
-                for alg in self.hash_options.keys() & other.hash_options.keys()
-            }
+        other_hashes = other.hashes(trust_internet=False)
+        hashes = self.hashes & other_hashes
+        if self.hashes and other_hashes and not hashes:
+            hashes = Hashes({FAVORITE_HASH: []})
+        hash_options = intersect_hash_options(self.hash_options, other.hash_options)
         links = self.links
         if other.link:
             links = links.union([other.link])
