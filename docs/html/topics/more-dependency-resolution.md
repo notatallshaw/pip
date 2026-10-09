@@ -144,8 +144,8 @@ Pip also follows URL dependencies of explicit input candidates before solving.
 During solving, dependencies can reuse a matching source already fixed and
 prepared for the request. Candidate metadata remains tied to its source.
 
-Invalid dependency metadata excludes that candidate version when pip's
-candidate rules permit it. An inconsistent artifact, such as a wheel whose
+Invalid index dependency metadata excludes that candidate version, including
+when another version is installed. An inconsistent artifact, such as a wheel whose
 metadata version disagrees with its filename, can be skipped while another
 artifact of that version is tried. An installed version excluded by fixed input
 version bounds does not change these rejection rules or require another solve
@@ -160,17 +160,16 @@ active requirements. Pip uses it under the following conditions:
 | --- | --- |
 | A dependency introduces a URL outside the prepared fixed sources and explicit-input URL closure | Its source may depend on which parent version is selected. |
 | A candidate's source must change under the same package/version key | The metadata attached to a learned clause must remain fixed. |
-| A source constraint cannot provide a fixed candidate after preparation | Native queries apply the original candidate rejection and source rules. |
 | An installed package requires replacing itself | Native handling preserves pip's treatment of that installation's dependency obligations. |
-| Invalid metadata is encountered in a fixed source, or in an index alternative when fixed input bounds admit the installed version | Native preparation and installed-candidate iteration have different rejection rules. |
 | A failed solve still has unexamined candidate metadata or installed choices | Unread metadata may supply another source or admission condition. |
 | The completed selection fails original requirements, constraints, prerelease or artifact checks | Pip retries with native candidate admission. |
 
 Conflicting fixed inputs are reported directly. A failed solve can also be
 reported directly when pip has complete metadata for the relevant fixed
 candidate domain. These checks retain pip's conflict and lock-file diagnostics.
-Invalid installed metadata, build failures and terminal index errors are
-reported directly.
+A rejected constrained archive is unavailable, and another parent version can
+avoid requiring it. Invalid metadata in a mandatory source, invalid installed
+metadata, build failures and terminal index errors are reported directly.
 
 Fallback starts with fresh solver state and the original requirements and
 options. Successful preparation can be reused, but decisions and learned

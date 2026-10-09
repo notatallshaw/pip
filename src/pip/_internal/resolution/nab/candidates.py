@@ -218,12 +218,13 @@ class _InstallRequirementBackedCandidate(Candidate):
 
     def _check_metadata_consistency(self, dist: BaseDistribution) -> None:
         """Check for consistency of project name and version of dist."""
-        if self._name is not None and self._name != dist.canonical_name:
+        metadata_name = canonicalize_name(dist.raw_name)
+        if self._name is not None and self._name != metadata_name:
             raise MetadataInconsistent(
                 self._ireq,
                 "name",
                 self._name,
-                dist.canonical_name,
+                metadata_name,
             )
         if self._version is not None and self._version != dist.version:
             raise MetadataInconsistent(

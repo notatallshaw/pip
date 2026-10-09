@@ -250,8 +250,7 @@ class CatalogueProvider(BaseProvider[str, Version]):
             if isinstance(candidate, ExtrasCandidate)
             else as_base_candidate(candidate)
         )
-        if base is None:
-            raise CatalogueUnsupported("unsupported explicit candidate")
+        assert base is not None, "An explicit source must have a native base candidate"
         previous = self.explicit_bases.setdefault(base.name, base)
         if previous != base:
             raise self.factory.get_installation_error(
@@ -271,8 +270,7 @@ class CatalogueProvider(BaseProvider[str, Version]):
                 self.remember(candidate)
                 allowed = VersionRange.singleton(candidate.version)
             elif ireq is not None:
-                if ireq.link:
-                    raise CatalogueUnsupported("unfixed requirement source")
+                assert ireq.link is None, "A specifier requirement cannot carry a link"
                 if not roots or not isinstance(
                     requirement, SpecifierWithoutExtrasRequirement
                 ):
@@ -376,7 +374,8 @@ class CatalogueProvider(BaseProvider[str, Version]):
             self.unavailable_sources.add(package)
             return
         if candidate is None:
-            raise CatalogueUnsupported("rejected source constraint")
+            self.unavailable_sources.add(package)
+            return
         constrained_base = as_base_candidate(candidate)
         assert constrained_base is not None
         self.explicit_bases[package] = constrained_base
@@ -464,8 +463,6 @@ class CatalogueProvider(BaseProvider[str, Version]):
                 try:
                     candidate = catalogue.prepare(artifact)
                 except MetadataInvalid as error:
-                    if self.installed_version_matches_inputs(package):
-                        raise
                     warn_invalid_metadata(version, error)
                     self.rejected_versions.setdefault(package, set()).add(version)
                     continue
