@@ -40,7 +40,7 @@ def split_extra(package: str) -> tuple[str, str | None]:
 
 @dataclass(frozen=True, slots=True)
 class Candidate:
-    """Distinguish live and withdrawn files at the same package version."""
+    """Distinguish version text and withdrawal state at one numeric version."""
 
     package: str
     version: Version
@@ -76,7 +76,7 @@ def is_pin(requirement: Requirement) -> bool:
 
 
 class YankCandidates:
-    """Cache pip metadata separately for live and withdrawn artifact choices."""
+    """Cache pip metadata by version text and withdrawal state."""
 
     def __init__(self, provider: CatalogueProvider) -> None:
         self.provider = provider
@@ -89,6 +89,7 @@ class YankCandidates:
         self.missing_listings: set[str] = set()
         self.unavailable_reason = "required metadata is unavailable"
         self.rejections: list[str] = []
+        self.rejected_versions: set[tuple[str, Version, bool]] = set()
 
     def choices(self, package: str) -> tuple[Candidate, ...]:
         """List fixed, installed or finder choices without reading index metadata."""
@@ -145,6 +146,7 @@ class YankCandidates:
                 for item in available
                 if not item.withdrawn
                 and item.version == installed
+                and item.label == str(installed)
                 and item.version in version_range
             ),
             None,
@@ -233,7 +235,7 @@ class YankCandidates:
         return data
 
     def prepare_candidate(self, candidate: Candidate) -> NativeCandidate | None:
-        """Try compatible artifacts in finder order within one withdrawal group."""
+        """Choose an artifact with matching version text and withdrawal state."""
         provider = self.provider
         package, version = candidate.package, candidate.version
         if package.startswith("<"):
@@ -241,14 +243,20 @@ class YankCandidates:
         explicit = provider.explicit_candidate(package)
         if explicit is not None:
             return explicit
-        if not candidate.withdrawn and version == provider.installed_version(package):
+        if not candidate.withdrawn and candidate.label == str(
+            provider.installed_version(package)
+        ):
             return provider.factory.installed_candidate(
                 package, provider.preparation_template(package)
             )
+        rejection_key = package, version, candidate.withdrawn
+        if rejection_key in self.rejected_versions:
+            return None
         catalogue = provider.catalogue(package)
         for artifact in catalogue.candidates:
             if (
                 artifact.version != version
+                or str(artifact.version) != candidate.label
                 or artifact.link.is_yanked != candidate.withdrawn
             ):
                 continue
@@ -257,6 +265,7 @@ class YankCandidates:
             except MetadataInvalid as error:
                 warn_invalid_metadata(version, error)
                 self.rejections.append(str(error))
+                self.rejected_versions.add(rejection_key)
                 return None
             if prepared is not None:
                 return prepared

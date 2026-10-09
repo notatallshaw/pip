@@ -413,7 +413,10 @@ def test_invalid_constrained_source_metadata_errors_without_a_restart(
 
     assert "Nab catalogue fallback" not in result.stdout
     assert "has invalid metadata" in result.stderr
-    assert result.stdout.count(f"Processing ./direct/{rejected.name}") == 1
+    assert (
+        result.stdout.replace("\\", "/").count(f"Processing ./direct/{rejected.name}")
+        == 1
+    )
     script.assert_not_installed("app", "dep")
 
 
@@ -438,7 +441,7 @@ def test_invalid_metadata_in_mandatory_url_closure_errors_without_a_restart(
 
     assert "Nab catalogue fallback" not in result.stdout
     assert "has invalid metadata" in result.stderr
-    assert result.stdout.count(f"Processing ./{dep.name}") == 1
+    assert result.stdout.replace("\\", "/").count(f"Processing ./{dep.name}") == 1
     script.assert_not_installed("app", "dep")
 
 

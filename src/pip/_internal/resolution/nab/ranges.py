@@ -7,6 +7,7 @@ from types import MemberDescriptorType
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from pip._vendor.packaging.ranges import VersionRange
+from pip._vendor.packaging.specifiers import SpecifierSet
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
@@ -90,7 +91,7 @@ def _slot_writer(cls: type, name: str) -> Callable[[object, object], None]:
 
 
 class CandidateKey(_ImmutableSlots):
-    """Identify a distribution by its version and installer source."""
+    """Identify a distribution by exact version text and installer source."""
 
     __slots__ = __match_args__ = ("version", "source")
     _immutable_fields: ClassVar[tuple[str, ...]] = __slots__
@@ -107,39 +108,43 @@ class CandidateKey(_ImmutableSlots):
             object.__setattr__(self, "version", version)
             object.__setattr__(self, "source", source)
 
+    def _identity(self) -> tuple[Version, str, str]:
+        """Order numerically, then distinguish sources and exact version text."""
+        return self.version, self.source, str(self.version)
+
     def __eq__(self, other: object) -> bool:
-        """Compare version and source within the exact class."""
+        """Compare source and exact version text within the exact class."""
         if not isinstance(other, CandidateKey) or other.__class__ is not self.__class__:
             return NotImplemented
-        return (self.version, self.source) == (other.version, other.source)
+        return self._identity() == other._identity()
 
     def __lt__(self, other: object) -> bool:
         """Compare versions before source identifiers."""
         if not isinstance(other, CandidateKey) or other.__class__ is not self.__class__:
             return NotImplemented
-        return (self.version, self.source) < (other.version, other.source)
+        return self._identity() < other._identity()
 
     def __le__(self, other: object) -> bool:
         """Compare versions before source identifiers."""
         if not isinstance(other, CandidateKey) or other.__class__ is not self.__class__:
             return NotImplemented
-        return (self.version, self.source) <= (other.version, other.source)
+        return self._identity() <= other._identity()
 
     def __gt__(self, other: object) -> bool:
         """Compare versions before source identifiers."""
         if not isinstance(other, CandidateKey) or other.__class__ is not self.__class__:
             return NotImplemented
-        return (self.version, self.source) > (other.version, other.source)
+        return self._identity() > other._identity()
 
     def __ge__(self, other: object) -> bool:
         """Compare versions before source identifiers."""
         if not isinstance(other, CandidateKey) or other.__class__ is not self.__class__:
             return NotImplemented
-        return (self.version, self.source) >= (other.version, other.source)
+        return self._identity() >= other._identity()
 
     def __hash__(self) -> int:
-        """Hash version and source together."""
-        return hash((self.version, self.source))
+        """Hash the same source and version identity used for equality."""
+        return hash(self._identity())
 
     def __repr__(self) -> str:
         """Render the class name and its identity fields."""
@@ -223,7 +228,7 @@ class CandidateRange(_ImmutableSlots):
     def singleton(cls, candidate: CandidateKey) -> CandidateRange:
         """Return a constraint admitting this candidate identity alone."""
         return cls.for_source(
-            candidate.source, VersionRange.singleton(candidate.version)
+            candidate.source, SpecifierSet(f"==={candidate.version}").to_range()
         )
 
     @classmethod
