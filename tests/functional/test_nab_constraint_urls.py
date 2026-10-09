@@ -107,8 +107,10 @@ def test_inactive_constrained_source_is_not_prepared(
     script.assert_not_installed("dep")
 
 
+@pytest.mark.parametrize("source_exists", [False, True])
+@pytest.mark.parametrize("with_extra", [False, True])
 def test_conflicting_parent_url_cannot_replace_the_constrained_source(
-    script: PipTestEnvironment,
+    script: PipTestEnvironment, *, source_exists: bool, with_extra: bool
 ) -> None:
     sources = []
     for name in ["permitted", "other"]:
@@ -116,25 +118,30 @@ def test_conflicting_parent_url_cannot_replace_the_constrained_source(
         folder.mkdir()
         sources.append(Path(make_wheel("dep", "1").save_to_dir(folder)))
     permitted, other = sources
+    if not source_exists:
+        other.unlink()
+    name = "dep[feature]" if with_extra else "dep"
     create_basic_wheel_for_package(script, "app", "1", depends=["dep>=1"])
     make_wheel(
         "app",
         "2",
         metadata=(
             "Metadata-Version: 2.2\nName: app\nVersion: 2\n"
-            f"Requires-Dist: dep @ {other.as_uri()}\n"
+            f"Requires-Dist: {name} @ {other.as_uri()}\n"
         ),
     ).save_to_dir(script.scratch_path)
     constraints = script.scratch_path / "constraints.txt"
     constraints.write_text(f"dep @ {permitted.as_uri()}\n")
     report = script.scratch_path / "report.json"
 
-    tracked_install(
+    result = tracked_install(
         script,
         "app",
         options=("-c", str(constraints), "--report", str(report)),
     )
 
+    assert "NATIVE True" not in result.stdout
+    assert "NATIVE False" not in result.stdout
     script.assert_installed(app="1", dep="1")
     script.pip("check")
     items = {
@@ -280,5 +287,68 @@ def test_constraint_hash_checks_the_source_of_a_cached_built_wheel(
 
     assert "NATIVE True" not in result.stdout
     assert "NATIVE False" not in result.stdout
+    script.assert_installed(dep="1")
+    script.pip("check")
+
+
+def test_unconstrained_url_does_not_discard_a_working_newer_parent(
+    script: PipTestEnvironment,
+) -> None:
+    direct = script.scratch_path / "direct"
+    direct.mkdir()
+    supplied = Path(make_wheel("dep", "3").save_to_dir(direct))
+    create_basic_wheel_for_package(script, "dep", "1")
+    create_basic_wheel_for_package(script, "app", "1", depends=["dep==1"])
+    make_wheel(
+        "app",
+        "2",
+        metadata=(
+            "Metadata-Version: 2.2\nName: app\nVersion: 2\n"
+            f"Requires-Dist: dep @ {supplied.as_uri()}\n"
+        ),
+    ).save_to_dir(script.scratch_path)
+
+    result = tracked_install(script, "app")
+
+    assert "NATIVE True" in result.stdout
+    script.assert_installed(app="2", dep="3")
+    script.pip("check")
+
+
+@pytest.mark.parametrize(
+    "source_kind",
+    ["directory", "editable", pytest.param("git", marks=pytest.mark.git)],
+)
+def test_no_require_hashes_allows_an_unnamed_source_without_an_archive(
+    script: PipTestEnvironment, source_kind: str
+) -> None:
+    source = script.scratch_path / "source"
+    source.mkdir()
+    (source / "setup.py").write_text(
+        "from setuptools import setup\n"
+        "setup(name='dep', version='1', py_modules=['dep'])\n"
+    )
+    (source / "dep.py").write_text("")
+    url = source.as_uri()
+    if source_kind == "git":
+        script.run("git", "init", "-b", "main", cwd=source)
+        script.run("git", "add", ".", cwd=source)
+        script.run("git", "commit", "-q", "-m", "Create source fixture", cwd=source)
+        url = "git+" + url
+    constraints = script.scratch_path / "constraints.txt"
+    constraints.write_text(f"dep @ {url} --hash=sha256:{'1' * 64}\n")
+    requirements = script.scratch_path / "requirements.txt"
+    root = "-e " + url if source_kind == "editable" else url
+    requirements.write_text(
+        f"{root} --hash=sha256:{'1' * 64} --hash=sha256:{'2' * 64}\n"
+    )
+
+    tracked_install(
+        script,
+        "-r",
+        str(requirements),
+        options=("-c", str(constraints), "--no-require-hashes", "--no-build-isolation"),
+    )
+
     script.assert_installed(dep="1")
     script.pip("check")

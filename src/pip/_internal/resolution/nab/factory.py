@@ -383,6 +383,8 @@ class Factory:
         prepared = candidate.get_install_requirement()
         if not wanted.hash_options or wanted.hash_options == prepared.hash_options:
             return
+        if candidate.source_link.is_vcs or candidate.source_link.is_existing_dir():
+            return
         # Hash mode downloads the archive before preparing metadata.
         assert prepared.local_file_path is not None
         try:
@@ -720,6 +722,19 @@ class Factory:
             and all(is_satisfied_by(req, c) for req in requirements[identifier])
         )
 
+    def _catalogue_constraint_conflict(
+        self, ireq: InstallRequirement
+    ) -> NormalizedName | None:
+        """Return the package name when a URL violates an input constraint."""
+        link = ireq.link
+        if ireq.name is None or link is None:
+            return None
+        name = canonicalize_name(ireq.name)
+        links = self.catalogue_constraint_links.get(name, frozenset())
+        if any(not links_equivalent(link, required) for required in links):
+            return name
+        return None
+
     def _catalogue_source_is_fixed(self, ireq: InstallRequirement) -> bool:
         """Check a dependency URL against fixed roots and input constraint links."""
         if ireq.name is None or ireq.link is None:
@@ -752,6 +767,10 @@ class Factory:
             and not self.catalogue_expanding_sources
         ):
             if not self._catalogue_source_is_fixed(ireq):
+                conflict = self._catalogue_constraint_conflict(ireq)
+                if conflict is not None:
+                    yield UnsatisfiableRequirement(conflict)
+                    return
                 raise CatalogueUnsupported("URL dependency")
         if not ireq.match_markers(requested_extras):
             logger.info(
