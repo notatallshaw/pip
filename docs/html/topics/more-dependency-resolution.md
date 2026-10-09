@@ -151,8 +151,9 @@ Invalid index dependency metadata excludes that candidate version, including
 when another version is installed. An inconsistent artifact, such as a wheel whose
 metadata version disagrees with its filename, can be skipped while another
 artifact of that version is tried. An installed version excluded by fixed input
-version bounds does not change these rejection rules or require another solve
-to report a conclusive failure.
+version bounds does not change these rejection rules. Read installed dependency
+metadata can also establish a closed candidate domain, but it does not cover an
+unread source with different version text.
 
 ### Fallback: changing candidate sources or admission
 
@@ -164,12 +165,13 @@ active requirements. Pip uses it under the following conditions:
 | A dependency introduces a URL outside the prepared fixed sources and explicit-input URL closure | Its source may depend on which parent version is selected. |
 | A candidate's source must change under the same package/version key | The metadata attached to a learned clause must remain fixed. |
 | An installed package requires replacing itself | Native handling preserves pip's treatment of that installation's dependency obligations. |
-| A failed solve still has unexamined candidate metadata or installed choices | Unread metadata may supply another source or admission condition. |
+| A failed solve still has unread eligible metadata or changeable candidate sources | Unread metadata may supply another source or admission condition. |
 | The completed selection fails original requirements, constraints, prerelease or artifact checks | Pip retries with native candidate admission. |
 
 Conflicting fixed inputs are reported directly. A failed solve can also be
 reported directly when pip has complete metadata for the relevant fixed
-candidate domain. These checks retain pip's conflict and lock-file diagnostics.
+candidate domain, when dependencies are ignored, or when a mandatory fixed
+source cannot satisfy the original input bounds. These checks retain pip's conflict and lock-file diagnostics.
 A rejected constrained archive is unavailable, and another parent version can
 avoid requiring it. Invalid metadata in a mandatory source, invalid installed
 metadata, build failures and terminal index errors are reported directly.

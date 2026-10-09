@@ -60,3 +60,18 @@ def test_temporary_solver_exclusion_does_not_change_fixed_input_eligibility(
 
     assert catalogue.installed_version("probe") == Version("1")
     assert catalogue.installed_version_matches_inputs("probe")
+
+
+def test_eligible_installation_requires_its_metadata_before_certifying_failure(
+    factory: Factory,
+    provider: PipProvider,
+) -> None:
+    catalogue = installed_catalogue(factory, provider, ["probe"])
+    assert catalogue.installed_version("probe") == Version("1")
+    catalogue.catalogue("probe")
+
+    assert not catalogue.has_complete_metadata()
+
+    catalogue.select_installed("probe")
+
+    assert catalogue.has_complete_metadata()

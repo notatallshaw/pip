@@ -486,3 +486,144 @@ def test_contextual_installed_iteration_skips_invalid_index_metadata(
     )
     assert "Ignoring version 3 of app since it has invalid metadata" in result.stderr
     script.assert_installed(app="2", other="2", bridge="1", dep="1")
+
+
+@pytest.mark.parametrize("alternative", ["absent", "same", "newer"])
+def test_read_installed_metadata_can_certify_a_closed_failed_domain(
+    script: PipTestEnvironment,
+    alternative: str,
+) -> None:
+    initial = create_basic_wheel_for_package(script, "dep", "1", depends=["missing==1"])
+    script.pip("install", "--no-index", "--no-deps", initial)
+    index = script.scratch_path / "index"
+    index.mkdir()
+    if alternative != "absent":
+        version = "1" if alternative == "same" else "2"
+        wheel = make_wheel(
+            name="dep",
+            version=version,
+            metadata_updates={"Requires-Dist": "missing==2"} if version == "2" else {},
+        )
+        wheel.save_to(index / f"dep-{version}-py3-none-any.whl")
+
+    result = script.pip(
+        "install",
+        "-v",
+        "--no-index",
+        "--find-links",
+        index,
+        "dep",
+        expect_error=True,
+    )
+
+    assert "Nab catalogue certified failure" in result.stdout
+    assert "Nab catalogue fallback" not in result.stdout
+    script.assert_installed(dep="1")
+
+
+def test_installed_metadata_does_not_cover_an_unread_version_text_source(
+    script: PipTestEnvironment,
+) -> None:
+    initial = create_basic_wheel_for_package(script, "dep", "1", depends=["missing==1"])
+    script.pip("install", "--no-index", "--no-deps", initial)
+    index = script.scratch_path / "index"
+    index.mkdir()
+    make_wheel(name="dep", version="1.0").save_to(index / "dep-1.0-py3-none-any.whl")
+    other = create_basic_wheel_for_package(script, "other", "2", depends=["dep===1.0"])
+
+    result = script.pip(
+        "install",
+        "-v",
+        "--no-index",
+        "--find-links",
+        index,
+        "dep",
+        other,
+    )
+
+    assert "Nab catalogue fallback" in result.stdout
+    assert "Nab catalogue certified failure" not in result.stdout
+    script.assert_installed(dep="1.0", other="2")
+    script.pip("check")
+
+
+def test_no_deps_can_certify_failure_without_reading_possible_url_dependencies(
+    script: PipTestEnvironment,
+) -> None:
+    index = script.scratch_path / "index"
+    index.mkdir()
+    supplied = create_basic_wheel_for_package(script, "dep", "3")
+    make_wheel(name="dep", version="1").save_to(index / "dep-1-py3-none-any.whl")
+    make_wheel(
+        name="bridge",
+        version="1",
+        metadata=(
+            "Metadata-Version: 2.2\nName: bridge\nVersion: 1\n"
+            f"Requires-Dist: dep @ {supplied.as_uri()}\n"
+        ),
+    ).save_to(index / "bridge-1-py3-none-any.whl")
+
+    result = script.pip(
+        "install",
+        "-v",
+        "--no-index",
+        "--no-deps",
+        "--find-links",
+        index,
+        "dep>=3",
+        "bridge",
+        expect_error=True,
+    )
+
+    assert "Nab catalogue certified failure" in result.stdout
+    assert "Nab catalogue fallback" not in result.stdout
+    assert "No matching distribution found for dep>=3" in result.stderr
+    script.assert_not_installed("dep", "bridge")
+
+
+@pytest.mark.parametrize("rejected", [False, True])
+def test_impossible_mandatory_source_does_not_read_an_unrelated_url_parent(
+    script: PipTestEnvironment,
+    rejected: bool,
+) -> None:
+    fixed = script.scratch_path / "fixed"
+    fixed.mkdir()
+    constrained = fixed / "dep-1-py3-none-any.whl"
+    make_wheel(
+        name="dep",
+        version="1",
+        metadata_updates={"Name": "other"} if rejected else {},
+    ).save_to(constrained)
+    index = script.scratch_path / "index"
+    index.mkdir()
+    supplied = create_basic_wheel_for_package(script, "dep", "3")
+    make_wheel(
+        name="bridge",
+        version="1",
+        metadata=(
+            "Metadata-Version: 2.2\nName: bridge\nVersion: 1\n"
+            f"Requires-Dist: dep @ {supplied.as_uri()}\n"
+        ),
+    ).save_to(index / "bridge-1-py3-none-any.whl")
+    constraints = script.scratch_path / "constraints.txt"
+    constraints.write_text(f"dep @ {constrained.as_uri()}\n")
+
+    result = script.pip(
+        "install",
+        "-v",
+        "--no-index",
+        "--find-links",
+        index,
+        "-c",
+        constraints,
+        "dep>=3",
+        "bridge",
+        expect_error=True,
+    )
+
+    assert "Nab catalogue certified failure" in result.stdout
+    assert "Nab catalogue fallback" not in result.stdout
+    assert "Nab native retry" not in result.stdout
+    assert "bridge-1-py3-none-any.whl" not in result.stdout
+    assert "ResolutionImpossible" in result.stderr
+    script.assert_not_installed("dep", "bridge")
