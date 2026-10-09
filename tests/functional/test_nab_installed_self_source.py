@@ -41,7 +41,7 @@ def test_self_url_replacement_keeps_its_own_metadata(
 
 
 @pytest.mark.parametrize("fallback", [False, True])
-def test_self_url_from_an_unusable_installed_candidate_is_not_retained(
+def test_missing_removed_dependency_does_not_block_self_url_replacement(
     script: PipTestEnvironment, fallback: bool
 ) -> None:
     initial = script.scratch_path / "initial" / "selfpkg-1-py3-none-any.whl"
@@ -58,32 +58,65 @@ def test_self_url_from_an_unusable_installed_candidate_is_not_retained(
         "--find-links",
         script.scratch_path,
         "selfpkg",
+    )
+    script.assert_installed(selfpkg="2")
+    script.assert_not_installed("missing")
+    script.pip("check")
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+def test_required_replacement_dependency_still_rejects_the_source(
+    script: PipTestEnvironment, *, fallback: bool
+) -> None:
+    initial = script.scratch_path / "initial" / "selfpkg-1-py3-none-any.whl"
+    target = script.scratch_path / "target" / "selfpkg-2-py3-none-any.whl"
+    requirement = f"selfpkg @ {target.as_uri()}"
+    _self_wheel(initial, "1", [requirement])
+    _self_wheel(target, "2", [requirement, "missing==1"])
+    script.pip("install", "--no-index", "--no-deps", initial)
+    if fallback:
+        create_basic_wheel_for_package(script, "selfpkg", "3")
+
+    script.pip(
+        "install",
+        "--no-index",
+        "--find-links",
+        script.scratch_path,
+        "selfpkg",
         expect_error=not fallback,
     )
+
     script.assert_installed(selfpkg="3" if fallback else "1")
+    script.assert_not_installed("missing")
 
 
+@pytest.mark.parametrize("self_first", [False, True])
 def test_impossible_installed_dependencies_do_not_prepare_a_later_url(
-    script: PipTestEnvironment,
+    script: PipTestEnvironment, *, self_first: bool
 ) -> None:
     initial = script.scratch_path / "initial" / "selfpkg-1-py3-none-any.whl"
     target = script.scratch_path / "target" / "selfpkg-2-py3-none-any.whl"
     missing = script.scratch_path / "missing-1-py3-none-any.whl"
     requirement = f"selfpkg @ {target.as_uri()}"
+    dependencies = ["olddep<1", "olddep>=2"]
+    dependencies.insert(0 if self_first else len(dependencies), requirement)
+    dependencies.append(f"missing @ {missing.as_uri()}")
     _self_wheel(
         initial,
         "1",
-        [requirement, "olddep<1", "olddep>=2", f"missing @ {missing.as_uri()}"],
+        dependencies,
     )
     _self_wheel(target, "2", [requirement])
     create_basic_wheel_for_package(script, "selfpkg", "3")
     script.pip("install", "--no-index", "--no-deps", initial)
     script.pip("install", "--no-index", "--find-links", script.scratch_path, "selfpkg")
-    script.assert_installed(selfpkg="3")
+    script.assert_installed(selfpkg="2")
+    script.assert_not_installed("olddep", "missing")
+    script.pip("check")
 
 
 @pytest.mark.parametrize("broken", [False, True])
-def test_replaced_dependencies_are_checked_but_not_installed(
+def test_removed_dependencies_do_not_constrain_self_url_replacement(
     script: PipTestEnvironment, broken: bool
 ) -> None:
     initial = script.scratch_path / "initial" / "selfpkg-1-py3-none-any.whl"
@@ -101,14 +134,14 @@ def test_replaced_dependencies_are_checked_but_not_installed(
         "--find-links",
         script.scratch_path,
         "selfpkg",
-        expect_error=broken,
     )
-    script.assert_installed(selfpkg="1" if broken else "2")
-    script.assert_not_installed("olddep")
+    script.assert_installed(selfpkg="2")
+    script.assert_not_installed("olddep", "missing")
+    script.pip("check")
 
 
 @pytest.mark.parametrize("same_url", [False, True])
-def test_later_roots_preserve_self_replacement_obligations(
+def test_later_roots_use_self_replacement_metadata(
     script: PipTestEnvironment, same_url: bool
 ) -> None:
     initial = script.scratch_path / "initial" / "selfpkg-1-py3-none-any.whl"
@@ -136,5 +169,5 @@ def test_later_roots_preserve_self_replacement_obligations(
         "selfpkg",
         "other",
     )
-    script.assert_installed(selfpkg="2", other="1")
-    script.assert_not_installed("olddep")
+    script.assert_installed(selfpkg="2", other="2", olddep="2")
+    script.pip("check")

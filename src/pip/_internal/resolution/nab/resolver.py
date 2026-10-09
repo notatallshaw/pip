@@ -42,7 +42,6 @@ from pip._internal.resolution.nab.errors import installation_error
 from pip._internal.resolution.nab.factory import CollectedRootRequirements, Factory
 from pip._internal.resolution.nab.host import (
     NativeHost,
-    SelfRefinement,
     native_candidate,
 )
 from pip._internal.resolution.nab.provider import PipProvider
@@ -237,12 +236,6 @@ class Resolver(BaseResolver):
             for package, candidate in selected.items()
         }
         edges = solution.edges
-        if any(
-            isinstance(candidate.origin, SelfRefinement)
-            for candidate in selected.values()
-        ):
-            mapping, edges = host.installation_graph(solution.roots, mapping)
-
         graph: DependencyGraph = {None: set(solution.roots)}
         graph.update((package, set()) for package in mapping)
         for parent, child in edges:
