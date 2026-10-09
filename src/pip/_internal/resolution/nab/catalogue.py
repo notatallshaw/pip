@@ -320,7 +320,12 @@ class CatalogueProvider(BaseProvider[str, Version]):
                     package.partition("[")[0], Constraint.empty()
                 ).hashes,
             )
-            candidates = self.catalogues[package].candidates
+            allowed = self.input_bounds(package)
+            candidates = [
+                item
+                for item in self.catalogues[package].candidates
+                if item.version in allowed
+            ]
             yanked = any(item.link.is_yanked for item in candidates)
             self.has_yanked_candidates |= yanked
             if yanked or has_version_text_aliases(candidates):
@@ -406,17 +411,20 @@ class CatalogueProvider(BaseProvider[str, Version]):
             self.installed_versions[package] = self.factory.installed_version(package)
         return self.installed_versions[package]
 
+    def input_bounds(self, package: str) -> VersionRange:
+        """Intersect immutable base, extras and constraint version declarations."""
+        base = package.partition("[")[0]
+        allowed = self.roots.get(base, VersionRange.full())
+        if package != base:
+            allowed &= self.roots.get(package, VersionRange.full())
+        return allowed & self.constraints.get(base, VersionRange.full())
+
     def installed_version_matches_inputs(self, package: str) -> bool:
         """Check whether fixed input version bounds admit the installation."""
         installed = self.installed_version(package)
         if installed is None:
             return False
-        base = package.partition("[")[0]
-        allowed = self.roots.get(base, VersionRange.full())
-        if package != base:
-            allowed &= self.roots.get(package, VersionRange.full())
-        allowed &= self.constraints.get(base, VersionRange.full())
-        return installed in allowed
+        return installed in self.input_bounds(package)
 
     def select_installed(self, package: str) -> Version | None:
         """Prepare installed metadata only after choosing its version."""
@@ -782,9 +790,7 @@ class CatalogueProvider(BaseProvider[str, Version]):
         ):
             return False
         for package, catalogue in self.catalogues.items():
-            allowed = self.roots.get(
-                package, VersionRange.full()
-            ) & self.constraints.get(package, VersionRange.full())
+            allowed = self.input_bounds(package)
             for artifact in catalogue.candidates:
                 # Versions excluded by fixed inputs cannot introduce a dependency.
                 if artifact.version not in allowed:
