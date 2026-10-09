@@ -58,6 +58,8 @@ from .base import (
     Requirement,
     RequirementCause,
     intersect_hash_options,
+    source_link_without_hashes,
+    source_links_equivalent,
 )
 from .candidates import (
     AlreadyInstalledCandidate,
@@ -151,6 +153,7 @@ class Factory:
         self._ignore_requires_python = ignore_requires_python
         self.catalogue_only = False
         self.catalogue_sources: dict[str, BaseCandidate] = {}
+        self._catalogue_hash_checks: set[tuple[Link, str]] = set()
         self.catalogue_constraint_links: dict[str, frozenset[Link]] = {}
         self._input_options: dict[str, Constraint] = {}
         self.catalogue_expanding_sources = False
@@ -196,6 +199,7 @@ class Factory:
         finally:
             self.catalogue_only = False
             self.catalogue_sources = {}
+            self._catalogue_hash_checks.clear()
             self.catalogue_constraint_links = {}
             self.catalogue_expanding_sources = False
             self._build_failures = failures
@@ -352,7 +356,10 @@ class Factory:
                 for package, options in self._input_options.items()
                 if options.hash_options
                 and options.links
-                and all(links_equivalent(link, required) for required in options.links)
+                and all(
+                    source_links_equivalent(link, required)
+                    for required in options.links
+                )
             ]
             if len(matching) == 1:
                 name = canonicalize_name(matching[0])
@@ -360,15 +367,30 @@ class Factory:
         if options is None or not options.hash_options:
             return name, template
         if options.links and not all(
-            links_equivalent(link, required) for required in options.links
+            source_links_equivalent(link, required) for required in options.links
         ):
             return name, template
         hash_options = intersect_hash_options(
             options.hash_options, template.hash_options
         )
-        if hash_options != template.hash_options:
+        original = template.original_link
+        narrow_original = (
+            template.user_supplied
+            and isinstance(original, Link)
+            and original.hash is not None
+            and original.hash_name is not None
+            and not Hashes(hash_options).is_hash_allowed(
+                original.hash_name, original.hash.lower()
+            )
+        )
+        if hash_options != template.hash_options or narrow_original:
             template = copy.copy(template)
             template.hash_options = hash_options
+            if narrow_original:
+                assert isinstance(original, Link)
+                template.original_link = source_link_without_hashes(original)
+                if template.link is original:
+                    template.link = template.original_link
         return name, template
 
     def _check_input_hashes(
@@ -381,19 +403,49 @@ class Factory:
             candidate.source_link, template, candidate.project_name
         )
         prepared = candidate.get_install_requirement()
-        if not wanted.hash_options or wanted.hash_options == prepared.hash_options:
+        if not wanted.hash_options:
             return
         if candidate.source_link.is_vcs or candidate.source_link.is_existing_dir():
             return
-        # Hash mode downloads the archive before preparing metadata.
+        hashes = Hashes(wanted.hash_options)
+        if self._native_input_hashes_known(prepared, wanted, hashes):
+            return
+        info = prepared.download_info
+        if (
+            prepared.is_wheel_from_cache
+            and info is not None
+            and info.archive_info is not None
+            and info.archive_info.hashes is not None
+            and hashes.has_one_of(info.archive_info.hashes)
+        ):
+            return
+        if prepared.local_file_path is None:
+            self.preparer.prepare_linked_requirements_more([prepared])
         assert prepared.local_file_path is not None
         try:
-            wanted.hashes(trust_internet=False).check_against_path(
-                prepared.local_file_path
-            )
+            hashes.check_against_path(prepared.local_file_path)
         except HashError as error:
             error.req = wanted
             raise
+
+    def _native_input_hashes_known(
+        self, prepared: InstallRequirement, wanted: InstallRequirement, hashes: Hashes
+    ) -> bool:
+        """Whether native preparation enforces the complete input checksum set."""
+        if wanted.hash_options != prepared.hash_options:
+            return False
+        link = prepared.link
+        if self.preparer.require_hashes:
+            link = (
+                prepared.original_link
+                if prepared.is_direct and prepared.user_supplied
+                else None
+            )
+        if not isinstance(link, Link) or link.hash is None:
+            return True
+        return link.hash_name is not None and hashes.is_hash_allowed(
+            link.hash_name, link.hash.lower()
+        )
 
     def _iter_found_candidates(
         self,
@@ -731,7 +783,7 @@ class Factory:
             return None
         name = canonicalize_name(ireq.name)
         links = self.catalogue_constraint_links.get(name, frozenset())
-        if any(not links_equivalent(link, required) for required in links):
+        if any(not source_links_equivalent(link, required) for required in links):
             return name
         return None
 
@@ -742,11 +794,44 @@ class Factory:
         name = canonicalize_name(ireq.name)
         known = self.catalogue_sources.get(name)
         if known is not None:
-            return known.source_link is not None and links_equivalent(
-                known.source_link, ireq.link
+            return (
+                known.source_link is not None
+                and source_links_equivalent(known.source_link, ireq.link)
+                and self._catalogue_link_hash_known(ireq, known)
             )
         links = self.catalogue_constraint_links.get(name, frozenset())
         return bool(links) and all(links_equivalent(link, ireq.link) for link in links)
+
+    def _catalogue_link_hash_known(
+        self, ireq: InstallRequirement, candidate: Candidate
+    ) -> bool:
+        """Verify a dependency checksum against its already-prepared archive."""
+        assert ireq.link is not None
+        if candidate.source_link is not None and links_equivalent(
+            candidate.source_link, ireq.link
+        ):
+            return True
+        hashes = ireq.link.as_hashes()
+        if not hashes:
+            return True
+        prepared = candidate.get_install_requirement()
+        if (
+            prepared is None
+            or prepared.local_file_path is None
+            or prepared.link is None
+            or not source_links_equivalent(prepared.link, ireq.link)
+        ):
+            return False
+        key = ireq.link, prepared.local_file_path
+        if key in self._catalogue_hash_checks:
+            return True
+        try:
+            hashes.check_against_path(prepared.local_file_path)
+        except HashError as error:
+            error.req = ireq
+            raise
+        self._catalogue_hash_checks.add(key)
+        return True
 
     def _make_requirements_from_install_req(
         self, ireq: InstallRequirement, requested_extras: Iterable[str]
@@ -760,6 +845,7 @@ class Factory:
                 (or link) and one with the extra. This allows centralized constraint
                 handling for the base, resulting in fewer candidate rejections.
         """
+        fixed_candidate: LinkCandidate | None = None
         if (
             self.catalogue_only
             and ireq.link is not None
@@ -772,6 +858,10 @@ class Factory:
                     yield UnsatisfiableRequirement(conflict)
                     return
                 raise CatalogueUnsupported("URL dependency")
+            assert ireq.name is not None
+            known = self.catalogue_sources.get(canonicalize_name(ireq.name))
+            if isinstance(known, LinkCandidate):
+                fixed_candidate = known
         if not ireq.match_markers(requested_extras):
             logger.info(
                 "Ignoring %s: markers '%s' don't match your environment",
@@ -784,15 +874,15 @@ class Factory:
             yield SpecifierRequirement(ireq)
         else:
             self._fail_if_link_is_unsupported_wheel(ireq.link)
-            # Always make the link candidate for the base requirement to make it
-            # available to `find_candidates` for explicit candidate lookup for any
-            # set of extras.
-            # The extras are required separately via a second requirement.
-            cand = self._make_base_candidate_from_link(
-                ireq.link,
-                template=install_req_drop_extras(ireq) if ireq.extras else ireq,
-                name=canonicalize_name(ireq.name) if ireq.name else None,
-                version=None,
+            cand = (
+                fixed_candidate
+                if fixed_candidate is not None
+                else self._make_base_candidate_from_link(
+                    ireq.link,
+                    template=install_req_drop_extras(ireq) if ireq.extras else ireq,
+                    name=canonicalize_name(ireq.name) if ireq.name else None,
+                    version=None,
+                )
             )
             if cand is None:
                 # There's no way we can satisfy a URL requirement if the underlying

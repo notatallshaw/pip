@@ -8,8 +8,13 @@ from tests.lib import PipTestEnvironment, create_basic_wheel_for_package
 
 @pytest.mark.parametrize("with_groups", [False, True])
 @pytest.mark.parametrize("self_satisfied", [False, True])
+@pytest.mark.parametrize("transitive", [False, True])
 def test_installed_self_requirement_uses_only_selected_metadata(
-    script: PipTestEnvironment, *, with_groups: bool, self_satisfied: bool
+    script: PipTestEnvironment,
+    *,
+    with_groups: bool,
+    self_satisfied: bool,
+    transitive: bool,
 ) -> None:
     initial = create_basic_wheel_for_package(
         script,
@@ -25,8 +30,12 @@ def test_installed_self_requirement_uses_only_selected_metadata(
     create_basic_wheel_for_package(script, "olddep", "2")
     if with_groups:
         create_basic_wheel_for_package(script, "olddep", "1.0")
+    if transitive:
+        create_basic_wheel_for_package(script, "parent", "1", depends=["app"])
 
-    result = tracked_install(script, "app", "other", ignore_installed=False)
+    result = tracked_install(
+        script, "parent" if transitive else "app", "other", ignore_installed=False
+    )
 
     assert "NATIVE True" not in result.stdout
     assert "NATIVE False" not in result.stdout
