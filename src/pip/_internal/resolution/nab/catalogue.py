@@ -74,15 +74,10 @@ if TYPE_CHECKING:
     DependencyRecord = tuple[tuple[Requirement, ...], dict[str, VersionRange]]
 
 logger = logging.getLogger(__name__)
-_REORDER_AFTER_VERSIONS = 8
 
 
 class _TryYankedResolution(Exception):
     """Continue fixed-catalogue search with conditional yank permission."""
-
-
-class _TryRequestedOrder(Exception):
-    """Abandon search state without discarding fixed-catalogue metadata."""
 
 
 def cached_dependency_span(
@@ -182,8 +177,6 @@ class CatalogueProvider(BaseProvider[str, Version]):
         self.pending_dependencies: list[Incompatibility[str, Version]] = []
         self.matching_counts: dict[tuple[str, RangeProtocol[Version]], int] = {}
         self.universes: dict[str, list[Version]] = {}
-        self.prepared_counts: dict[str, int] = {}
-        self.requested_order = False
         self.explicit_bases: dict[str, BaseCandidate] = {}
         self.explicit_candidates: dict[str, Candidate] = {}
         self.source_causes: dict[str, RequirementCause] = {}
@@ -480,13 +473,6 @@ class CatalogueProvider(BaseProvider[str, Version]):
                 return self.select_installed(package)
             key = package, version
             if key not in self.candidates:
-                prepared = self.prepared_counts.get(package, 0)
-                if (
-                    not self.requested_order
-                    and prepared >= _REORDER_AFTER_VERSIONS
-                    and package not in self.roots
-                ):
-                    raise _TryRequestedOrder(package)
                 try:
                     candidate = catalogue.prepare(artifact)
                 except MetadataInvalid as error:
@@ -496,7 +482,6 @@ class CatalogueProvider(BaseProvider[str, Version]):
                 if candidate is None:
                     continue
                 self.remember(candidate)
-                self.prepared_counts[package] = prepared + 1
             if self.precheck_dependencies(package, version):
                 return None
             return version
@@ -598,10 +583,8 @@ class CatalogueProvider(BaseProvider[str, Version]):
         version_range: RangeProtocol[Version],
         conflict_counts: Mapping[str, int],
         culprit_counts: Mapping[str, int] | None = None,
-    ) -> (
-        tuple[int, bool, int | float, int, bool, str]
-        | tuple[int, int, bool, int | float, str]
-    ):
+    ) -> tuple[int, int, int | float, int, bool, str]:
+        """Try empty domains and forced choices before requested-package order."""
         key = package, version_range
         if key not in self.matching_counts:
             self.matching_counts[key] = self.matching_count(package, version_range)
@@ -611,20 +594,12 @@ class CatalogueProvider(BaseProvider[str, Version]):
             culprit_counts.get(package, 0) if culprit_counts else 0,
             culprit_counts,
         )
-        if self.requested_order:
-            return (
-                tier,
-                self.matching_counts[key] != 1,
-                self.collected.user_requested.get(package, float("inf")),
-                self.matching_counts[key],
-                "[" not in package,
-                package,
-            )
         return (
             tier,
+            min(self.matching_counts[key], 2),
+            self.collected.user_requested.get(package, float("inf")),
             self.matching_counts[key],
             "[" not in package,
-            self.collected.user_requested.get(package, float("inf")),
             package,
         )
 
@@ -685,16 +660,6 @@ class CatalogueProvider(BaseProvider[str, Version]):
                 self.reject_input(package.partition("[")[0])
         self.expand_fixed_sources()
         try:
-            try:
-                return self._solve_once(reporter)
-            except _TryRequestedOrder as error:
-                logger.info(
-                    "Nab catalogue reordered after repeated preparation of %s",
-                    str(error),
-                )
-                self.requested_order = True
-                self.solution_ranges = {}
-                self.pending_dependencies.clear()
             return self._solve_once(reporter)
         except _TryYankedResolution:
             self.yank_resolution = True
