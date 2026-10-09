@@ -744,13 +744,30 @@ class CatalogueProvider(BaseProvider[str, Version]):
                 raise catalogue_installation_error(error, self) from error
             raise
 
+    def has_unavailable_input_source(self) -> bool:
+        """Check mandatory fixed sources against the original input version bounds."""
+        for package, allowed in self.roots.items():
+            base = package.partition("[")[0]
+            if base in self.unavailable_sources:
+                return True
+            candidate = self.explicit_bases.get(base)
+            if candidate is None:
+                continue
+            allowed &= self.constraints.get(base, VersionRange.full())
+            if candidate.version not in allowed:
+                return True
+        return False
+
     def has_complete_metadata(self) -> bool:
         """Check metadata coverage for the fixed domain used by this attempt."""
-        if any(
-            self.installed_version_matches_inputs(package)
-            for package in self.installed_versions
-        ):
-            return False
+        if self.native.ignore_dependencies or self.has_unavailable_input_source():
+            return True
+        for package, installed in self.installed_versions.items():
+            if (
+                self.installed_version_matches_inputs(package)
+                and (package, installed) not in self.dependencies
+            ):
+                return False
         referenced = set(self.roots)
         for _, dependencies in self.dependencies.values():
             referenced.update(dependencies)
@@ -773,6 +790,9 @@ class CatalogueProvider(BaseProvider[str, Version]):
                 if artifact.version not in allowed:
                     continue
                 if (package, artifact.version) in self.dependencies:
+                    candidate = self.candidates[package, artifact.version]
+                    if str(candidate.version) != str(artifact.version):
+                        return False
                     continue
                 if artifact.version not in self.rejected_versions.get(package, ()):
                     return False

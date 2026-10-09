@@ -46,7 +46,7 @@ class PipProvider:
     ) -> None:
         self._factory = factory
         self._constraints = constraints
-        self._ignore_dependencies = ignore_dependencies
+        self.ignore_dependencies = ignore_dependencies
         self._upgrade_strategy = upgrade_strategy
         self._user_requested = user_requested
         self._user_requested_projects = {
@@ -138,7 +138,7 @@ class PipProvider:
 
     def get_dependencies(self, candidate: Candidate) -> Iterable[Requirement]:
         """Read metadata lazily, honoring --no-deps while checking Requires-Python."""
-        with_requires = not self._ignore_dependencies
+        with_requires = not self.ignore_dependencies
         # iter_dependencies() can perform nontrivial work so delay until needed.
         return (r for r in candidate.iter_dependencies(with_requires) if r is not None)
 
