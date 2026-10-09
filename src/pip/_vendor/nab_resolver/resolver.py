@@ -28,7 +28,7 @@ from . import conflict, decide, incompat_index, propagate
 from ._compat import override
 from .decision_queue import DecisionQueue
 from .deferred import DeferredChoices
-from .errors import ResolutionError
+from .errors import ResolutionError, ResolutionLimitError
 from .partial_solution import PartialSolution
 from .ranges import Range
 from .result import build_solution_data
@@ -880,7 +880,7 @@ class Resolver(Generic[PackageType, VersionType]):
             )
 
         exceeded_message = f"Resolution exceeded {self.max_iterations} iterations"
-        raise ResolutionError(exceeded_message)
+        raise ResolutionLimitError(exceeded_message)
 
     def _handle_conflict(
         self,

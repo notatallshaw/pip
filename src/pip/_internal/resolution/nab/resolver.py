@@ -10,14 +10,21 @@ from collections import defaultdict
 from typing import Any, NamedTuple
 
 from pip._vendor.nab_resolver.candidate_provider import CandidateProvider
-from pip._vendor.nab_resolver.errors import ResolutionError
+from pip._vendor.nab_resolver.errors import (
+    ResolutionError,
+    ResolutionTerminatedError,
+)
 from pip._vendor.nab_resolver.resolver import Resolver as NabResolver
 from pip._vendor.nab_resolver.resolver import ResolverObserver
 from pip._vendor.packaging.utils import canonicalize_name
 from pip._vendor.packaging.version import Version
 
 from pip._internal.cache import WheelCache
-from pip._internal.exceptions import InvalidInstalledPackage, PipError
+from pip._internal.exceptions import (
+    InstallationError,
+    InvalidInstalledPackage,
+    PipError,
+)
 from pip._internal.index.package_finder import PackageFinder
 from pip._internal.operations.prepare import RequirementPreparer
 from pip._internal.req.constructors import install_req_extend_extras
@@ -106,6 +113,8 @@ class Resolver(BaseResolver):
         provisional = True
         try:
             result = self._resolve_catalogue(collected)
+        except ResolutionTerminatedError as error:
+            raise InstallationError(str(error)) from error
         except ResolutionError as error:
             logger.info("Nab catalogue fallback: %s: %s", type(error).__name__, error)
             provisional = False
@@ -206,6 +215,8 @@ class Resolver(BaseResolver):
                 solution, constraints
             ):
                 return None
+        except ResolutionTerminatedError as error:
+            raise InstallationError(str(error)) from error
         except (ResolutionError, PipError) as error:
             if isinstance(error, InvalidInstalledPackage):
                 raise

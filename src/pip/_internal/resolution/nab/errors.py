@@ -6,7 +6,7 @@ from collections import Counter
 from typing import TYPE_CHECKING, Any, cast
 
 from pip._vendor.nab_resolver.candidate_provider import CandidateProvider
-from pip._vendor.nab_resolver.errors import ResolutionError
+from pip._vendor.nab_resolver.errors import ResolutionError, ResolutionTerminatedError
 from pip._vendor.nab_resolver.root import ROOT
 from pip._vendor.nab_resolver.types import Incompatibility, IncompatibilityCause, Term
 from pip._vendor.packaging.ranges import VersionRange
@@ -29,6 +29,8 @@ def yanked_installation_error(
     error: ResolutionError, proxy: YankProxyProvider
 ) -> Exception:
     """Render withdrawal-group proofs using the original pip declarations."""
+    if isinstance(error, ResolutionTerminatedError):
+        return InstallationError(str(error))
     selected = _select_requested_pairs(_yanked_external_clauses(error, proxy))
     provider = proxy.catalogue.provider
     records: list[RequirementCause] = []
@@ -97,7 +99,7 @@ def catalogue_installation_error(
     error: ResolutionError, provider: CatalogueProvider
 ) -> Exception:
     """Render a closed-catalogue proof using the original pip requirements."""
-    if error.incompatibility is None:
+    if isinstance(error, ResolutionTerminatedError) or error.incompatibility is None:
         return InstallationError(str(error))
     selected = _select_requested_pairs(_external_clauses(error.incompatibility))
     records: list[RequirementCause] = []
@@ -132,7 +134,7 @@ def installation_error(
     constraints: dict[str, Constraint],
 ) -> Exception:
     """Render native conflict causes, or the solver error when no causes survive."""
-    if error.incompatibility is None:
+    if isinstance(error, ResolutionTerminatedError) or error.incompatibility is None:
         return InstallationError(str(error))
 
     clauses = _external_clauses(error.incompatibility)

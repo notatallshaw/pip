@@ -1,15 +1,18 @@
 diff --git a/src/pip/_vendor/nab_resolver/__init__.py b/src/pip/_vendor/nab_resolver/__init__.py
-index e7f4a80..d49b9fc 100644
+index e7f4a80..34ea8f1 100644
 --- a/src/pip/_vendor/nab_resolver/__init__.py
 +++ b/src/pip/_vendor/nab_resolver/__init__.py
-@@ -4,7 +4,14 @@ The supported API is the module paths below.  They will not move without a
+@@ -4,7 +4,16 @@ The supported API is the module paths below.  They will not move without a
  major version bump.  Everything else in the package is internal and may be
  renamed or relocated in any release.
  
+-    nab_resolver.errors     ResolutionError
 +    nab_resolver.candidate_provider
 +                           CandidateHost, CandidateProvider,
 +                           CandidateRequirement, PreparedCandidate
-     nab_resolver.errors     ResolutionError
++    nab_resolver.errors     ResolutionError, ResolutionInvariantError,
++                            ResolutionLimitError, ResolutionStalledError,
++                            ResolutionTerminatedError
 +    nab_resolver.priority   CONFLICT_THRESHOLD, CULPRIT_DEMOTE_THRESHOLD,
 +                            MAX_PRECHECK_BACKTRACKS, PRECHECK_REJECTION_THRESHOLD,
 +                            TIER_AFFECTED, TIER_CULPRIT, TIER_NORMAL,
@@ -573,8 +576,30 @@ index 0000000..14be249
 +        return (
 +            (package, candidate) for (package, _), candidate in self._selected.items()
 +        )
+diff --git a/src/pip/_vendor/nab_resolver/conflict.py b/src/pip/_vendor/nab_resolver/conflict.py
+index 48119d5..718223a 100644
+--- a/src/pip/_vendor/nab_resolver/conflict.py
++++ b/src/pip/_vendor/nab_resolver/conflict.py
+@@ -11,7 +11,7 @@ from __future__ import annotations
+ 
+ from typing import TYPE_CHECKING, Any
+ 
+-from .errors import ResolutionError
++from .errors import ResolutionError, ResolutionStalledError
+ from .incompat_index import add_incompatibility
+ from .partial_solution import PartialSolution
+ from .report import format_error, prior_cause
+@@ -201,7 +201,7 @@ def conflict_resolution(
+         "a resolver bug rather than an unsatisfiable requirement. Stalled on "
+         f"{current_incompatibility!r}"
+     )
+-    raise ResolutionError(stalled_message, incompatibility=current_incompatibility)
++    raise ResolutionStalledError(stalled_message, incompatibility=current_incompatibility)
+ 
+ 
+ def update_culprit_counts(
 diff --git a/src/pip/_vendor/nab_resolver/decide.py b/src/pip/_vendor/nab_resolver/decide.py
-index 9dd16ee..16f3954 100644
+index 9dd16ee..aebf41c 100644
 --- a/src/pip/_vendor/nab_resolver/decide.py
 +++ b/src/pip/_vendor/nab_resolver/decide.py
 @@ -11,10 +11,13 @@ from __future__ import annotations
@@ -609,7 +634,7 @@ index 9dd16ee..16f3954 100644
  
      Prefers ``is_ready`` packages so resolution keeps making progress while
      other listings/metadata are still in flight.  ``begin_decision_scan`` marks
-@@ -36,12 +42,28 @@ def choose_package_to_decide(resolver: Resolver[Any, Any]) -> Any | None:
+@@ -36,14 +42,30 @@ def choose_package_to_decide(resolver: Resolver[Any, Any]) -> Any | None:
      across scans, so one that moves without the solution or ``priority_epoch``
      moving is never read again.
  
@@ -638,6 +663,8 @@ index 9dd16ee..16f3954 100644
 +        )
 +
      key_inputs_arrived = resolver.provider.begin_decision_scan()
+ 
+     conflict_counts = resolver.stats.package_conflict_counts
 @@ -71,21 +93,36 @@ def choose_package_to_decide(resolver: Resolver[Any, Any]) -> Any | None:
              tiebreak_cache[package] = tiebreak
          return (ready_penalty, priority, tiebreak)
@@ -916,10 +943,21 @@ index 0000000..5fdb7f8
 +        self.derivations = derivations
 +        self.decisions = decisions
 diff --git a/src/pip/_vendor/nab_resolver/errors.py b/src/pip/_vendor/nab_resolver/errors.py
-index 08f923e..ecb4b19 100644
+index 08f923e..7b29579 100644
 --- a/src/pip/_vendor/nab_resolver/errors.py
 +++ b/src/pip/_vendor/nab_resolver/errors.py
-@@ -27,10 +27,10 @@ class ResolutionError(Exception):
+@@ -13,6 +13,10 @@ if TYPE_CHECKING:
+ 
+ __all__ = [
+     "ResolutionError",
++    "ResolutionInvariantError",
++    "ResolutionLimitError",
++    "ResolutionStalledError",
++    "ResolutionTerminatedError",
+ ]
+ 
+ 
+@@ -27,10 +31,10 @@ class ResolutionError(Exception):
      None where the resolver stopped before proving one. Walk ``cause_left`` and
      ``cause_right`` to trace the full proof.
  
@@ -927,13 +965,33 @@ index 08f923e..ecb4b19 100644
 -    leaves ``incompatibility`` None, and a stalled conflict-resolution loop,
 -    which attaches one but reports a resolver bug. Neither proves the
 -    requirements unsatisfiable.
-+    Exceeding ``max_iterations`` leaves ``incompatibility`` None.
-+    A stalled conflict-resolution loop attaches one but reports a resolver bug.
-+    Neither case proves the requirements unsatisfiable.
++    ``ResolutionTerminatedError`` identifies a limit or resolver fault.
++    Its incompatibility, when present, is diagnostic rather than a proof
++    that the requirements are unsatisfiable.
 +    Provisional assumptions also make a derived failure inconclusive.
  
      ``verbose_message`` is the same report at more depth, set by whatever
      augments the error with what the resolve knows beyond the derivation.
+@@ -49,3 +53,19 @@ class ResolutionError(Exception):
+         super().__init__(message)
+         self.incompatibility = incompatibility
+         self.verbose_message: str | None = None
++
++
++class ResolutionTerminatedError(ResolutionError):
++    """Resolution stopped because of a resource limit or resolver fault."""
++
++
++class ResolutionLimitError(ResolutionTerminatedError):
++    """Resolution exhausted its work budget without proving unsatisfiability."""
++
++
++class ResolutionInvariantError(ResolutionTerminatedError):
++    """A provider or solver returned inconsistent state."""
++
++
++class ResolutionStalledError(ResolutionInvariantError):
++    """Conflict resolution stopped making progress; its graph is diagnostic."""
 diff --git a/src/pip/_vendor/nab_resolver/priority.py b/src/pip/_vendor/nab_resolver/priority.py
 new file mode 100644
 index 0000000..90178ab
@@ -1064,17 +1122,19 @@ index 52e2ac9..9141910 100644
      cause: IncompatibilityCause,
      terms: Sequence[Term[Any, Any]],
 diff --git a/src/pip/_vendor/nab_resolver/resolver.py b/src/pip/_vendor/nab_resolver/resolver.py
-index 72787f5..60e6eb9 100644
+index 72787f5..602e493 100644
 --- a/src/pip/_vendor/nab_resolver/resolver.py
 +++ b/src/pip/_vendor/nab_resolver/resolver.py
-@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any, Final, Generic, Protocol
+@@ -27,7 +27,8 @@ from typing import TYPE_CHECKING, Any, Final, Generic, Protocol
  from . import conflict, decide, incompat_index, propagate
  from ._compat import override
  from .decision_queue import DecisionQueue
+-from .errors import ResolutionError
 +from .deferred import DeferredChoices
- from .errors import ResolutionError
++from .errors import ResolutionError, ResolutionLimitError
  from .partial_solution import PartialSolution
  from .ranges import Range
+ from .result import build_solution_data
 @@ -45,7 +46,7 @@ from .types import (
  )
  
@@ -1233,7 +1293,7 @@ index 72787f5..60e6eb9 100644
          self._add_root_requirements(_as_root_requirements(requirements))
  
          # Threshold doubles each restart (geometric schedule).
-@@ -781,13 +852,32 @@ class Resolver(Generic[PackageType, VersionType]):
+@@ -781,16 +852,35 @@ class Resolver(Generic[PackageType, VersionType]):
                  continue
  
              # Phase 3: Decision making.
@@ -1269,7 +1329,11 @@ index 72787f5..60e6eb9 100644
 +            )
  
          exceeded_message = f"Resolution exceeded {self.max_iterations} iterations"
-         raise ResolutionError(exceeded_message)
+-        raise ResolutionError(exceeded_message)
++        raise ResolutionLimitError(exceeded_message)
+ 
+     def _handle_conflict(
+         self,
 @@ -799,6 +889,8 @@ class Resolver(Generic[PackageType, VersionType]):
          restarts_remaining: int,
      ) -> tuple[Any, int, int]:
