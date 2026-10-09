@@ -1,7 +1,37 @@
 from pathlib import Path
 
-from tests.lib import PipTestEnvironment, create_basic_wheel_for_package
+from tests.lib import PipTestEnvironment, TestPipResult, create_basic_wheel_for_package
 from tests.lib.wheel import make_wheel
+
+CATALOGUE_PROBE = """\
+import runpy
+from pip._internal.resolution.nab.catalogue import CatalogueProvider
+
+original = CatalogueProvider._solve_once
+def solve(provider, reporter):
+    print("CATALOGUE_SOLVE", flush=True)
+    return original(provider, reporter)
+CatalogueProvider._solve_once = solve
+runpy.run_module("pip", run_name="__main__", alter_sys=True)
+"""
+
+
+def tracked_catalogue_install(
+    script: PipTestEnvironment, *requirements: str
+) -> TestPipResult:
+    """Count actual catalogue solver attempts during an offline installation."""
+    probe = script.scratch_path / "catalogue_probe.py"
+    probe.write_text(CATALOGUE_PROBE)
+    return script.run(
+        "python",
+        str(probe),
+        "install",
+        "--ignore-installed",
+        "--no-index",
+        "--find-links",
+        str(script.scratch_path),
+        *requirements,
+    )
 
 
 def blocked_parent_wheels(
@@ -25,22 +55,14 @@ def blocked_parent_wheels(
     return apps, parents
 
 
-def test_catalogue_reorders_without_preparing_cached_versions_again(
+def test_requested_roots_resolve_without_restarting_the_catalogue(
     script: PipTestEnvironment,
 ) -> None:
     apps, parents = blocked_parent_wheels(script)
-    result = script.pip(
-        "install",
-        "--ignore-installed",
-        "--no-index",
-        "--find-links",
-        script.scratch_path,
-        "app",
-        "hub",
-    )
+    result = tracked_catalogue_install(script, "app", "hub")
 
     script.assert_installed(app="16", parent="24", hub="1", blocker="1")
-    assert result.stdout.count("Nab catalogue reordered") == 1
+    assert result.stdout.splitlines().count("CATALOGUE_SOLVE") == 1
     assert "Nab catalogue success" in result.stdout
     assert sum(wheel.name in result.stdout for wheel in apps) == 1
     assert sum(wheel.name in result.stdout for wheel in parents) == 24
@@ -53,22 +75,14 @@ def test_catalogue_reorders_without_preparing_cached_versions_again(
     )
 
 
-def test_catalogue_reorders_only_once_when_the_second_order_also_backtracks(
+def test_root_priority_preserves_backtracking_when_the_first_root_is_blocking(
     script: PipTestEnvironment,
 ) -> None:
     apps, parents = blocked_parent_wheels(script)
-    result = script.pip(
-        "install",
-        "--ignore-installed",
-        "--no-index",
-        "--find-links",
-        script.scratch_path,
-        "hub",
-        "app",
-    )
+    result = tracked_catalogue_install(script, "hub", "app")
 
     script.assert_installed(app="16", parent="24", hub="1", blocker="1")
-    assert result.stdout.count("Nab catalogue reordered") == 1
+    assert result.stdout.splitlines().count("CATALOGUE_SOLVE") == 1
     assert "Nab catalogue success" in result.stdout
     assert sum(wheel.name in result.stdout for wheel in apps) > 1
     assert sum(wheel.name in result.stdout for wheel in parents) == 24
@@ -81,7 +95,7 @@ def test_catalogue_reorders_only_once_when_the_second_order_also_backtracks(
     )
 
 
-def test_catalogue_still_falls_back_for_a_url_discovered_after_reordering(
+def test_root_priority_keeps_contextual_fallback_for_a_later_url(
     script: PipTestEnvironment,
 ) -> None:
     blocked_parent_wheels(script)
@@ -99,41 +113,22 @@ def test_catalogue_still_falls_back_for_a_url_discovered_after_reordering(
             ),
         )
         wheel.save_to_dir(script.scratch_path)
-    result = script.pip(
-        "install",
-        "--ignore-installed",
-        "--no-index",
-        "--find-links",
-        script.scratch_path,
-        "app",
-        "hub",
-        "url-parent",
-    )
+    result = tracked_catalogue_install(script, "app", "hub", "url-parent")
 
     script.assert_installed(
         app="16", parent="24", hub="1", blocker="1", leaf="1", **{"url-parent": "32"}
     )
-    assert result.stdout.index("Nab catalogue reordered") < result.stdout.index(
-        "Nab catalogue fallback"
-    )
+    assert result.stdout.splitlines().count("CATALOGUE_SOLVE") == 1
     assert "CatalogueUnsupported: URL dependency" in result.stdout
 
 
-def test_catalogue_keeps_size_first_order_while_scanning_a_requested_root(
+def test_requested_wide_root_precedes_the_narrow_root_and_its_dependencies(
     script: PipTestEnvironment,
 ) -> None:
     _, parents = blocked_parent_wheels(script)
-    result = script.pip(
-        "install",
-        "--ignore-installed",
-        "--no-index",
-        "--find-links",
-        script.scratch_path,
-        "parent",
-        "hub",
-    )
+    result = tracked_catalogue_install(script, "parent", "hub")
 
     script.assert_installed(parent="24", hub="1", blocker="1")
-    assert "Nab catalogue reordered" not in result.stdout
+    assert result.stdout.splitlines().count("CATALOGUE_SOLVE") == 1
     assert "Nab catalogue success" in result.stdout
-    assert sum(wheel.name in result.stdout for wheel in parents) == 24
+    assert sum(wheel.name in result.stdout for wheel in parents) == 1
