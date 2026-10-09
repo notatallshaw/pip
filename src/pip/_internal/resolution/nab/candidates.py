@@ -186,7 +186,7 @@ class _InstallRequirementBackedCandidate(Candidate):
         return False
 
     @property
-    def source_link(self) -> Link | None:
+    def source_link(self) -> Link:
         return self._source_link
 
     @property
@@ -273,7 +273,7 @@ class _InstallRequirementBackedCandidate(Candidate):
         for r in requires:
             yield from self._factory.make_requirements_from_spec(str(r), self._ireq)
 
-    def get_install_requirement(self) -> InstallRequirement | None:
+    def get_install_requirement(self) -> InstallRequirement:
         return self._ireq
 
 
