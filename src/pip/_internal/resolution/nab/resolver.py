@@ -16,7 +16,7 @@ from pip._vendor.packaging.utils import canonicalize_name
 from pip._vendor.packaging.version import Version
 
 from pip._internal.cache import WheelCache
-from pip._internal.exceptions import InvalidInstalledPackage, MetadataInvalid, PipError
+from pip._internal.exceptions import InvalidInstalledPackage, PipError
 from pip._internal.index.package_finder import PackageFinder
 from pip._internal.operations.prepare import RequirementPreparer
 from pip._internal.req.constructors import install_req_extend_extras
@@ -148,10 +148,7 @@ class Resolver(BaseResolver):
                 if not provider.validate(solution):
                     logger.info("Nab catalogue fallback: final admission")
                     return None
-        except (
-            CatalogueUnsupported,
-            MetadataInvalid,
-        ) as error:
+        except CatalogueUnsupported as error:
             logger.info("Nab catalogue fallback: %s: %s", type(error).__name__, error)
             return None
         logger.info("Nab catalogue success")

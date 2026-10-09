@@ -12,6 +12,7 @@ from pip._vendor.packaging.version import Version
 from pip._internal.exceptions import MetadataInconsistent, MetadataInvalid
 from pip._internal.metadata import BaseDistribution, MemoryWheel
 from pip._internal.metadata.importlib import Distribution
+from pip._internal.metadata.pkg_resources import Distribution as LegacyDistribution
 from pip._internal.models.link import Link
 from pip._internal.req.constructors import install_req_from_line
 from pip._internal.req.req_install import InstallRequirement
@@ -67,6 +68,36 @@ def test_candidate_preparation_uses_scoped_dependency_validation(
 
     assert candidate.dist is dist
     assert calls == [{"extra": "doc"}]
+
+
+@pytest.mark.parametrize("distribution_type", [Distribution, LegacyDistribution])
+def test_candidate_checks_name_from_metadata_on_each_backend(
+    factory: Factory,
+    monkeypatch: pytest.MonkeyPatch,
+    distribution_type: type[Distribution] | type[LegacyDistribution],
+) -> None:
+    wheel = make_wheel("probe", "1", metadata_updates={"Name": "other"})
+    dist = distribution_type.from_wheel(
+        MemoryWheel("probe-1-py3-none-any.whl", BytesIO(wheel.as_bytes())), "probe"
+    )
+    link = Link("https://index.invalid/probe-1-py3-none-any.whl")
+
+    def prepare(
+        requirement: InstallRequirement, *, parallel_builds: bool
+    ) -> BaseDistribution:
+        assert requirement.link == link
+        return dist
+
+    monkeypatch.setattr(factory.preparer, "prepare_linked_requirement", prepare)
+
+    with pytest.raises(MetadataInconsistent, match="expected 'probe'.*'other'"):
+        LinkCandidate(
+            link,
+            install_req_from_line(str(link)),
+            factory,
+            canonicalize_name("probe"),
+            Version("1"),
+        )
 
 
 @pytest.mark.parametrize(

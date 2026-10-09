@@ -11,13 +11,25 @@ something.
 from __future__ import annotations
 
 import logging
+import typing
 from collections.abc import Callable, Iterable, Iterator
+from typing import TYPE_CHECKING
 
 from pip._vendor.packaging.version import Version
 
 from pip._internal.exceptions import MetadataInvalid
 
 from .base import Candidate
+
+if TYPE_CHECKING:
+    import sys
+
+    if sys.version_info >= (3, 12):
+        from typing import override
+    else:
+        from typing_extensions import override
+else:
+    override = getattr(typing, "override", lambda method: method)
 
 logger = logging.getLogger(__name__)
 
@@ -36,24 +48,31 @@ def warn_invalid_metadata(version: Version, error: MetadataInvalid) -> None:
     )
 
 
+def prepare_index_candidate(
+    version: Version,
+    prepare: Callable[[], Candidate | None],
+    rejected: set[Version],
+) -> Candidate | None:
+    """Prepare one artifact, remembering invalid dependency metadata by version."""
+    try:
+        return prepare()
+    except MetadataInvalid as error:
+        warn_invalid_metadata(version, error)
+        rejected.add(version)
+        return None
+
+
 def _iter_built(infos: Iterator[IndexCandidateInfo]) -> Iterator[Candidate]:
     """Prepare index candidates in finder order, skipping duplicate versions."""
     versions_found: set[Version] = set()
     for version, func in infos:
         if version in versions_found:
             continue
-        try:
-            candidate = func()
-        except MetadataInvalid as e:
-            warn_invalid_metadata(version, e)
-            # Mark version as found to avoid trying other candidates with the same
-            # version, since they most likely have invalid metadata as well.
-            versions_found.add(version)
-        else:
-            if candidate is None:
-                continue
-            yield candidate
-            versions_found.add(version)
+        candidate = prepare_index_candidate(version, func, versions_found)
+        if candidate is None:
+            continue
+        yield candidate
+        versions_found.add(version)
 
 
 def _iter_built_with_prepended(
@@ -71,7 +90,7 @@ def _iter_built_with_prepended(
     for version, func in infos:
         if version in versions_found:
             continue
-        candidate = func()
+        candidate = prepare_index_candidate(version, func, versions_found)
         if candidate is None:
             continue
         yield candidate
@@ -99,7 +118,7 @@ def _iter_built_with_inserted(
         if installed.version >= version:
             yield installed
             versions_found.add(installed.version)
-        candidate = func()
+        candidate = prepare_index_candidate(version, func, versions_found)
         if candidate is None:
             continue
         yield candidate
@@ -123,6 +142,7 @@ class FoundCandidates(Iterable[Candidate]):
         self._installed = installed
         self._prefers_installed = prefers_installed
 
+    @override
     def __iter__(self) -> Iterator[Candidate]:
         infos = self._get_infos()
         if not self._installed:
