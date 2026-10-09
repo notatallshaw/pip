@@ -281,7 +281,7 @@ def test_deferred_yanked_pin_is_checked_before_replacing_an_installation(
     script.assert_installed(sample="2")
 
 
-def test_installed_self_replacement_preserves_native_obligations(
+def test_installed_self_replacement_uses_selected_metadata(
     script: PipTestEnvironment,
 ) -> None:
     install_initial(script, "1", ["sample>=2", "olddep==1"])
@@ -295,9 +295,9 @@ def test_installed_self_replacement_preserves_native_obligations(
         "install", "--no-index", "--find-links", script.scratch_path, "sample", "other"
     )
 
-    assert "installed self replacement" in result.stdout
-    script.assert_installed(sample="2", other="1")
-    script.assert_not_installed("olddep")
+    assert "Nab catalogue success" in result.stdout
+    script.assert_installed(sample="2", other="2", olddep="2")
+    script.pip("check")
 
 
 def test_satisfied_installed_self_requirement_stays_in_the_catalogue(

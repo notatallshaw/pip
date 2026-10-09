@@ -420,7 +420,12 @@ class AlreadyInstalledCandidate(Candidate):
             return
 
         try:
-            for r in self.dist.iter_dependencies():
+            # Discover self-replacements before unrelated dependencies can reject them.
+            dependencies = sorted(
+                self.dist.iter_dependencies(),
+                key=lambda r: canonicalize_name(r.name) != self.project_name,
+            )
+            for r in dependencies:
                 yield from self._factory.make_requirements_from_spec(str(r), self._ireq)
         except InvalidRequirement as exc:
             raise InvalidInstalledPackage(dist=self.dist, invalid_exc=exc) from None

@@ -572,12 +572,6 @@ class CatalogueProvider(BaseProvider[str, Version]):
         if key not in self.dependencies:
             candidate = self.candidates[key]
             requirements = tuple(self.native.get_dependencies(candidate))
-            if candidate.is_installed and any(
-                requirement.name == package
-                and not requirement.is_satisfied_by(candidate)
-                for requirement in requirements
-            ):
-                raise CatalogueUnsupported("installed self replacement")
             ranges = self.ranges(requirements)
             self.dependencies[key] = requirements, ranges
         return self.dependencies[key][1]
