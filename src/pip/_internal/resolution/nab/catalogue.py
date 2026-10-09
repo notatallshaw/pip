@@ -9,7 +9,10 @@ from collections import defaultdict, deque
 from collections.abc import Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, NoReturn, cast
 
-from pip._vendor.nab_resolver.errors import ResolutionError
+from pip._vendor.nab_resolver.errors import (
+    ResolutionError,
+    ResolutionTerminatedError,
+)
 from pip._vendor.nab_resolver.priority import compute_tier
 from pip._vendor.nab_resolver.resolver import (
     BaseProvider,
@@ -707,6 +710,8 @@ class CatalogueProvider(BaseProvider[str, Version]):
         proxy = YankProxyProvider(self, declarations)
         try:
             pins, _ = proxy.resolve()
+        except ResolutionTerminatedError:
+            raise
         except IncompletePreferenceError:
             raise
         except ResolutionError as error:
@@ -731,8 +736,10 @@ class CatalogueProvider(BaseProvider[str, Version]):
                 root_version=Version("0"),
                 observer=CatalogueObserver(self, reporter),
             ).solve(self.roots, self.constraints)
+        except ResolutionTerminatedError:
+            raise
         except ResolutionError as error:
-            if self.has_complete_metadata():
+            if error.incompatibility is not None and self.has_complete_metadata():
                 logger.info("Nab catalogue certified failure")
                 raise catalogue_installation_error(error, self) from error
             raise

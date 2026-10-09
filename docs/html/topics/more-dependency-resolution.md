@@ -173,6 +173,8 @@ candidate domain. These checks retain pip's conflict and lock-file diagnostics.
 A rejected constrained archive is unavailable, and another parent version can
 avoid requiring it. Invalid metadata in a mandatory source, invalid installed
 metadata, build failures and terminal index errors are reported directly.
+Exhausted solver budgets and inconsistent solver state are also reported
+directly, without retrying or claiming that the requirements conflict.
 
 Fallback starts with fresh solver state and the original requirements and
 options. Successful preparation can be reused, but decisions and learned
