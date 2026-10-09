@@ -5,7 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from pip._vendor.nab_resolver.errors import ResolutionError
+from pip._vendor.nab_resolver.errors import (
+    ResolutionError,
+    ResolutionTerminatedError,
+)
 from pip._vendor.nab_resolver.ranges import Range
 from pip._vendor.nab_resolver.resolver import BaseProvider, Resolver, ResolverStats
 from pip._vendor.nab_resolver.types import Incompatibility, IncompatibilityCause, Term
@@ -342,12 +345,10 @@ class YankProxyProvider(BaseProvider[Package, int]):
         }
         try:
             selected = solver.resolve(roots)
+        except ResolutionTerminatedError:
+            raise
         except ResolutionError as exc:
-            if (
-                query.incomplete
-                or exc.incompatibility is None
-                or str(exc).startswith("Conflict resolution made no progress")
-            ):
+            if query.incomplete or exc.incompatibility is None:
                 message = "yanked dependency resolution is incomplete"
                 if query.incomplete:
                     message += ": " + self.catalogue.unavailable_reason
@@ -366,6 +367,8 @@ class YankProxyProvider(BaseProvider[Package, int]):
         """Check non-yanked alternatives before adopting the selected candidates."""
         try:
             selected = self.preference.run(self.run_query)
+        except ResolutionTerminatedError:
+            raise
         except IncompletePreferenceError:
             raise
         except ResolutionError as exc:
