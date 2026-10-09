@@ -2,13 +2,15 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from functools import cache
 from typing import NamedTuple, Optional
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from pip._vendor.packaging.specifiers import SpecifierSet
 from pip._vendor.packaging.utils import NormalizedName
 from pip._vendor.packaging.version import Version
 
-from pip._internal.models.link import Link, links_equivalent
+from pip._internal.models.link import Link, LinkHash, links_equivalent
 from pip._internal.req.req_install import InstallRequirement
 from pip._internal.utils.hashes import FAVORITE_HASH, Hashes
 
@@ -34,6 +36,14 @@ def intersect_hash_options(
     left: dict[str, list[str]], right: dict[str, list[str]]
 ) -> dict[str, list[str]]:
     """Intersect declarations while preserving an empty set of permitted hashes."""
+    left = {
+        algorithm: list(dict.fromkeys(value.lower() for value in values))
+        for algorithm, values in left.items()
+    }
+    right = {
+        algorithm: list(dict.fromkeys(value.lower() for value in values))
+        for algorithm, values in right.items()
+    }
     if not left:
         return {algorithm: list(values) for algorithm, values in right.items()}
     if not right:
@@ -44,6 +54,37 @@ def intersect_hash_options(
         if algorithm in right
     }
     return shared or {FAVORITE_HASH: []}
+
+
+def input_hash_options(ireq: InstallRequirement) -> dict[str, list[str]]:
+    """Collect checksums declared in input flags and the original URL."""
+    options: dict[str, list[str]] = {
+        algorithm: list(values) for algorithm, values in ireq.hash_options.items()
+    }
+    link = ireq.original_link
+    if isinstance(link, Link) and link.hash is not None:
+        assert link.hash_name is not None
+        options.setdefault(link.hash_name, []).append(link.hash)
+    return options
+
+
+@cache
+def source_link_without_hashes(link: Link) -> Link:
+    """Return a source URL without fragment checksum hints."""
+    parsed = urlsplit(link.url)
+    fragment = []
+    for name, value in parse_qsl(parsed.fragment, keep_blank_values=True):
+        checksum = LinkHash.find_hash_url_fragment(f"#{name}=")
+        if checksum is None or checksum.name != name:
+            fragment.append((name, value))
+    return Link(urlunsplit(parsed._replace(fragment=urlencode(fragment))))
+
+
+def source_links_equivalent(left: Link, right: Link) -> bool:
+    """Compare archive locations separately from checksum requirements."""
+    return links_equivalent(
+        source_link_without_hashes(left), source_link_without_hashes(right)
+    )
 
 
 @dataclass(frozen=True)
@@ -60,10 +101,10 @@ class Constraint:
     @classmethod
     def from_ireq(cls, ireq: InstallRequirement) -> Constraint:
         links = frozenset([ireq.link]) if ireq.link else frozenset()
-        hash_options = {alg: list(v) for alg, v in ireq.hash_options.items()}
+        hash_options = input_hash_options(ireq)
         return Constraint(
             ireq.specifier,
-            ireq.hashes(trust_internet=False),
+            Hashes(hash_options),
             hash_options,
             links,
         )
@@ -75,11 +116,12 @@ class Constraint:
         if not isinstance(other, InstallRequirement):
             return NotImplemented
         specifier = self.specifier & other.specifier
-        other_hashes = other.hashes(trust_internet=False)
+        other_hash_options = input_hash_options(other)
+        other_hashes = Hashes(other_hash_options)
         hashes = self.hashes & other_hashes
         if self.hashes and other_hashes and not hashes:
             hashes = Hashes({FAVORITE_HASH: []})
-        hash_options = intersect_hash_options(self.hash_options, other.hash_options)
+        hash_options = intersect_hash_options(self.hash_options, other_hash_options)
         links = self.links
         if other.link:
             links = links.union([other.link])
@@ -133,7 +175,7 @@ class Requirement:
 
 def _match_link(link: Link, candidate: Candidate) -> bool:
     if candidate.source_link:
-        return links_equivalent(link, candidate.source_link)
+        return source_links_equivalent(link, candidate.source_link)
     return False
 
 
