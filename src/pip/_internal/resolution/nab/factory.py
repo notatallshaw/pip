@@ -845,7 +845,7 @@ class Factory:
                 (or link) and one with the extra. This allows centralized constraint
                 handling for the base, resulting in fewer candidate rejections.
         """
-        fixed_candidate: LinkCandidate | None = None
+        fixed_candidate: LinkCandidate | EditableCandidate | None = None
         if (
             self.catalogue_only
             and ireq.link is not None
@@ -860,7 +860,7 @@ class Factory:
                 raise CatalogueUnsupported("URL dependency")
             assert ireq.name is not None
             known = self.catalogue_sources.get(canonicalize_name(ireq.name))
-            if isinstance(known, LinkCandidate):
+            if isinstance(known, (LinkCandidate, EditableCandidate)):
                 fixed_candidate = known
         if not ireq.match_markers(requested_extras):
             logger.info(
