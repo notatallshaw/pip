@@ -32,6 +32,7 @@ from pip._internal.exceptions import (
     MetadataInvalid,
     UnsupportedWheel,
 )
+from pip._internal.models.candidate import InstallationCandidate
 from pip._internal.req.constructors import (
     install_req_extend_extras,
     install_req_from_line,
@@ -142,6 +143,16 @@ class CatalogueObserver(ResolverObserver[str, Version]):
             self.reporter.rejecting_candidate((), candidate)
 
 
+def has_version_text_aliases(candidates: Iterable[InstallationCandidate]) -> bool:
+    """Find numerically equal catalogue versions with different version text."""
+    versions: dict[Version, str] = {}
+    for candidate in candidates:
+        label = str(candidate.version)
+        if versions.setdefault(candidate.version, label) != label:
+            return True
+    return False
+
+
 class CatalogueProvider(BaseProvider[str, Version]):
     """Keep per-version metadata independent of the active native declarations."""
 
@@ -155,8 +166,10 @@ class CatalogueProvider(BaseProvider[str, Version]):
         self.native = native
         self.collected = collected
         self.catalogues: dict[str, CandidateCatalogue] = {}
+        self.token_catalogues: set[str] = set()
         self.installed_versions: dict[str, Version | None] = {}
         self.yank_resolution = False
+        self.has_yanked_candidates = False
         self.yanked_selection: set[str] = set()
         self.yank_admission_sources: dict[str, tuple[str, ...]] = {}
         self.candidates: dict[tuple[str, Version], Candidate] = {}
@@ -304,10 +317,13 @@ class CatalogueProvider(BaseProvider[str, Version]):
                     package.partition("[")[0], Constraint.empty()
                 ).hashes,
             )
+            candidates = self.catalogues[package].candidates
+            yanked = any(item.link.is_yanked for item in candidates)
+            self.has_yanked_candidates |= yanked
+            if yanked or has_version_text_aliases(candidates):
+                self.token_catalogues.add(package)
         catalogue = self.catalogues[package]
-        if not self.yank_resolution and any(
-            item.link.is_yanked for item in catalogue.candidates
-        ):
+        if not self.yank_resolution and package in self.token_catalogues:
             raise _TryYankedResolution(package)
         return catalogue
 
@@ -678,7 +694,7 @@ class CatalogueProvider(BaseProvider[str, Version]):
     def solve_yanked(
         self, reporter: PipReporter | PipDebuggingReporter
     ) -> Solution[str, Version]:
-        """Resolve withdrawal groups with grounded permissions and live alternatives."""
+        """Resolve artifact groups with grounded yank permission."""
         declarations = []
         for requirement in self.collected.requirements:
             _, ireq = requirement.get_candidate_lookup()
@@ -758,14 +774,21 @@ class CatalogueProvider(BaseProvider[str, Version]):
             for candidate in self.explicit_candidates.values()
         )
 
-    def validate(self, solution: Solution[str, Version]) -> bool:
-        """Recheck native requirements and artifact order for the selected versions."""
+    def selected_requirements(
+        self, solution: Solution[str, Version]
+    ) -> dict[str, list[Requirement]]:
+        """Collect input declarations and dependencies of the selected candidates."""
         requirements: dict[str, list[Requirement]] = defaultdict(list)
         for requirement in self.collected.requirements:
             requirements[requirement.name].append(requirement)
         for name, version in solution.pins.items():
             for requirement in self.dependencies[name, version][0]:
                 requirements[requirement.name].append(requirement)
+        return requirements
+
+    def validate(self, solution: Solution[str, Version]) -> bool:
+        """Recheck native requirements and artifact order for the selected versions."""
+        requirements = self.selected_requirements(solution)
         for name, version in solution.pins.items():
             candidate = self.candidates[name, version]
             if not all(
@@ -782,7 +805,7 @@ class CatalogueProvider(BaseProvider[str, Version]):
                 return False
             if (
                 candidate.version.is_prerelease
-                and not self.yank_resolution
+                and (not self.yank_resolution or not self.has_yanked_candidates)
                 and candidate.project_name not in self.explicit_bases
                 and not self.factory.catalogue_prerelease_admitted(
                     candidate, requirements, base
@@ -829,6 +852,7 @@ class CatalogueProvider(BaseProvider[str, Version]):
         for artifact in catalogue.candidates:
             if (
                 artifact.version != candidate.version
+                or str(artifact.version) != str(candidate.version)
                 or artifact.link.is_yanked != withdrawn
             ):
                 continue

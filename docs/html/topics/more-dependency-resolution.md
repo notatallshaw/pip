@@ -143,6 +143,9 @@ encountering a broader requirement for the same package.
 Pip also follows URL dependencies of explicit input candidates before solving.
 During solving, dependencies can reuse a matching source already fixed and
 prepared for the request. Candidate metadata remains tied to its source.
+Artifacts with equal numeric versions and different version text use separate
+candidate choices. Original exact-text requirements and constraints are checked
+before pip skips an equal-version installation.
 
 Invalid index dependency metadata excludes that candidate version, including
 when another version is installed. An inconsistent artifact, such as a wheel whose
