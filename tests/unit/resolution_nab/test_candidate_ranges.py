@@ -123,7 +123,6 @@ def test_key_preserves_value_operations_and_exact_class_comparisons() -> None:
     high = CandidateKey(version=Version("2"), source="a")
     assert low == CandidateKey(Version("1"), "z")
     assert low != high
-    assert hash(low) == hash((low.version, low.source))
     assert repr(low) == "CandidateKey(version=<Version('1')>, source='z')"
     assert sorted([high, low, CandidateKey(Version("1"), "a")]) == [
         CandidateKey(Version("1"), "a"),
@@ -210,3 +209,20 @@ def test_copy_and_pickle_preserve_keys_and_shallow_range_copies() -> None:
     assert restored_range == constraint
     assert hash(restored_range) == hash(constraint)
     assert repr(restored_range) == repr(constraint)
+
+
+def test_singleton_preserves_exact_version_text() -> None:
+    selected = CandidateKey(Version("1"), "index")
+    alias = CandidateKey(Version("1.0"), "index")
+    allowed = CandidateRange.singleton(selected)
+
+    assert selected != alias
+    assert len({selected, alias}) == 2
+    assert selected < alias
+    assert selected <= alias
+    assert alias > selected
+    assert alias >= selected
+
+    assert selected in allowed
+    assert alias not in allowed
+    assert allowed.is_disjoint(CandidateRange(SpecifierSet("===1.0").to_range()))

@@ -6,6 +6,7 @@ import contextlib
 import functools
 import logging
 import os
+from collections import defaultdict
 from typing import Any, NamedTuple
 
 from pip._vendor.nab_resolver.candidate_provider import CandidateProvider
@@ -27,6 +28,7 @@ from pip._internal.resolution.nab.base import (
     Candidate,
     CataloguePreparationConflict,
     CatalogueUnsupported,
+    Requirement,
 )
 from pip._internal.resolution.nab.catalogue import CatalogueProvider
 from pip._internal.resolution.nab.errors import installation_error
@@ -54,6 +56,7 @@ class Result(NamedTuple):
 
     mapping: dict[str, Candidate]
     graph: DependencyGraph
+    requirements: dict[str, list[Requirement]] | None = None
 
 
 class Resolver(BaseResolver):
@@ -156,7 +159,11 @@ class Resolver(BaseResolver):
         graph.update((package, set()) for package in solution.pins)
         for parent, child in solution.edges:
             graph[parent].add(child)
-        return Result(dict(provider.selected(solution)), graph)
+        requirements: dict[str, list[Requirement]] = defaultdict(list)
+        for declarations in provider.selected_requirements(solution).values():
+            for requirement in declarations:
+                requirements[requirement.project_name].append(requirement)
+        return Result(dict(provider.selected(solution)), graph, requirements)
 
     def _resolve_attempt(
         self, collected: CollectedRootRequirements, *, provisional: bool
@@ -229,7 +236,31 @@ class Resolver(BaseResolver):
         graph.update((package, set()) for package in mapping)
         for parent, child in edges:
             graph[parent].add(child)
-        return Result(mapping, graph)
+        requirements: dict[str, list[Requirement]] = defaultdict(list)
+        for requirement in collected.requirements:
+            requirements[requirement.project_name].append(requirement)
+        for candidate in mapping.values():
+            for requirement in host.dependencies.get(candidate, ()):
+                requirements[requirement.project_name].append(requirement)
+        return Result(mapping, graph, requirements)
+
+    def installed_version_satisfies(
+        self, package: str, version: Version, collected: CollectedRootRequirements
+    ) -> bool:
+        """Check original version bounds before skipping a same-version installation."""
+        assert self._result is not None and self._result.requirements is not None
+        constraint = collected.constraints.get(package)
+        if constraint is not None and not constraint.specifier.contains(
+            version, prereleases=True
+        ):
+            return False
+        for requirement in self._result.requirements.get(package, ()):
+            _, ireq = requirement.get_candidate_lookup()
+            if ireq is not None and not ireq.specifier.contains(
+                version, prereleases=True
+            ):
+                return False
+        return True
 
     def resolve(
         self, root_reqs: list[InstallRequirement], check_supported_wheels: bool
@@ -260,7 +291,12 @@ class Resolver(BaseResolver):
                 ireq.should_reinstall = False
             elif self.factory.force_reinstall:
                 ireq.should_reinstall = True
-            elif installed_dist.version != candidate.version:
+            elif installed_dist.version != candidate.version or (
+                str(installed_dist.version) != str(candidate.version)
+                and not self.installed_version_satisfies(
+                    candidate.project_name, installed_dist.version, collected
+                )
+            ):
                 ireq.should_reinstall = True
             elif candidate.is_editable or installed_dist.editable:
                 # A matching version does not establish unchanged editable source.
