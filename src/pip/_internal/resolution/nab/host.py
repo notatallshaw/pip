@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections import deque
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
@@ -36,11 +35,9 @@ class Request:
 
 @dataclass(frozen=True)
 class SelfRefinement:
-    """Retain installed metadata obligations when selecting a replacement."""
+    """Identify a candidate selected through an installed self requirement."""
 
-    previous: Candidate
     candidate: Candidate
-    dependencies: tuple[Requirement, ...]
 
 
 def native_candidate(prepared: PreparedCandidate[CandidateKey]) -> Candidate:
@@ -134,7 +131,7 @@ class NativeHost:
                 CandidateKey(candidate.version, self._source(candidate))
             )
             if candidate.source_link is not None:
-                # A linked replacement can also carry installed metadata obligations.
+                # Installed self requirements can select the replacement identity.
                 constraint |= CandidateRange.singleton(self._refinement_key(candidate))
         elif ireq is not None:
             constraint = CandidateRange(ireq.specifier.to_range())
@@ -182,37 +179,13 @@ class NativeHost:
     def get_dependencies(
         self, candidate: PreparedCandidate[CandidateKey]
     ) -> Iterable[CandidateRequirement[str, CandidateKey]]:
-        """Yield replacement dependencies and retained installed obligations."""
-        origin = candidate.origin
-        if isinstance(origin, SelfRefinement):
-            for requirement in origin.dependencies:
-                yield self.bind(requirement, origin.previous)
-
+        """Yield dependencies of the selected distribution."""
         native = native_candidate(candidate)
         for requirement in self._dependencies_for(native):
             yield self.bind(requirement, native)
 
-    def installation_graph(
-        self, roots: Iterable[str], selected: Mapping[str, Candidate]
-    ) -> tuple[dict[str, Candidate], tuple[tuple[str, str], ...]]:
-        """Keep only dependencies of the distributions actually selected."""
-        mapping: dict[str, Candidate] = {}
-        edges = []
-        pending = deque(roots)
-        while pending:
-            package = pending.popleft()
-            if package in mapping:
-                continue
-
-            candidate = selected[package]
-            mapping[package] = candidate
-            for requirement in self.provider.get_dependencies(candidate):
-                edges.append((package, requirement.name))
-                pending.append(requirement.name)
-        return mapping, tuple(edges)
-
     def _refinement_key(self, candidate: Candidate) -> CandidateKey:
-        """Separate replacement metadata from installed metadata obligations."""
+        """Identify a replacement selected through an installed self requirement."""
         return CandidateKey(candidate.version, "refinement:" + self._source(candidate))
 
     def _dependencies_for(self, candidate: Candidate) -> tuple[Requirement, ...]:
@@ -276,7 +249,7 @@ class NativeHost:
             key = self._refinement_key(replacement)
             origin = self.refinements.setdefault(
                 (candidate.name, key),
-                SelfRefinement(candidate, replacement, dependencies),
+                SelfRefinement(replacement),
             )
             yield PreparedCandidate(key, origin)
 

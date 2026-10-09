@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING
 from pip._vendor.packaging.ranges import VersionRange
 
 from pip._internal.exceptions import MetadataInvalid
-from pip._internal.resolution.nab.base import CatalogueUnsupported
 from pip._internal.resolution.nab.candidates import ExtrasCandidate
 from pip._internal.resolution.nab.found_candidates import warn_invalid_metadata
 
@@ -208,13 +207,6 @@ class YankCandidates:
             self.facts[candidate] = None
             return None
         requirements = tuple(self.provider.native.get_dependencies(native))
-        if native.is_installed and any(
-            requirement.name == candidate.package
-            and not requirement.is_satisfied_by(native)
-            for requirement in requirements
-        ):
-            reason = "installed self replacement"
-            raise CatalogueUnsupported(reason)
         ranges = self.provider.ranges(
             requirement
             for requirement in requirements
