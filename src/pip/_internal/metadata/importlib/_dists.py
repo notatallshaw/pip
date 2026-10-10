@@ -227,6 +227,29 @@ class Distribution(BaseDistribution):
             for extra in self.metadata.get_all("Provides-Extra", [])
         ]
 
+    def validate_dependencies(self) -> None:
+        """Validate dependency syntax and markers, reusing checks within this call."""
+        contexts: list[dict[str, str]] = [
+            {"extra": extra} for extra in self.iter_provided_extras()
+        ] or [{"extra": ""}]
+        checked: set[str] = set()
+        for text in self.iter_raw_dependencies():
+            marker = get_requirement(text.strip()).marker
+            if marker is None:
+                continue
+
+            # Parsed literals containing both quotes can evaluate but cannot serialize.
+            try:
+                expression = str(marker)
+            except ValueError:
+                expression = None
+            if expression is not None and expression in checked:
+                continue
+
+            any(marker.evaluate(context) for context in contexts)
+            if expression is not None:
+                checked.add(expression)
+
     def iter_dependencies(self, extras: Collection[str] = ()) -> Iterable[Requirement]:
         contexts: Sequence[dict[str, str]] = [{"extra": e} for e in extras]
         for req_string in self.metadata.get_all("Requires-Dist", []):

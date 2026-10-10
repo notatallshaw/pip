@@ -536,9 +536,9 @@ def test_constraints_constrain_to_local_editable(
         script.scratch_path / "constraints.txt",
         "singlemodule",
         allow_stderr_warning=True,
-        expect_error=(resolver_variant == "resolvelib"),
+        expect_error=(resolver_variant == "nab"),
     )
-    if resolver_variant == "resolvelib":
+    if resolver_variant == "nab":
         assert "Editable requirements are not allowed as constraints" in result.stderr
     else:
         assert "Running setup.py develop for singlemodule" in result.stdout
@@ -640,9 +640,9 @@ def test_install_with_extras_from_constraints(
         file,
         "LocalExtras",
         allow_stderr_warning=True,
-        expect_error=(resolver_variant == "resolvelib"),
+        expect_error=(resolver_variant == "nab"),
     )
-    if resolver_variant == "resolvelib":
+    if resolver_variant == "nab":
         assert "Constraints cannot have extras" in result.stderr
     else:
         result.did_create(script.site_packages / "simple")
@@ -709,9 +709,9 @@ def test_install_with_extras_joined(
         file,
         "LocalExtras[baz]",
         allow_stderr_warning=True,
-        expect_error=(resolver_variant == "resolvelib"),
+        expect_error=(resolver_variant == "nab"),
     )
-    if resolver_variant == "resolvelib":
+    if resolver_variant == "nab":
         assert "Constraints cannot have extras" in result.stderr
     else:
         result.did_create(script.site_packages / "simple")
@@ -730,9 +730,9 @@ def test_install_with_extras_editable_joined(
         file,
         "LocalExtras[baz]",
         allow_stderr_warning=True,
-        expect_error=(resolver_variant == "resolvelib"),
+        expect_error=(resolver_variant == "nab"),
     )
-    if resolver_variant == "resolvelib":
+    if resolver_variant == "nab":
         assert "Editable requirements are not allowed as constraints" in result.stderr
     else:
         result.did_create(script.site_packages / "simple")
@@ -775,9 +775,9 @@ def test_install_distribution_union_with_constraints(
         script.scratch_path / "constraints.txt",
         f"{to_install}[baz]",
         allow_stderr_warning=True,
-        expect_error=(resolver_variant == "resolvelib"),
+        expect_error=(resolver_variant == "nab"),
     )
-    if resolver_variant == "resolvelib":
+    if resolver_variant == "nab":
         msg = "Unnamed requirements are not allowed as constraints"
         assert msg in result.stderr
     else:
@@ -795,9 +795,9 @@ def test_install_distribution_union_with_versions(
     result = script.pip_install_local(
         f"{to_install_001}[bar]",
         f"{to_install_002}[baz]",
-        expect_error=(resolver_variant == "resolvelib"),
+        expect_error=(resolver_variant == "nab"),
     )
-    if resolver_variant == "resolvelib":
+    if resolver_variant == "nab":
         assert "Cannot install localextras" in result.stderr
         assert ("The user requested localextras 0.0.1") in result.stdout
         assert ("The user requested localextras 0.0.2") in result.stdout
