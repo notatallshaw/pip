@@ -200,9 +200,8 @@ so equal versions with different metadata remain separate choices.
 Each fallback attempt creates a new host, provider and solver. A failed
 catalogue solve goes directly to definitive native resolution. Other fallback
 cases may first try provisional candidate availability and retry if those
-assumptions fail validation. If a URL request conflicts with reused index
-preparation, pip discards that preparation context and retries once to preserve
-the URL's provenance.
+assumptions fail validation. Index and direct URL requests retain separate
+preparation identities so their installation provenance survives backtracking.
 
 Nab prioritizes packages involved in contextual query failures and can
 temporarily demote repeated dependency blockers. Within that feedback ordering,

@@ -52,7 +52,6 @@ from pip._internal.utils.virtualenv import running_under_virtualenv
 
 from .base import (
     Candidate,
-    CataloguePreparationConflict,
     CatalogueUnsupported,
     Constraint,
     Requirement,
@@ -122,14 +121,6 @@ class CandidateCatalogue:
         )
 
 
-class _CataloguePreparation(NamedTuple):
-    """Retain pre-catalogue caches for a native retry without imported context."""
-
-    links: Cache[LinkCandidate]
-    extras: dict[tuple[int, frozenset[NormalizedName]], ExtrasCandidate]
-    failures: Cache[InstallationError]
-
-
 class Factory:
     def __init__(
         self,
@@ -157,11 +148,9 @@ class Factory:
         self.catalogue_constraint_links: dict[str, frozenset[Link]] = {}
         self._input_options: dict[str, Constraint] = {}
         self.catalogue_expanding_sources = False
-        self._catalogue_preparation: _CataloguePreparation | None = None
-        self._catalogue_candidate_ids: set[int] = set()
 
         self._build_failures: Cache[InstallationError] = {}
-        self._link_candidate_cache: Cache[LinkCandidate] = {}
+        self._link_candidate_cache: dict[tuple[Link, bool], LinkCandidate] = {}
         self._editable_candidate_cache: Cache[EditableCandidate] = {}
         self._installed_candidate_cache: dict[str, AlreadyInstalledCandidate] = {}
         self._extras_candidate_cache: dict[
@@ -187,11 +176,6 @@ class Factory:
         """Retain native preparation while isolating static admission and failures."""
         assert not self.catalogue_only
         failures = self._build_failures
-        preparation = _CataloguePreparation(
-            self._link_candidate_cache.copy(),
-            self._extras_candidate_cache.copy(),
-            failures.copy(),
-        )
         self._build_failures = {}
         self.catalogue_only = True
         try:
@@ -203,22 +187,6 @@ class Factory:
             self.catalogue_constraint_links = {}
             self.catalogue_expanding_sources = False
             self._build_failures = failures
-            self._catalogue_preparation = preparation
-            self._catalogue_candidate_ids = {
-                id(candidate)
-                for link, candidate in self._link_candidate_cache.items()
-                if link not in preparation.links
-            }
-
-    def discard_catalogue_preparation(self) -> None:
-        """Restore pre-catalogue objects before starting a fresh native attempt."""
-        preparation = self._catalogue_preparation
-        assert preparation is not None
-        self._link_candidate_cache = preparation.links
-        self._extras_candidate_cache = preparation.extras
-        self._build_failures = preparation.failures
-        self._catalogue_preparation = None
-        self._catalogue_candidate_ids.clear()
 
     def _fail_if_link_is_unsupported_wheel(self, link: Link) -> None:
         if not link.is_wheel:
@@ -314,16 +282,10 @@ class Factory:
             self._check_input_hashes(editable, template)
             return editable
         else:
-            if (
-                not self.catalogue_only
-                and template.is_direct
-                and id(self._link_candidate_cache.get(link))
-                in self._catalogue_candidate_ids
-            ):
-                raise CataloguePreparationConflict
-            if link not in self._link_candidate_cache:
+            cache_key = link, template.is_direct
+            if cache_key not in self._link_candidate_cache:
                 try:
-                    self._link_candidate_cache[link] = LinkCandidate(
+                    self._link_candidate_cache[cache_key] = LinkCandidate(
                         link,
                         template,
                         factory=self,
@@ -339,7 +301,7 @@ class Factory:
                     )
                     self._build_failures[link] = e
                     return None
-            candidate = self._link_candidate_cache[link]
+            candidate = self._link_candidate_cache[cache_key]
             self._check_input_hashes(candidate, template)
             return candidate
 
@@ -939,8 +901,8 @@ class Factory:
                 )
         if self.preparer.require_hashes:
             self._link_candidate_cache = {
-                link: candidate
-                for link, candidate in self._link_candidate_cache.items()
+                key: candidate
+                for key, candidate in self._link_candidate_cache.items()
                 if candidate.get_install_requirement().local_file_path is not None
             }
 

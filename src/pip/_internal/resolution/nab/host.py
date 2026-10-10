@@ -14,6 +14,7 @@ from pip._vendor.nab_resolver.types import RangeProtocol
 
 from pip._internal.models.link import Link, links_equivalent
 from pip._internal.resolution.nab.base import Candidate, Requirement
+from pip._internal.resolution.nab.candidates import ExtrasCandidate
 from pip._internal.resolution.nab.factory import (
     CollectedRootRequirements,
     Factory,
@@ -38,6 +39,14 @@ class SelfRefinement:
     """Identify a candidate selected through an installed self requirement."""
 
     candidate: Candidate
+
+
+@dataclass(slots=True)
+class _NativeDependencies:
+    """Keep a candidate alive while caching its declarations by object identity."""
+
+    candidate: Candidate
+    requirements: tuple[Requirement, ...]
 
 
 def native_candidate(prepared: PreparedCandidate[CandidateKey]) -> Candidate:
@@ -84,9 +93,9 @@ class NativeHost:
     def __init__(self, factory: Factory, provider: PipProvider) -> None:
         self.factory = factory
         self.provider = provider
-        self.sources: list[tuple[Link, bool]] = []
-        self._source_ids: dict[tuple[Link, bool], str] = {}
-        self.dependencies: dict[Candidate, tuple[Requirement, ...]] = {}
+        self.sources: list[tuple[Link, bool, bool]] = []
+        self._source_ids: dict[tuple[Link, bool, bool], str] = {}
+        self._dependencies: dict[int, _NativeDependencies] = {}
         self.refinements: dict[tuple[str, CandidateKey], SelfRefinement] = {}
 
     def availability_generation(self) -> int:
@@ -94,27 +103,35 @@ class NativeHost:
         return len(self.sources) + len(self.refinements)
 
     def _source(self, candidate: Candidate) -> str:
-        """Identify metadata by installation origin, link, and editable mode."""
+        """Identify a prepared candidate by source mode and installation provenance."""
+        if isinstance(candidate, ExtrasCandidate):
+            return self._source(candidate.base)
         link = candidate.source_link
         if link is None:
             return (
                 "installed" if candidate.is_installed else "internal:" + candidate.name
             )
-        return self._link_source(link, candidate.is_editable)
+        requirement = candidate.get_install_requirement()
+        assert requirement is not None
+        return self._link_source(
+            link, candidate.is_editable, direct=requirement.is_direct
+        )
 
-    def _link_source(self, link: Link, editable: bool) -> str:
-        """Assign one stable source to equivalent links in the same editable mode."""
-        key = (link, editable)
+    def _link_source(self, link: Link, editable: bool, *, direct: bool) -> str:
+        """Identify equivalent links with the same source mode and provenance."""
+        key = (link, editable, direct)
         if (source := self._source_ids.get(key)) is not None:
             return source
 
-        for number, (known, was_editable) in enumerate(self.sources):
-            if was_editable == editable and links_equivalent(known, link):
+        for number, (known, was_editable, was_direct) in enumerate(self.sources):
+            if (was_editable, was_direct) == (editable, direct) and links_equivalent(
+                known, link
+            ):
                 source = f"link:{number}"
                 break
         else:
             source = f"link:{len(self.sources)}"
-            self.sources.append((link, editable))
+            self.sources.append((link, editable, direct))
 
         self._source_ids[key] = source
         return source
@@ -130,6 +147,15 @@ class NativeHost:
             constraint = CandidateRange.singleton(
                 CandidateKey(candidate.version, self._source(candidate))
             )
+            if parent is not None:
+                parent_base = (
+                    parent.base if isinstance(parent, ExtrasCandidate) else parent
+                )
+                if candidate == parent_base:
+                    # An equivalent self URL can use its parent's preparation identity.
+                    constraint |= CandidateRange.singleton(
+                        CandidateKey(candidate.version, self._source(parent_base))
+                    )
             if candidate.source_link is not None:
                 # Installed self requirements can select the replacement identity.
                 constraint |= CandidateRange.singleton(self._refinement_key(candidate))
@@ -150,8 +176,12 @@ class NativeHost:
         for package, constraint in collected.constraints.items():
             bounds = CandidateRange(constraint.specifier.to_range())
             for link in constraint.links:
-                ordinary = CandidateRange.for_source(self._link_source(link, False))
-                editable = CandidateRange.for_source(self._link_source(link, True))
+                ordinary = CandidateRange.for_source(
+                    self._link_source(link, False, direct=True)
+                )
+                editable = CandidateRange.for_source(
+                    self._link_source(link, True, direct=True)
+                )
                 bounds &= ordinary | editable
             result[package] = bounds
 
@@ -181,17 +211,17 @@ class NativeHost:
     ) -> Iterable[CandidateRequirement[str, CandidateKey]]:
         """Yield dependencies of the selected distribution."""
         native = native_candidate(candidate)
-        for requirement in self._dependencies_for(native):
+        for requirement in self.dependencies_for(native):
             yield self.bind(requirement, native)
 
     def _refinement_key(self, candidate: Candidate) -> CandidateKey:
         """Identify a replacement selected through an installed self requirement."""
         return CandidateKey(candidate.version, "refinement:" + self._source(candidate))
 
-    def _dependencies_for(self, candidate: Candidate) -> tuple[Requirement, ...]:
+    def dependencies_for(self, candidate: Candidate) -> tuple[Requirement, ...]:
         """Cache native dependencies up to an intrinsically empty intersection."""
-        dependencies = self.dependencies.get(candidate)
-        if dependencies is None:
+        cached = self._dependencies.get(id(candidate))
+        if cached is None:
             pending = []
             constraints: dict[str, CandidateRange] = {}
             for requirement in self.provider.get_dependencies(candidate):
@@ -205,9 +235,9 @@ class NativeHost:
                 if constraint.is_empty:
                     break
 
-            dependencies = tuple(pending)
-            self.dependencies[candidate] = dependencies
-        return dependencies
+            cached = _NativeDependencies(candidate, tuple(pending))
+            self._dependencies[id(candidate)] = cached
+        return cached.requirements
 
     def _prepared_candidates(
         self, candidate: Candidate, requirements: Mapping[str, Sequence[Requirement]]
@@ -219,7 +249,7 @@ class NativeHost:
             )
             return
 
-        dependencies = self._dependencies_for(candidate)
+        dependencies = self.dependencies_for(candidate)
         self_requirements = tuple(
             requirement
             for requirement in dependencies
