@@ -64,6 +64,13 @@ class Result(NamedTuple):
     requirements: dict[str, list[Requirement]] | None = None
 
 
+class _CatalogueAttempt(NamedTuple):
+    """Carry the catalogue result and its contextual query policy."""
+
+    result: Result | None
+    provisional: bool
+
+
 class Resolver(BaseResolver):
     """Prepare native requirements, solve them with nab, and order installations."""
 
@@ -108,17 +115,17 @@ class Resolver(BaseResolver):
 
     def _resolve(self, collected: CollectedRootRequirements) -> Result:
         """Choose native fallback policy from the catalogue solve outcome."""
-        provisional = True
         try:
-            result = self._resolve_catalogue(collected)
+            attempt = self._resolve_catalogue(collected)
         except ResolutionTerminatedError as error:
             raise InstallationError(str(error)) from error
         except ResolutionError as error:
             logger.info("Nab catalogue fallback: %s: %s", type(error).__name__, error)
             provisional = False
         else:
-            if result is not None:
-                return result
+            if attempt.result is not None:
+                return attempt.result
+            provisional = attempt.provisional
         return self._resolve_native(collected, provisional=provisional)
 
     def _resolve_native(
@@ -131,7 +138,9 @@ class Resolver(BaseResolver):
         assert result is not None
         return result
 
-    def _resolve_catalogue(self, collected: CollectedRootRequirements) -> Result | None:
+    def _resolve_catalogue(
+        self, collected: CollectedRootRequirements
+    ) -> _CatalogueAttempt:
         """Try fixed catalogues while retaining native preparation for fallback."""
         factory = self.factory
         native = PipProvider(
@@ -152,10 +161,12 @@ class Resolver(BaseResolver):
                 solution = provider.solve(reporter)
                 if not provider.validate(solution):
                     logger.info("Nab catalogue fallback: final admission")
-                    return None
+                    return _CatalogueAttempt(
+                        None, provisional=not provider.has_complete_metadata()
+                    )
         except CatalogueUnsupported as error:
             logger.info("Nab catalogue fallback: %s: %s", type(error).__name__, error)
-            return None
+            return _CatalogueAttempt(None, provisional=True)
         logger.info("Nab catalogue success")
         graph: DependencyGraph = {None: set(solution.roots)}
         graph.update((package, set()) for package in solution.pins)
@@ -165,7 +176,10 @@ class Resolver(BaseResolver):
         for declarations in provider.selected_requirements(solution).values():
             for requirement in declarations:
                 requirements[requirement.project_name].append(requirement)
-        return Result(dict(provider.selected(solution)), graph, requirements)
+        return _CatalogueAttempt(
+            Result(dict(provider.selected(solution)), graph, requirements),
+            provisional=False,
+        )
 
     def _resolve_attempt(
         self, collected: CollectedRootRequirements, *, provisional: bool
