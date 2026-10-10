@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from tests.lib import PipTestEnvironment
@@ -20,7 +22,18 @@ def test_index_candidate_can_require_its_own_equivalent_url(
     )
     wheel.save_to(path)
     requirement = "pkg[speed]==2.0" if with_extra else "pkg==2.0"
+    report = script.scratch_path / "report.json"
     script.pip(
-        "install", "--no-index", "--find-links", script.scratch_path, requirement
+        "install",
+        "--no-index",
+        "--find-links",
+        script.scratch_path,
+        "--report",
+        report,
+        requirement,
     )
     script.assert_installed(pkg="2.0")
+    script.pip("check")
+    installed = json.loads(report.read_text())["install"]
+    assert len(installed) == 1
+    assert installed[0]["is_direct"] is False

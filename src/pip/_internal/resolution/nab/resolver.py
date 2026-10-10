@@ -33,7 +33,6 @@ from pip._internal.req.req_set import RequirementSet
 from pip._internal.resolution.base import BaseResolver, InstallRequirementProvider
 from pip._internal.resolution.nab.base import (
     Candidate,
-    CataloguePreparationConflict,
     CatalogueUnsupported,
     Requirement,
 )
@@ -120,11 +119,6 @@ class Resolver(BaseResolver):
         else:
             if result is not None:
                 return result
-        try:
-            return self._resolve_native(collected, provisional=provisional)
-        except CataloguePreparationConflict:
-            self.factory.discard_catalogue_preparation()
-            logger.info("Nab native retry: URL requires fresh preparation")
         return self._resolve_native(collected, provisional=provisional)
 
     def _resolve_native(
@@ -244,7 +238,7 @@ class Resolver(BaseResolver):
         for requirement in collected.requirements:
             requirements[requirement.project_name].append(requirement)
         for candidate in mapping.values():
-            for requirement in host.dependencies.get(candidate, ()):
+            for requirement in host.dependencies_for(candidate):
                 requirements[requirement.project_name].append(requirement)
         return Result(mapping, graph, requirements)
 

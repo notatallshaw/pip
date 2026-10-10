@@ -4,6 +4,7 @@ from typing import Any
 
 import pytest
 
+from tests.functional.test_nab_preparation_reuse import PREPARATION_PROBE
 from tests.lib import PipTestEnvironment, TestPipResult, create_basic_wheel_for_package
 from tests.lib.wheel import make_wheel
 
@@ -14,17 +15,21 @@ def install_to_prefix(
     """Keep each installation outside the next request's installed environment."""
     prefix = script.scratch_path / f"{label}-prefix"
     report_path = script.scratch_path / f"{label}-report.json"
-    result = script.pip(
+    probe = script.scratch_path / "preparation_probe.py"
+    probe.write_text(PREPARATION_PROBE)
+    result = script.run(
+        "python",
+        str(probe),
         "install",
         *(("--ignore-installed",) if label == "ignore-installed" else ()),
         "--prefix",
-        prefix,
+        str(prefix),
         "--no-compile",
         "--report",
-        report_path,
+        str(report_path),
         "--no-index",
         "--find-links",
-        script.scratch_path,
+        str(script.scratch_path),
         *requirements,
     )
     report = json.loads(report_path.read_text())
@@ -97,7 +102,11 @@ def test_url_fallback_preserves_origin_after_catalogue_preparation(
             assert report["app"]["requested_extras"] == ["feature"], label
 
         retry = "Nab native retry: URL requires fresh preparation"
-        assert result.stdout.count(retry) == 1
+        assert retry not in result.stdout
+        assert (
+            result.stdout.splitlines().count("PREPARE app-2.0-py2.py3-none-any.whl")
+            == 1
+        )
         if hidden_url:
             assert "Nab catalogue fallback: ResolutionError" in result.stdout
         else:
@@ -132,8 +141,4 @@ def test_rejected_url_parent_does_not_change_ordinary_origin(
         assert report["dep"]["requested"] is True
         assert report["dep"]["requested_extras"] == ["feature"]
         assert (metadata / "REQUESTED").exists()
-        if label == "ignore-installed":
-            assert (
-                result.stdout.count("Nab native retry: URL requires fresh preparation")
-                == 1
-            )
+        assert "Nab native retry: URL requires fresh preparation" not in result.stdout

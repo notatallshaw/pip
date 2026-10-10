@@ -6,6 +6,7 @@ from pip._vendor.nab_resolver.candidate_provider import CandidateRequirement
 
 from pip._internal.models.link import Link, links_equivalent
 from pip._internal.resolution.nab import host as host_module
+from pip._internal.resolution.nab.candidates import as_base_candidate
 from pip._internal.resolution.nab.factory import Factory
 from pip._internal.resolution.nab.host import NativeHost
 from pip._internal.resolution.nab.provider import PipProvider
@@ -107,18 +108,24 @@ def test_link_source_reuses_exact_and_equivalent_links(
     monkeypatch.setattr(host_module, "links_equivalent", compare)
     host = NativeHost(factory, provider)
     first = Link(url)
-    assert host._link_source(first, False) == "link:0"
-    assert host._link_source(Link(url, hashes={"sha256": "abc"}), False) == "link:0"
+    assert host._link_source(first, False, direct=True) == "link:0"
+    assert (
+        host._link_source(Link(url, hashes={"sha256": "abc"}), False, direct=True)
+        == "link:0"
+    )
     assert comparisons == []
 
-    assert host._link_source(Link("https://example.org/b.whl"), False) == "link:1"
+    assert (
+        host._link_source(Link("https://example.org/b.whl"), False, direct=True)
+        == "link:1"
+    )
     comparisons.clear()
-    assert host._link_source(Link(alias), False) == "link:0"
+    assert host._link_source(Link(alias), False, direct=True) == "link:0"
     assert len(comparisons) == 1
-    assert host._link_source(Link(alias), False) == "link:0"
+    assert host._link_source(Link(alias), False, direct=True) == "link:0"
     assert len(comparisons) == 1
     assert len(host.sources) == host.availability_generation() == 2
-    assert host.sources[0] == (first, False)
+    assert host.sources[0] == (first, False, True)
 
 
 def test_link_source_separates_editable_modes(
@@ -128,13 +135,13 @@ def test_link_source_separates_editable_modes(
     ordinary = Link("https://example.org/a.tar.gz")
     alias = Link("https://example.org/a.tar.gz#egg=a")
 
-    assert host._link_source(ordinary, False) == "link:0"
-    assert host._link_source(alias, True) == "link:1"
-    assert host._link_source(ordinary, True) == "link:1"
-    assert host._link_source(alias, False) == "link:0"
-    assert host._link_source(ordinary, False) == "link:0"
-    assert host._link_source(alias, True) == "link:1"
-    assert host.sources == [(ordinary, False), (alias, True)]
+    assert host._link_source(ordinary, False, direct=True) == "link:0"
+    assert host._link_source(alias, True, direct=True) == "link:1"
+    assert host._link_source(ordinary, True, direct=True) == "link:1"
+    assert host._link_source(alias, False, direct=True) == "link:0"
+    assert host._link_source(ordinary, False, direct=True) == "link:0"
+    assert host._link_source(alias, True, direct=True) == "link:1"
+    assert host.sources == [(ordinary, False, True), (alias, True, True)]
     assert host.availability_generation() == 2
 
 
@@ -146,11 +153,11 @@ def test_link_sources_belong_to_each_host(
     a = Link("https://example.org/a.whl")
     b = Link("https://example.org/b.whl")
 
-    assert first._link_source(a, False) == "link:0"
-    assert first._link_source(b, False) == "link:1"
-    assert second._link_source(b, False) == "link:0"
-    assert second._link_source(a, False) == "link:1"
-    assert first._link_source(a, False) == "link:0"
+    assert first._link_source(a, False, direct=True) == "link:0"
+    assert first._link_source(b, False, direct=True) == "link:1"
+    assert second._link_source(b, False, direct=True) == "link:0"
+    assert second._link_source(a, False, direct=True) == "link:1"
+    assert first._link_source(a, False, direct=True) == "link:0"
     assert first.availability_generation() == second.availability_generation() == 2
 
 
@@ -163,8 +170,48 @@ def test_link_source_preserves_significant_fragments(
     plain = Link(url, hashes={"sha256": "abc"})
     fragmented = Link(f"{url}#{fragment}")
 
-    assert host._link_source(plain, False) == "link:0"
-    assert host._link_source(fragmented, False) == "link:1"
-    assert host._link_source(Link(url), False) == "link:0"
-    assert host._link_source(Link(f"{url}#{fragment}"), False) == "link:1"
+    assert host._link_source(plain, False, direct=True) == "link:0"
+    assert host._link_source(fragmented, False, direct=True) == "link:1"
+    assert host._link_source(Link(url), False, direct=True) == "link:0"
+    assert host._link_source(Link(f"{url}#{fragment}"), False, direct=True) == "link:1"
     assert host.availability_generation() == 2
+
+
+def test_link_source_separates_direct_and_index_provenance(
+    factory: Factory, provider: PipProvider
+) -> None:
+    host = NativeHost(factory, provider)
+    link = Link("https://example.org/a.whl")
+    alias = Link("https://example.org/a.whl#egg=a")
+
+    ordinary = host._link_source(link, False, direct=False)
+    direct = host._link_source(link, False, direct=True)
+    assert ordinary != direct
+    assert host._link_source(alias, False, direct=False) == ordinary
+    assert host._link_source(alias, False, direct=True) == direct
+    assert host.availability_generation() == 2
+
+
+def test_prepared_source_keys_retain_native_provenance(
+    factory: Factory, provider: PipProvider
+) -> None:
+    host = NativeHost(factory, provider)
+    declarations = list(
+        factory.make_requirements_from_spec("simplewheel", comes_from=None)
+    )
+    ordinary = next(
+        iter(provider.find_matches("simplewheel", {"simplewheel": declarations}))
+    )
+    assert ordinary.source_link is not None
+    (direct,) = factory.make_requirements_from_spec(
+        f"simplewheel @ {ordinary.source_link.url}", comes_from=None
+    )
+
+    ordinary_bound = host.bind(factory.make_requirement_from_candidate(ordinary))
+    direct_bound = host.bind(direct)
+    assert ordinary_bound.constraint.is_disjoint(direct_bound.constraint)
+
+    base = as_base_candidate(ordinary)
+    assert base is not None
+    extras = factory.make_extras_candidate(base, frozenset())
+    assert host._source(extras) == host._source(ordinary)
