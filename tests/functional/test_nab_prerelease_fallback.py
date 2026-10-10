@@ -24,8 +24,8 @@ def test_prerelease_after_matching_final_resolution_failure(
     )
 
     if not working_final and policy == "default":
-        assert "NATIVE True" in result.stdout
-        assert "NATIVE False" in result.stdout
+        assert "NATIVE True" not in result.stdout
+        assert result.stdout.splitlines().count("NATIVE False") == 1
     else:
         assert "NATIVE True" not in result.stdout
         assert "NATIVE False" not in result.stdout
