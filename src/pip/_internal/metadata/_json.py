@@ -5,6 +5,8 @@ from email.header import Header, decode_header, make_header
 from email.message import Message
 from typing import Any, cast
 
+_MISSING = object()
+
 METADATA_FIELDS = [
     # Name, Multiple-Use
     ("Metadata-Version", False),
@@ -44,7 +46,7 @@ def json_name(field: str) -> str:
 def msg_to_json(msg: Message) -> dict[str, Any]:
     """Convert a Message object into a JSON-compatible dictionary."""
 
-    def sanitise_header(h: Header | str) -> str:
+    def sanitise_header(h: object) -> str:
         if isinstance(h, Header):
             chunks = []
             for bytes, encoding in decode_header(h):
@@ -62,23 +64,24 @@ def msg_to_json(msg: Message) -> dict[str, Any]:
 
     result = {}
     for field, multi in METADATA_FIELDS:
-        if field not in msg:
-            continue
-        key = json_name(field)
         if multi:
-            value: str | list[str] = [
-                sanitise_header(v) for v in msg.get_all(field)  # type: ignore
-            ]
+            headers = msg.get_all(field)
+            if headers is None:
+                continue
+            value: str | list[str] = [sanitise_header(v) for v in headers]
         else:
-            value = sanitise_header(msg.get(field))  # type: ignore
-            if key == "keywords":
+            header = msg.get(field, _MISSING)
+            if header is _MISSING:
+                continue
+            value = sanitise_header(header)
+            if field == "Keywords":
                 # Accept both comma-separated and space-separated
                 # forms, for better compatibility with old data.
                 if "," in value:
                     value = [v.strip() for v in value.split(",")]
                 else:
                     value = value.split()
-        result[key] = value
+        result[json_name(field)] = value
 
     payload = cast(str, msg.get_payload())
     if payload:
