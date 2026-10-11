@@ -5,6 +5,7 @@ import importlib.metadata
 import pathlib
 import zipfile
 from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
+from functools import cached_property
 from os import PathLike
 from typing import (
     cast,
@@ -53,6 +54,22 @@ class WheelDistribution(importlib.metadata.Distribution):
     ) -> None:
         self._files = files
         self.info_location = info_location
+
+    @cached_property
+    def _identity(self) -> tuple[str | None, str | None]:
+        """Retain wheel identity without retaining its parsed description."""
+        message = cast(email.message.Message, self.metadata)
+        return message.get("Name"), message.get("Version")
+
+    @property
+    def name(self) -> str:
+        name = self._identity[0]
+        return name if name is not None else super().name
+
+    @property
+    def version(self) -> str:
+        version = self._identity[1]
+        return version if version is not None else super().version
 
     @classmethod
     def from_zipfile(
