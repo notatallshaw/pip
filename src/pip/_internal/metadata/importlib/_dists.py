@@ -5,6 +5,7 @@ import importlib.metadata
 import pathlib
 import zipfile
 from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
+from functools import cached_property
 from os import PathLike
 from typing import (
     cast,
@@ -53,6 +54,22 @@ class WheelDistribution(importlib.metadata.Distribution):
     ) -> None:
         self._files = files
         self.info_location = info_location
+
+    @cached_property
+    def _name_and_version(self) -> tuple[str | None, str | None]:
+        """Share one metadata parse for name and version; retain only the values."""
+        message = self.metadata
+        return message.get("Name"), message.get("Version")
+
+    @property
+    def name(self) -> str:
+        name = self._name_and_version[0]
+        return name if name is not None else super().name
+
+    @property
+    def version(self) -> str:
+        version = self._name_and_version[1]
+        return version if version is not None else super().version
 
     @classmethod
     def from_zipfile(
