@@ -56,19 +56,19 @@ class WheelDistribution(importlib.metadata.Distribution):
         self.info_location = info_location
 
     @cached_property
-    def _identity(self) -> tuple[str | None, str | None]:
-        """Retain wheel identity without retaining its parsed description."""
-        message = cast(email.message.Message, self.metadata)
+    def _name_and_version(self) -> tuple[str | None, str | None]:
+        """Share one metadata parse for name and version; retain only the values."""
+        message = self.metadata
         return message.get("Name"), message.get("Version")
 
     @property
     def name(self) -> str:
-        name = self._identity[0]
+        name = self._name_and_version[0]
         return name if name is not None else super().name
 
     @property
     def version(self) -> str:
-        version = self._identity[1]
+        version = self._name_and_version[1]
         return version if version is not None else super().version
 
     @classmethod
