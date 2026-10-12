@@ -36,7 +36,18 @@ def get_configuration_files() -> dict[Kind, list[str]]:
         proc = subprocess.run(
             [sys.executable, "-c", code], capture_output=True, encoding="utf-8"
         )
-        return ast.literal_eval(proc.stdout)
+        files = ast.literal_eval(proc.stdout)
+        assert isinstance(files, dict)
+        configuration_files: dict[Kind, list[str]] = {}
+        for kind, paths in files.items():
+            assert isinstance(kind, str)
+            assert isinstance(paths, list)
+            validated_paths: list[str] = []
+            for path in paths:
+                assert isinstance(path, str)
+                validated_paths.append(path)
+            configuration_files[Kind(kind)] = validated_paths
+        return configuration_files
     else:
         return _get_config_files()
 

@@ -435,7 +435,8 @@ class PipScriptMaker(ScriptMaker):
         self, specification: str, options: dict[str, Any] | None = None
     ) -> list[str]:
         _raise_for_invalid_entrypoint(specification, self.target_dir)
-        return super().make(specification, options)
+        # distlib returns script paths but leaves make() untyped.
+        return super().make(specification, options)  # type: ignore[no-any-return]  # ty: ignore[unsound-return-statement]
 
 
 def _install_wheel(  # noqa: C901, PLR0915 function is too long
