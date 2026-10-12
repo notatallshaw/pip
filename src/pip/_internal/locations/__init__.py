@@ -77,13 +77,13 @@ def _looks_like_bpo_44860() -> bool:
 
     See <https://bugs.python.org/issue44860>.
     """
-    from distutils.command.install import INSTALL_SCHEMES
+    from ._distutils import INSTALL_SCHEMES
 
     try:
         unix_user_platlib = INSTALL_SCHEMES["unix_user"]["platlib"]
     except KeyError:
         return False
-    return unix_user_platlib == "$usersite"
+    return bool(unix_user_platlib == "$usersite")
 
 
 def _looks_like_red_hat_patched_platlib_purelib(scheme: dict[str, str]) -> bool:
@@ -102,7 +102,7 @@ def _looks_like_red_hat_lib() -> bool:
 
     This is the only way I can see to tell a Red Hat-patched Python.
     """
-    from distutils.command.install import INSTALL_SCHEMES
+    from ._distutils import INSTALL_SCHEMES
 
     return all(
         k in INSTALL_SCHEMES
@@ -114,7 +114,7 @@ def _looks_like_red_hat_lib() -> bool:
 @functools.cache
 def _looks_like_debian_scheme() -> bool:
     """Debian adds two additional schemes."""
-    from distutils.command.install import INSTALL_SCHEMES
+    from ._distutils import INSTALL_SCHEMES
 
     return "deb_system" in INSTALL_SCHEMES and "unix_local" in INSTALL_SCHEMES
 

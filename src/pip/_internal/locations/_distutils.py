@@ -19,18 +19,20 @@ except (ImportError, AttributeError):
 import logging
 import os
 import sys
-from distutils.cmd import Command as DistutilsCommand
-from distutils.command.install import SCHEME_KEYS
+from distutils.command import install as install_module
 from distutils.command.install import install as distutils_install_command
 from distutils.sysconfig import get_python_lib
 
-from pip._internal.models.scheme import Scheme
+from pip._internal.models.scheme import SCHEME_KEYS, Scheme
 from pip._internal.utils.compat import WINDOWS
 from pip._internal.utils.virtualenv import running_under_virtualenv
 
 from .base import get_major_minor_version
 
 logger = logging.getLogger(__name__)
+
+# The stdlib schemes include distributor patches absent from setuptools' stubs.
+INSTALL_SCHEMES = vars(install_module)["INSTALL_SCHEMES"]
 
 
 def distutils_scheme(
@@ -62,10 +64,8 @@ def distutils_scheme(
                 "Ignore distutils configs in %s due to encoding errors.",
                 ", ".join(os.path.basename(p) for p in paths),
             )
-    obj: DistutilsCommand | None = None
-    obj = d.get_command_obj("install", create=True)
-    assert obj is not None
-    i: distutils_install_command = obj
+    # mypy's distutils stubs return generic Command for this named factory.
+    i: distutils_install_command = d.get_command_obj("install", create=True)  # type: ignore[assignment]
     # NOTE: setting user or home has the side-effect of creating the home dir
     # or user base for installations during finalize_options()
     # ideally, we'd prefer a scheme class that has no side-effects.
