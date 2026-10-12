@@ -14,7 +14,7 @@ from typing import (
     TypeVar,
 )
 
-from pip._internal.utils.misc import enum, rmtree
+from pip._internal.utils.misc import rmtree
 
 logger = logging.getLogger(__name__)
 
@@ -23,11 +23,10 @@ _T = TypeVar("_T", bound="TempDirectory")
 
 # Kinds of temporary directories. Only needed for ones that are
 # globally-managed.
-tempdir_kinds = enum(
-    BUILD_ENV="build-env",
-    EPHEM_WHEEL_CACHE="ephem-wheel-cache",
-    REQ_BUILD="req-build",
-)
+class tempdir_kinds:
+    BUILD_ENV = "build-env"
+    EPHEM_WHEEL_CACHE = "ephem-wheel-cache"
+    REQ_BUILD = "req-build"
 
 
 _tempdir_manager: ExitStack | None = None

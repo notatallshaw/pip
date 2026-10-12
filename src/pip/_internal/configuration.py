@@ -26,7 +26,7 @@ from pip._internal.exceptions import (
 from pip._internal.utils import appdirs
 from pip._internal.utils.compat import WINDOWS, get_locale_encoding
 from pip._internal.utils.logging import getLogger
-from pip._internal.utils.misc import ensure_dir, enum
+from pip._internal.utils.misc import ensure_dir
 
 RawConfigParser = configparser.RawConfigParser  # Shorthand
 Kind = NewType("Kind", str)
@@ -34,14 +34,15 @@ Kind = NewType("Kind", str)
 CONFIG_BASENAME = "pip.ini" if WINDOWS else "pip.conf"
 ENV_NAMES_IGNORED = "version", "help"
 
-# The kinds of configurations there are.
-kinds = enum(
-    USER="user",  # User Specific
-    GLOBAL="global",  # System Wide
-    SITE="site",  # [Virtual] Environment Specific
-    ENV="env",  # from PIP_CONFIG_FILE
-    ENV_VAR="env-var",  # from Environment Variables
-)
+
+class kinds:
+    USER = Kind("user")
+    GLOBAL = Kind("global")
+    SITE = Kind("site")
+    ENV = Kind("env")
+    ENV_VAR = Kind("env-var")
+
+
 OVERRIDE_ORDER = kinds.GLOBAL, kinds.USER, kinds.SITE, kinds.ENV, kinds.ENV_VAR
 VALID_LOAD_ONLY = kinds.USER, kinds.GLOBAL, kinds.SITE
 
