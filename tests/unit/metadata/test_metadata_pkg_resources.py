@@ -1,6 +1,7 @@
 import email.message
 import itertools
-from typing import cast
+import os
+from typing import TYPE_CHECKING, cast
 from unittest import mock
 
 import pytest
@@ -17,7 +18,10 @@ from pip._internal.metadata.pkg_resources import (
     InMemoryMetadata,
 )
 
-pkg_resources = pytest.importorskip("pip._vendor.pkg_resources")
+if TYPE_CHECKING:
+    from pip._vendor import pkg_resources
+else:
+    pkg_resources = pytest.importorskip("pip._vendor.pkg_resources")
 
 
 def _dist_is_local(dist: mock.Mock) -> bool:
@@ -109,21 +113,102 @@ def test_wheel_metadata_works() -> None:
 
     assert name == dist.canonical_name == dist.raw_name
     assert parse_version(version) == dist.version
+    assert dist.raw_version == version
+
+    assert dist.info_location is None
+    assert not dist.installed_by_distutils
+    assert dist.is_file("METADATA") is True
+    assert dist.is_file("missing") is False
+
     assert {canonicalize_name(e) for e in extras} == set(dist.iter_provided_extras())
-    assert [require_a] == [str(r) for r in dist.iter_dependencies()]
+    dependencies = list(dist.iter_dependencies())
+    extra_dependencies = list(dist.iter_dependencies(["also_b"]))
+    assert all(isinstance(r, Requirement) for r in dependencies + extra_dependencies)
+    assert [require_a] == [str(r) for r in dependencies]
     assert [Requirement(require_a), Requirement(require_b)] == [
-        Requirement(str(r)) for r in dist.iter_dependencies(["also_b"])
+        Requirement(str(r)) for r in extra_dependencies
     ]
+
     assert metadata.as_string() == dist.metadata.as_string()
     assert SpecifierSet(requires_python) == dist.requires_python
 
 
-def test_wheel_metadata_throws_on_bad_unicode() -> None:
+@pytest.mark.parametrize("method", ["get_metadata", "get_metadata_lines"])
+def test_wheel_metadata_throws_on_bad_unicode(method: str) -> None:
     metadata = InMemoryMetadata({"METADATA": b"\xff"}, "<in-memory>")
 
     with pytest.raises(UnsupportedWheel) as e:
-        metadata.get_metadata("METADATA")
+        getattr(metadata, method)("METADATA")
     assert "METADATA" in str(e.value)
+
+
+@pytest.mark.parametrize(
+    "content, expected",
+    [
+        (b"", []),
+        (b" Name: simple\r\nVersion: 0.1.0 \r\n", ["Name: simple", "Version: 0.1.0"]),
+        (b"\n# comment\n  Requires-Dist: a # inline\n", ["Requires-Dist: a # inline"]),
+    ],
+)
+def test_in_memory_metadata_lines(content: bytes, expected: list[str]) -> None:
+    metadata = InMemoryMetadata({"METADATA": content}, "<in-memory>")
+
+    assert list(metadata.get_metadata_lines("METADATA")) == expected
+
+
+def test_in_memory_metadata_has_no_directories() -> None:
+    metadata = InMemoryMetadata({"scripts/run": b"print('hello')"}, "<in-memory>")
+
+    assert not metadata.metadata_isdir("scripts")
+    assert metadata.metadata_listdir("scripts") == []
+
+
+@pytest.mark.parametrize("path, expected", [("", False), ("PKG-INFO", True)])
+def test_installed_by_distutils_file_metadata(path: str, expected: bool) -> None:
+    dist = Distribution(
+        pkg_resources.Distribution(metadata=pkg_resources.FileMetadata(path))
+    )
+
+    assert dist.installed_by_distutils is expected
+
+
+def test_installed_by_distutils_file_metadata_subclass() -> None:
+    class CustomFileMetadata(pkg_resources.FileMetadata):
+        pass
+
+    dist = Distribution(
+        pkg_resources.Distribution(metadata=CustomFileMetadata("PKG-INFO"))
+    )
+
+    assert dist.installed_by_distutils
+
+
+def test_installed_by_distutils_ignores_other_provider_paths() -> None:
+    class OtherProvider(pkg_resources.EmptyProvider):
+        path = "PKG-INFO"
+
+    dist = Distribution(pkg_resources.Distribution(metadata=OtherProvider()))
+
+    assert not dist.installed_by_distutils
+
+
+def test_installed_by_distutils_handles_attribute_error_in_path() -> None:
+    class PathWithMissingTruthValue(os.PathLike[str]):
+        """A filesystem path whose truth test raises AttributeError."""
+
+        def __fspath__(self) -> str:
+            return "PKG-INFO"
+
+        def __bool__(self) -> bool:
+            raise AttributeError("path truth value unavailable")
+
+    dist = Distribution(
+        pkg_resources.Distribution(
+            metadata=pkg_resources.FileMetadata(PathWithMissingTruthValue())
+        )
+    )
+
+    assert not dist.installed_by_distutils
 
 
 def test_iter_entry_points_throws_on_invalid_entry_point() -> None:
