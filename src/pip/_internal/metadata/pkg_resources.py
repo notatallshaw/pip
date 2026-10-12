@@ -7,6 +7,7 @@ import os
 import zipfile
 from collections.abc import Collection, Iterable, Iterator, Mapping
 from typing import (
+    Any,
     NamedTuple,
 )
 
@@ -47,7 +48,7 @@ class EntryPoint(NamedTuple):
     group: str
 
 
-class InMemoryMetadata:
+class InMemoryMetadata(pkg_resources.EmptyProvider):
     """IMetadataProvider that reads metadata files from a dictionary.
 
     This also maps metadata decoding exceptions to our internal exception type.
@@ -69,16 +70,13 @@ class InMemoryMetadata:
                 f"Error decoding metadata for {self._wheel_name}: {e} in {name} file"
             )
 
-    def get_metadata_lines(self, name: str) -> Iterable[str]:
-        return pkg_resources.yield_lines(self.get_metadata(name))
+    def get_metadata_lines(self, name: str) -> Iterator[str]:
+        # The vendored text iterator is untyped and yields stripped strings.
+        return iter(
+            pkg_resources.yield_lines(self.get_metadata(name))
+        )  # ty: ignore[unsound-return-statement]
 
-    def metadata_isdir(self, name: str) -> bool:
-        return False
-
-    def metadata_listdir(self, name: str) -> list[str]:
-        return []
-
-    def run_script(self, script_name: str, namespace: str) -> None:
+    def run_script(self, script_name: str, namespace: dict[str, Any]) -> None:
         pass
 
 
@@ -173,17 +171,15 @@ class Distribution(BaseDistribution):
 
     @property
     def info_location(self) -> str | None:
-        return self._dist.egg_info
+        # pkg_resources delegates this untyped attribute to its metadata provider.
+        return self._dist.egg_info  # type: ignore[no-any-return]  # ty: ignore[unsound-return-statement]
 
     @property
     def installed_by_distutils(self) -> bool:
         # A distutils-installed distribution is provided by FileMetadata. This
         # provider has a "path" attribute not present anywhere else. Not the
         # best introspection logic, but pip has been doing this for a long time.
-        try:
-            return bool(self._dist._provider.path)
-        except AttributeError:
-            return False
+        return bool(getattr(self._dist._provider, "path", None))
 
     @property
     def canonical_name(self) -> NormalizedName:
@@ -195,10 +191,11 @@ class Distribution(BaseDistribution):
 
     @property
     def raw_version(self) -> str:
-        return self._dist.version
+        # The vendored property returns a string but has no return annotation.
+        return self._dist.version  # type: ignore[no-any-return]  # ty: ignore[unsound-return-statement]
 
     def is_file(self, path: InfoPath) -> bool:
-        return self._dist.has_metadata(str(path))
+        return bool(self._dist.has_metadata(str(path)))
 
     def iter_distutils_script_names(self) -> Iterator[str]:
         yield from self._dist.metadata_listdir("scripts")
@@ -210,7 +207,8 @@ class Distribution(BaseDistribution):
         content = self._dist.get_metadata(name)
         if content is None:
             raise NoneMetadataError(self, name)
-        return content
+        # get_metadata() is dynamically forwarded to the provider and returns text.
+        return content  # type: ignore[no-any-return]  # ty: ignore[unsound-return-statement]
 
     def iter_entry_points(self) -> Iterable[BaseEntryPoint]:
         try:
@@ -252,7 +250,8 @@ class Distribution(BaseDistribution):
                 map(canonicalize_name, extras)
             )
             extras = [self._extra_mapping[extra] for extra in relevant_extras]
-        return self._dist.requires(extras)
+        # The vendored method returns packaging requirements without annotating them.
+        return self._dist.requires(extras)  # type: ignore[no-any-return]  # ty: ignore[unsound-return-statement]
 
     def iter_provided_extras(self) -> Iterable[NormalizedName]:
         return self._extra_mapping.keys()
