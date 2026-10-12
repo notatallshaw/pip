@@ -271,7 +271,7 @@ class _SSLContextAdapterMixin:
             # https://github.com/pypa/pip/issues/13465
             proxy_kwargs.setdefault("proxy_ssl_context", self._ssl_context)
         # Concrete adapters inherit this untyped factory from requests.
-        return super().proxy_manager_for(proxy, **proxy_kwargs)  # type: ignore[misc, no-any-return]  # ty: ignore[unresolved-attribute, unsound-return-statement]
+        return super().proxy_manager_for(proxy, **proxy_kwargs)  # type: ignore[misc, no-any-return]
 
 
 class HTTPAdapter(_SSLContextAdapterMixin, _BaseHTTPAdapter):

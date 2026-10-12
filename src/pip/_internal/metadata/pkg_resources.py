@@ -72,9 +72,7 @@ class InMemoryMetadata(pkg_resources.EmptyProvider):
 
     def get_metadata_lines(self, name: str) -> Iterator[str]:
         # The vendored text iterator is untyped and yields stripped strings.
-        return iter(
-            pkg_resources.yield_lines(self.get_metadata(name))
-        )  # ty: ignore[unsound-return-statement]
+        return iter(pkg_resources.yield_lines(self.get_metadata(name)))
 
     def run_script(self, script_name: str, namespace: dict[str, Any]) -> None:
         pass
@@ -172,7 +170,7 @@ class Distribution(BaseDistribution):
     @property
     def info_location(self) -> str | None:
         # pkg_resources delegates this untyped attribute to its metadata provider.
-        return self._dist.egg_info  # type: ignore[no-any-return]  # ty: ignore[unsound-return-statement]
+        return self._dist.egg_info  # type: ignore[no-any-return]
 
     @property
     def installed_by_distutils(self) -> bool:
@@ -192,7 +190,7 @@ class Distribution(BaseDistribution):
     @property
     def raw_version(self) -> str:
         # The vendored property returns a string but has no return annotation.
-        return self._dist.version  # type: ignore[no-any-return]  # ty: ignore[unsound-return-statement]
+        return self._dist.version  # type: ignore[no-any-return]
 
     def is_file(self, path: InfoPath) -> bool:
         return bool(self._dist.has_metadata(str(path)))
@@ -208,7 +206,7 @@ class Distribution(BaseDistribution):
         if content is None:
             raise NoneMetadataError(self, name)
         # get_metadata() is dynamically forwarded to the provider and returns text.
-        return content  # type: ignore[no-any-return]  # ty: ignore[unsound-return-statement]
+        return content  # type: ignore[no-any-return]
 
     def iter_entry_points(self) -> Iterable[BaseEntryPoint]:
         try:
@@ -251,7 +249,7 @@ class Distribution(BaseDistribution):
             )
             extras = [self._extra_mapping[extra] for extra in relevant_extras]
         # The vendored method returns packaging requirements without annotating them.
-        return self._dist.requires(extras)  # type: ignore[no-any-return]  # ty: ignore[unsound-return-statement]
+        return self._dist.requires(extras)  # type: ignore[no-any-return]
 
     def iter_provided_extras(self) -> Iterable[NormalizedName]:
         return self._extra_mapping.keys()

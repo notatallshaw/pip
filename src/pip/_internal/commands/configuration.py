@@ -286,7 +286,7 @@ class ConfigurationCommand(Command):
         editor = options.editor
         if editor is not None:
             # optparse exposes dynamically declared options as Any.
-            return editor  # type: ignore[no-any-return]  # ty: ignore[unsound-return-statement]
+            return editor  # type: ignore[no-any-return]
         elif "VISUAL" in os.environ:
             return os.environ["VISUAL"]
         elif "EDITOR" in os.environ:

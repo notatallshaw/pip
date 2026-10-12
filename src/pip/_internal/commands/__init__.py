@@ -125,7 +125,7 @@ def create_command(name: str, **kwargs: Any) -> Command:
     module = importlib.import_module(module_path)
     command_class = getattr(module, class_name)
     # The registry names lazily imported Command subclasses.
-    return command_class(name=name, summary=summary, **kwargs)  # type: ignore[no-any-return]  # ty: ignore[unsound-return-statement]
+    return command_class(name=name, summary=summary, **kwargs)  # type: ignore[no-any-return]
 
 
 def get_similar_commands(name: str) -> str | None:

@@ -130,7 +130,7 @@ class ParsedLine:
         elif self.is_editable:
             # We don't support multiple -e on one line
             # optparse stores the -e strings in this dynamically declared option.
-            return self.opts.editables[0]  # type: ignore[no-any-return]  # ty: ignore[unsound-return-statement]
+            return self.opts.editables[0]  # type: ignore[no-any-return]
         return None
 
 

@@ -3,11 +3,11 @@ import itertools
 
 import pytest
 
-from pip._vendor import pkg_resources
 from pip._vendor.packaging.requirements import Requirement
 from pip._vendor.packaging.specifiers import SpecifierSet
 from pip._vendor.packaging.utils import canonicalize_name
 from pip._vendor.packaging.version import parse as parse_version
+from pip._vendor.pkg_resources import WorkingSet
 
 from pip._internal.exceptions import InstallationError, UnsupportedWheel
 from pip._internal.metadata.pkg_resources import (
@@ -16,10 +16,12 @@ from pip._internal.metadata.pkg_resources import (
     InMemoryMetadata,
 )
 
+pkg_resources = pytest.importorskip("pip._vendor.pkg_resources")
 
-def _working_set(names: list[str]) -> pkg_resources.WorkingSet:
+
+def _working_set(names: list[str]) -> WorkingSet:
     """Build an isolated working set without scanning installed packages."""
-    ws = pkg_resources.WorkingSet([])
+    ws = WorkingSet([])
     for name in names:
         ws.add(
             pkg_resources.Distribution(
@@ -46,7 +48,7 @@ workingset_stdlib = _working_set(["argparse", "wsgiref"])
         ),
     ],
 )
-def test_get_distribution(ws: pkg_resources.WorkingSet, req_name: str) -> None:
+def test_get_distribution(ws: WorkingSet, req_name: str) -> None:
     """Ensure get_distribution() finds all kinds of distributions."""
     dist = Environment(ws).get_distribution(req_name)
     assert dist is not None
