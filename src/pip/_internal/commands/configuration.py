@@ -279,8 +279,10 @@ class ConfigurationCommand(Command):
             raise PipError("Internal Error.")
 
     def _determine_editor(self, options: Values) -> str:
-        if options.editor is not None:
-            return options.editor
+        editor = options.editor
+        if editor is not None:
+            # optparse exposes dynamically declared options as Any.
+            return editor  # type: ignore[no-any-return]
         elif "VISUAL" in os.environ:
             return os.environ["VISUAL"]
         elif "EDITOR" in os.environ:

@@ -18,6 +18,7 @@ import pytest
 
 from pip._vendor import requests
 from pip._vendor.requests.utils import select_proxy
+from pip._vendor.urllib3 import ProxyManager
 from pip._vendor.urllib3.connection import DummyConnection
 from pip._vendor.urllib3.connectionpool import HTTPSConnectionPool
 
@@ -522,6 +523,7 @@ class TestSSLContextAdapterMixinProxy:
 
         adapter = cast(HTTPAdapter, session.adapters["https://"])
         proxy_manager = adapter.proxy_manager_for("https://proxy.example:443")
+        assert isinstance(proxy_manager, ProxyManager)
 
         assert proxy_manager.proxy_ssl_context is ssl_context
         assert proxy_manager.connection_pool_kw["ssl_context"] is ssl_context
@@ -531,6 +533,7 @@ class TestSSLContextAdapterMixinProxy:
 
         adapter = cast(HTTPAdapter, session.adapters["https://"])
         proxy_manager = adapter.proxy_manager_for("https://proxy.example:443")
+        assert isinstance(proxy_manager, ProxyManager)
 
         assert proxy_manager.proxy_ssl_context is None
 
