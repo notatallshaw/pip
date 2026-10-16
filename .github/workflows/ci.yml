@@ -321,7 +321,7 @@ jobs:
       - tests-zipapp
       - vendoring
 
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
 
     steps:
       - name: Decide whether the needed jobs succeeded or failed
