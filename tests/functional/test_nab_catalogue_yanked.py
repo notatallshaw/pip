@@ -1,7 +1,9 @@
+import json
 from pathlib import Path
 
 import pytest
 
+from tests.functional.test_nab_preparation_reuse import tracked_install
 from tests.lib import PipTestEnvironment, create_basic_wheel_for_package
 from tests.lib.wheel import make_wheel
 
@@ -151,7 +153,7 @@ def test_rejected_pin_cannot_admit_a_yanked_release_for_another_parent(
     result = script.pip(
         "install", "--no-index", "--find-links", listing, "app", expect_error=True
     )
-    assert "Nab catalogue fallback: ResolutionError" in result.stdout
+    assert "Nab catalogue fallback: IncompletePreferenceError" in result.stdout
     script.assert_not_installed("app", "dep")
 
 
@@ -225,13 +227,26 @@ def test_inactive_dependency_pin_cannot_grant_permission(
     script.assert_not_installed("app", "dep")
 
 
-def mixed_files_listing(script: PipTestEnvironment) -> Path:
+def mixed_files_listing(
+    script: PipTestEnvironment,
+    *,
+    live_dependency: str = "tools==1",
+    withdrawn_dependency: str | None = "tools==2",
+) -> Path:
     """Give one version live and withdrawn wheels with different dependencies."""
     links = []
-    for build, dependency, withdrawn in [(1, "tools==1", False), (2, "tools==2", True)]:
+    for build, dependency, withdrawn in [
+        (1, live_dependency, False),
+        (2, withdrawn_dependency, True),
+    ]:
         filename = f"dep-1.0-{build}-py3-none-any.whl"
         make_wheel(
-            name="dep", version="1.0", metadata_updates={"Requires-Dist": dependency}
+            name="dep",
+            version="1.0",
+            metadata_updates={
+                "Provides-Extra": "feature",
+                **({} if dependency is None else {"Requires-Dist": dependency}),
+            },
         ).save_to(script.scratch_path / filename)
         flag = ' data-yanked="withdrawn"' if withdrawn else ""
         links.append(f'<a href="{filename}"{flag}>{filename}</a>')
@@ -241,6 +256,79 @@ def mixed_files_listing(script: PipTestEnvironment) -> Path:
     listing = script.scratch_path / "links.html"
     listing.write_text("\n".join(links))
     return listing
+
+
+@pytest.mark.parametrize(
+    "replacement", [False, True], ids=["missing-source", "replaced-source"]
+)
+@pytest.mark.parametrize("extra", [False, True], ids=["base", "extra"])
+def test_unread_url_source_can_rescue_a_live_file(
+    script: PipTestEnvironment, *, replacement: bool, extra: bool
+) -> None:
+    """A hidden URL can repair availability or replace same-version metadata."""
+    listing = mixed_files_listing(
+        script,
+        live_dependency="support==1" if replacement else "support>=2",
+        withdrawn_dependency=None,
+    )
+    hidden = script.scratch_path / "hidden"
+    hidden.mkdir()
+    name = "dep" if replacement else "support"
+    direct = create_basic_wheel_for_package(
+        script,
+        name,
+        "1.0" if replacement else "3",
+        depends=["support==2"] if replacement else [],
+        extras={"feature": []} if replacement else None,
+    )
+    direct = direct.rename(hidden / direct.name)
+    bridge = Path(
+        make_wheel(
+            name="bridge",
+            version="1",
+            metadata=(
+                "Metadata-Version: 2.1\nName: bridge\nVersion: 1\n"
+                f"Requires-Dist: {name} @ {direct.as_uri()}\n"
+            ),
+        ).save_to_dir(script.scratch_path)
+    )
+    wheels = [
+        create_basic_wheel_for_package(script, "bridge", "2"),
+        bridge,
+        create_basic_wheel_for_package(script, "support", "1"),
+    ]
+    if replacement:
+        wheels.append(create_basic_wheel_for_package(script, "support", "2"))
+    with listing.open("a") as stream:
+        for wheel in wheels:
+            stream.write(f'\n<a href="{wheel.name}">{wheel.name}</a>')
+    report = script.scratch_path / "report.json"
+    requirements = ["dep[feature]==1.0" if extra else "dep==1.0", "bridge"]
+    if replacement:
+        requirements.append("support==2")
+
+    # Inspect the selected artifact even if a withdrawn file emitted a warning.
+    script.pip_expect_warning = True
+    result = tracked_install(
+        script,
+        *requirements,
+        find_links=listing,
+        options=("--report", str(report)),
+    )
+
+    assert "NATIVE True" not in result.stdout
+    selected = next(
+        item
+        for item in json.loads(report.read_text())["install"]
+        if item["metadata"]["name"] == "dep"
+    )
+    expected = (
+        direct if replacement else script.scratch_path / "dep-1.0-1-py3-none-any.whl"
+    )
+    assert selected["download_info"]["url"] == expected.as_uri()
+    assert not selected["is_yanked"]
+    script.assert_installed(dep="1.0", bridge="1", support="2" if replacement else "3")
+    script.pip("check")
 
 
 @pytest.mark.parametrize("roots", [("dep==1.0", "tools"), ("tools", "dep==1.0")])

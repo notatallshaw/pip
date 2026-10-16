@@ -176,6 +176,7 @@ class CatalogueProvider(BaseProvider[str, Version]):
         self.solution_ranges: Mapping[str, RangeProtocol[Version]] = {}
         self.solution_decisions: Mapping[str, Version] = {}
         self.has_conditional_prereleases = False
+        self.has_incomplete_queries = False
         self.pending_dependencies: list[Incompatibility[str, Version]] = []
         self.matching_counts: dict[tuple[str, RangeProtocol[Version]], int] = {}
         self.universes: dict[str, list[Version]] = {}

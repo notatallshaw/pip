@@ -90,6 +90,7 @@ class YankPreference:
         self.remaining = max_steps
         self.stats: ResolverStats[Any] = ResolverStats()
         self.outcomes: dict[PreferenceScope, PreparationStatus] = {}
+        self.incomplete_facts: dict[PreferenceScope, int] = {}
         self.refuted: set[_Context] = set()
         self.possible: dict[_Context, int] = {}
 
@@ -206,14 +207,15 @@ class YankPreference:
             candidate.base,
         )
         outcome = self.outcomes.get(query)
+        if outcome is PreparationStatus.INCOMPLETE:
+            if self.incomplete_facts.get(query) == len(self.catalogue.facts):
+                return outcome
+            outcome = None
         if outcome is None:
             if not scope.live < query.live:
                 message = "live preference analysis is incomplete: cyclic query"
                 raise ResolutionInvariantError(message)
             raise _NeedLiveProofError(query)
-        if outcome is PreparationStatus.INCOMPLETE:
-            return outcome
-
         context = _Context(scope, frozenset(selected.values()))
         if context in self.refuted:
             return PreparationStatus.IMPOSSIBLE
@@ -248,6 +250,8 @@ class YankPreference:
                     if isinstance(exc, IncompletePreferenceError)
                     else PreparationStatus.IMPOSSIBLE
                 )
+                if isinstance(exc, IncompletePreferenceError):
+                    self.incomplete_facts[scope] = len(self.catalogue.facts)
                 stack.pop()
             else:
                 if scope.target and not any(

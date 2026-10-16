@@ -277,7 +277,8 @@ class YankProxyProvider(BaseProvider[Package, int]):
             status = self.preference.check(candidate, selected, self.scope)
             if status is not PreparationStatus.ALLOWED:
                 self.incomplete |= status is PreparationStatus.INCOMPLETE
-                self.block_context(package)
+                if status is not PreparationStatus.INCOMPLETE:
+                    self.block_context(package)
                 return None
         data = self.catalogue.prepare(candidate)
         if data is None:
@@ -380,7 +381,9 @@ class YankProxyProvider(BaseProvider[Package, int]):
         """Resolve under one set of restrictions with the shared work budget."""
         query = self.new_query(scope)
         solver: Resolver[Package, int] = Resolver(
-            query, max_iterations=self.preference.remaining
+            query,
+            max_iterations=self.preference.remaining,
+            availability_generation=lambda: len(self.catalogue.facts),
         )
         roots: dict[Package, Range[int]] = {
             name: query.encode_range(name, allowed)
@@ -391,7 +394,14 @@ class YankProxyProvider(BaseProvider[Package, int]):
         except ResolutionTerminatedError:
             raise
         except ResolutionError as exc:
-            if query.incomplete or exc.incompatibility is None:
+            if (
+                query.incomplete
+                or exc.incompatibility is None
+                or not self.catalogue.has_complete_metadata(
+                    self.input_pins, fixed=scope.fixed, live=scope.live
+                )
+            ):
+                self.catalogue.provider.has_incomplete_queries = True
                 message = "yanked dependency resolution is incomplete"
                 if query.incomplete:
                     message += ": " + self.catalogue.unavailable_reason

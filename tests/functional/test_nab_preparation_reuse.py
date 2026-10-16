@@ -42,6 +42,7 @@ def tracked_install(
     options: tuple[str, ...] = (),
     expect_error: bool = False,
     ignore_installed: bool = True,
+    find_links: Path | None = None,
 ) -> TestPipResult:
     """Run real pip while counting candidate preparation at its native boundary."""
     probe = script.scratch_path / "preparation_probe.py"
@@ -53,7 +54,7 @@ def tracked_install(
         *(("--ignore-installed",) if ignore_installed else ()),
         "--no-index",
         "--find-links",
-        str(script.scratch_path),
+        str(script.scratch_path if find_links is None else find_links),
         *options,
         *(str(requirement) for requirement in requirements),
         expect_error=expect_error,
@@ -149,7 +150,8 @@ def test_definitive_fallback_discovers_a_url_after_static_failure(
     result = tracked_install(script, "dep>=2", "bridge", options=options)
 
     script.assert_installed(dep="3.0", bridge="1.0")
-    assert "Nab catalogue fallback: ResolutionError" in result.stdout
+    expected = "ResolutionError" if group == "numeric" else "IncompletePreferenceError"
+    assert f"Nab catalogue fallback: {expected}" in result.stdout
     assert "NATIVE True" not in result.stdout
     assert result.stdout.splitlines().count("NATIVE False") == 1
     assert "NATIVE_ACTIVE_EXCEPTION" not in result.stdout
