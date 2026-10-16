@@ -441,7 +441,9 @@ class PartialSolution(Generic[PackageType, VersionType]):
         cache[package] = result
         return result
 
-    def _refresh_effective_range(self, package: PackageType) -> None:
+    def _refresh_effective_range(
+        self, package: PackageType
+    ) -> RangeProtocol[VersionType]:
         """Recompute the package's range, advancing the epoch if it emptied."""
         self._effective_range_cache.pop(package, None)
         self._changed.add(package)
@@ -449,9 +451,12 @@ class PartialSolution(Generic[PackageType, VersionType]):
         assert effective is not None
         if effective.is_empty:
             self._contradiction_epoch += 1
+        return effective
 
-    def decide(self, package: PackageType, version: VersionType) -> None:
-        """Record a decision: pick a specific version for a package."""
+    def decide(
+        self, package: PackageType, version: VersionType
+    ) -> RangeProtocol[VersionType]:
+        """Record a decision and return the exact range stored for it."""
         self._decision_level += 1
         exact_range = self._range_type.singleton(version)
 
@@ -462,7 +467,7 @@ class PartialSolution(Generic[PackageType, VersionType]):
         self._refresh_effective_range(package)
         self._undecided.discard(package)
 
-        assignment = Assignment(
+        assignment: Assignment[PackageType, VersionType] = Assignment(
             package=package,
             accumulated_range=exact_range,
             decision_level=self._decision_level,
@@ -475,6 +480,7 @@ class PartialSolution(Generic[PackageType, VersionType]):
         )
         self._assignments.append(assignment)
         self._assignments_by_package[package].append(assignment)
+        return exact_range
 
     def derive(
         self,
@@ -483,11 +489,13 @@ class PartialSolution(Generic[PackageType, VersionType]):
         *,
         positive: bool,
         cause: Incompatibility[PackageType, VersionType],
-    ) -> None:
+    ) -> RangeProtocol[VersionType]:
         """Record a derivation from unit propagation.
 
         A package's first derivation of a sign has nothing to fold into, so it
         records ``constraint`` itself.
+
+        Return the newly computed effective range, including any exclusions.
 
         See: https://github.com/dart-lang/pub/blob/master/doc/solver.md#unit-propagation
         """
@@ -513,7 +521,7 @@ class PartialSolution(Generic[PackageType, VersionType]):
             )
             self._negative_ranges[package] = new_range
 
-        self._refresh_effective_range(package)
+        effective = self._refresh_effective_range(package)
 
         assignment = Assignment(
             package=package,
@@ -528,6 +536,7 @@ class PartialSolution(Generic[PackageType, VersionType]):
         )
         self._assignments.append(assignment)
         self._assignments_by_package[package].append(assignment)
+        return effective
 
     def backtrack(self, target_level: int) -> None:
         """Remove all assignments above target_level.
@@ -542,39 +551,39 @@ class PartialSolution(Generic[PackageType, VersionType]):
         _detach_snapshots(self._range_snapshots)
         _detach_snapshots(self._decision_snapshots)
 
-        # Trail levels never decrease, so this pops exactly the assignments above
-        # target_level; every other package keeps the positive and negative ranges
-        # its cached effective range was derived from.
-        while self._assignments and self._assignments[-1].decision_level > target_level:
-            package = self._assignments.pop().package
-            self._effective_range_cache.pop(package, None)
-            self._changed.add(package)
-
         self._decision_level = target_level
+        if (
+            not self._assignments
+            or self._assignments[-1].decision_level <= target_level
+        ):
+            return
 
-        empty_packages: list[PackageType] = []
-        for package, entries in self._assignments_by_package.items():
-            popped = decision_popped = False
-            while entries and entries[-1].decision_level > target_level:
-                popped = True
-                if entries.pop().is_decision:
-                    decision_popped = True
+        # Trail levels never decrease, so removed assignments form a suffix.
+        changed_packages: dict[PackageType, None] = {}
+        assignments = self._assignments
+        while assignments and assignments[-1].decision_level > target_level:
+            changed_packages[assignments.pop().package] = None
 
-            if not entries:
-                empty_packages.append(package)
+        # Untouched packages keep their cached state.
+        self._changed.update(changed_packages)
+        for package in changed_packages:
+            self._effective_range_cache.pop(package, None)
+            entries = self._assignments_by_package[package]
+            if entries[0].decision_level > target_level:
+                entries.clear()
+                del self._assignments_by_package[package]
                 self._positive_ranges.pop(package, None)
                 self._negative_ranges.pop(package, None)
                 self._decided_versions.pop(package, None)
                 self._undecided.discard(package)
-            # A package that kept every entry already holds what the rebuild
-            # would restore.
-            elif popped:
+            else:
+                decision_popped = False
+                while entries[-1].decision_level > target_level:
+                    if entries.pop().is_decision:
+                        decision_popped = True
                 self._update_package_state_after_backtrack(
                     package, entries, decision_popped=decision_popped
                 )
-
-        for package in empty_packages:
-            del self._assignments_by_package[package]
 
     def _update_package_state_after_backtrack(
         self,

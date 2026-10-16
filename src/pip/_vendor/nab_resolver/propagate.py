@@ -94,13 +94,12 @@ def unit_propagation(
             if isinstance(evaluation, Term):
                 negated_term = evaluation.negate()
                 range_before = resolver.solution.get(negated_term.package)
-                resolver.solution.derive(
+                range_after = resolver.solution.derive(
                     negated_term.package,
                     negated_term.constraint,
                     positive=negated_term.is_positive(),
                     cause=incompatibility,
                 )
-                range_after = resolver.solution.get(negated_term.package)
 
                 # A derive that empties a range advances the epoch, which
                 # retires the stamps taken before it.

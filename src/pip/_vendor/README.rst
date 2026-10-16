@@ -104,7 +104,7 @@ Modifications
 * ``nab-resolver`` carries the candidate-provider API and incremental scheduling
   changes used by the prototype. Its patch is based on release 0.0.17 and
   reproduces the resolver source at nab commit
-  ``865785398361c122bf1b00c85f87755c43e6f4d5``, with typing imports qualified
+  ``61d54105822d39872ed9431536d7228ef8d5b114``, with typing imports qualified
   through ``pip._vendor``. These functional patches are prototype dependencies,
   not released APIs or a claim of compliance with the release-only policy above.
 * ``CacheControl`` has been modified to import its dependencies from

@@ -46,7 +46,7 @@ from .types import (
 )
 
 if TYPE_CHECKING:
-    from pip._vendor.typing_extensions import TypeIs
+    from typing_extensions import TypeIs
 
 __all__ = [
     "DEFAULT_MAX_ITERATIONS",
@@ -142,6 +142,13 @@ class Solution(Generic[PackageType, VersionType]):
 class ResolverProvider(Protocol[PackageType, VersionType]):
     """Interface for supplying version and dependency information.
 
+    Version values must be hashable, with stable hashes consistent with equality.
+
+    Providers whose readiness depends on selected candidates may implement
+    ``receive_decision_scan_hint(positive_ranges, decisions)``. This optional
+    callback receives current snapshots before ``begin_decision_scan`` and the
+    readiness checks, including after backtracking.
+
     Modeled after pubgrub-rs v0.3+ ``DependencyProvider``:
     https://docs.rs/pubgrub/latest/pubgrub/trait.DependencyProvider.html
     """
@@ -174,6 +181,15 @@ class ResolverProvider(Protocol[PackageType, VersionType]):
         The same pair is asked more than once: a backjump that re-decides a
         version asks again, and building the final :class:`Solution` asks once
         per pin.  Cache by package and version.
+
+        During one resolution, every call for a package/version pair must
+        describe the same dependencies. Returned mappings must remain unchanged
+        until result construction finishes. Range values must be immutable.
+        Providers may return fresh equal mappings.
+
+        This stability requirement applies to dependency declarations, not to
+        candidate eligibility. Prerelease and yank admission can depend on active
+        requirements and host policy; check it before preparing candidates.
         """
         ...
 
@@ -288,7 +304,9 @@ class ResolverProvider(Protocol[PackageType, VersionType]):
         every version inside it that could ever be chosen for ``package`` in
         this resolution must have exactly the dependencies being recorded
         for ``version``; versions inside it that can never be selected are
-        harmless.  ``None`` keeps the exact singleton.  Widening merges
+        harmless. Versions excluded only by current admission policy still count
+        if they could become selectable later. ``None`` keeps the exact singleton.
+        Widening merges
         dependency clauses for adjacent rejected versions into contiguous
         ranges instead of one hole per version, and lets a single clause
         reject a whole run of same-dependency versions.
@@ -594,14 +612,30 @@ def _as_root_requirements(
     """Accept either shape ``Resolver.resolve`` takes and return the sequence."""
     if _is_root_sequence(requirements):
         return requirements
+    if TYPE_CHECKING:
+        # Older checkers do not narrow the negative branch of a generic TypeIs.
+        assert isinstance(requirements, Mapping)
+
     # The parameters are spelled out because ``constraint`` is a contravariant
-    # protocol, which gives the version parameter no inference site.  The
-    # suppression is ty's: it reads the sequence member of the union as still
-    # live in the negative branch of a generic ``TypeIs``.
+    # protocol, which gives the version parameter no inference site.
     return [
         RootRequirement[PackageType, VersionType](package, required_range)
-        for package, required_range in requirements.items()  # ty: ignore[unresolved-attribute]
+        for package, required_range in requirements.items()
     ]
+
+
+class _RecordedDependencies:
+    """Retain a parent range and refinement causes across repeated decisions."""
+
+    __slots__ = ("parent_range", "refinement_causes")
+
+    def __init__(
+        self,
+        parent_range: RangeProtocol[Any],
+        refinement_causes: list[Incompatibility[Any, Any]],
+    ) -> None:
+        self.parent_range = parent_range
+        self.refinement_causes = refinement_causes
 
 
 class Resolver(Generic[PackageType, VersionType]):
@@ -720,6 +754,11 @@ class Resolver(Generic[PackageType, VersionType]):
         # Keyed by (package, dep_package, dep_constraint, dep_positive); used
         # to merge mergeable dependency clauses (pubgrub-rs's merge_dependents).
         self.dependency_index: dict[Any, int] = {}
+
+        # Dependency clauses survive backtracking and restarts.
+        self.recorded_dependencies: dict[
+            tuple[PackageType, VersionType], _RecordedDependencies
+        ] = {}
 
         self.solution: PartialSolution[Any, Any] = PartialSolution(
             range_type=range_type
@@ -941,7 +980,7 @@ class Resolver(Generic[PackageType, VersionType]):
             decide.record_no_versions(self, next_package, had_pending=had_pending)
             return next_package
 
-        self.solution.decide(next_package, chosen_version)
+        exact_range = self.solution.decide(next_package, chosen_version)
         self.stats.decisions += 1
         self.observer.on_decision(
             next_package, chosen_version, self.solution.decision_level
@@ -954,26 +993,50 @@ class Resolver(Generic[PackageType, VersionType]):
             self.priority_epoch += 1
 
         dependencies = self.provider.get_dependencies(next_package, chosen_version)
-        if not dependencies:
-            return next_package
-        exact_range = self.range_type.singleton(chosen_version)
-        widened = self.provider.widen_decision(next_package, chosen_version)
+        if dependencies:
+            self._record_dependency_clauses(
+                next_package, chosen_version, exact_range, dependencies
+            )
+        return next_package
+
+    def _record_dependency_clauses(
+        self,
+        package: PackageType,
+        version: VersionType,
+        exact_range: RangeProtocol[Any],
+        dependencies: Mapping[PackageType, RangeProtocol[VersionType]],
+    ) -> None:
+        """Record dependency clauses or reapply their retained refinement causes."""
+        widened = self.provider.widen_decision(package, version)
         parent_range = exact_range if widened is None else self.as_term_range(widened)
+        record_key = (package, version)
+        prior = self.recorded_dependencies.get(record_key)
+        if prior is not None and (
+            prior.parent_range is parent_range or prior.parent_range == parent_range
+        ):
+            for clause in prior.refinement_causes:
+                dependency = clause.terms[1]
+                decide.absorb_redundant_requirement(
+                    self, dependency.package, dependency.constraint, clause
+                )
+            return
+
+        record = _RecordedDependencies(parent_range, [])
         for dependency_package, supplied_range in dependencies.items():
             dependency_range = self.as_term_range(supplied_range)
-            cross_package = dependency_package != next_package
+            cross_package = dependency_package != package
             if not cross_package:
                 # An incompatibility holds at most one term per package,
                 # so self-dependency terms merge to {v} & ~range: empty
                 # (a vacuous clause) when the range contains the chosen
                 # version, else exactly {v}.  The exact singleton is kept:
                 # widening a single-term clause only degrades error text.
-                if chosen_version in dependency_range:
+                if version in dependency_range:
                     continue
-                terms = [Term(next_package, exact_range, positive=True)]
+                terms = [Term(package, exact_range, positive=True)]
             else:
                 terms = [
-                    Term(next_package, parent_range, positive=True),
+                    Term(package, parent_range, positive=True),
                     Term(dependency_package, dependency_range, positive=False),
                 ]
 
@@ -987,10 +1050,11 @@ class Resolver(Generic[PackageType, VersionType]):
             incompat_index.add_incompatibility(self, incompatibility)
 
             if cross_package:
+                record.refinement_causes.append(incompatibility)
                 decide.absorb_redundant_requirement(
                     self, dependency_package, dependency_range, incompatibility
                 )
-        return next_package
+        self.recorded_dependencies[record_key] = record
 
     def _build_result(self) -> Solution[PackageType, VersionType]:
         """Build the final result, including only reachable packages.
@@ -1017,6 +1081,7 @@ class Resolver(Generic[PackageType, VersionType]):
         self.package_to_incompatibilities.clear()
         self.clause_contradicted_at.clear()
         self.dependency_index.clear()
+        self.recorded_dependencies.clear()
         self.solution = PartialSolution(range_type=self.range_type)
         self.stats = ResolverStats()
 
