@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from pip._vendor.packaging.ranges import VersionRange
+from pip._vendor.packaging.utils import canonicalize_name
 
 from pip._internal.exceptions import MetadataInvalid
 from pip._internal.resolution.nab.candidates import ExtrasCandidate
@@ -222,6 +223,11 @@ class YankCandidates:
                 pins.append(ireq.req)
         data = CandidateData(ranges, tuple(pins))
         self.prepared[candidate] = native
+        self.provider.has_conditional_prereleases |= (
+            native.version.is_prerelease
+            and native.source_link is not None
+            and native.project_name not in self.provider.explicit_bases
+        )
         self.dependencies[candidate] = requirements, ranges
         self.facts[candidate] = data
         return data
@@ -279,3 +285,43 @@ class YankCandidates:
         return {
             name: candidate.version for name, candidate in selected.items()
         }, provider
+
+    def has_complete_metadata(self, input_pins: Sequence[Requirement]) -> bool:
+        """Check every potentially reachable, permitted metadata identity."""
+        provider = self.provider
+        if (
+            provider.native.ignore_dependencies
+            or provider.has_unavailable_input_source()
+        ):
+            return True
+        demanded = set(provider.roots)
+        pins = list(input_pins)
+        expanded: set[Candidate] = set()
+        while True:
+            changed = False
+            for package in tuple(demanded):
+                choices = self.candidates.get(package)
+                if choices is None:
+                    return False
+                allowed = provider.input_bounds(package)
+                for candidate in choices:
+                    if candidate in expanded or candidate.version not in allowed:
+                        continue
+                    if candidate.withdrawn and not any(
+                        canonicalize_name(req.name) == candidate.base
+                        and req.specifier.contains(candidate.version, prereleases=True)
+                        for req in pins
+                    ):
+                        continue
+                    if candidate not in self.facts:
+                        rejection = package, candidate.version, candidate.withdrawn
+                        if rejection not in self.rejected_versions:
+                            return False
+                    expanded.add(candidate)
+                    changed = True
+                    data = self.facts.get(candidate)
+                    if data is not None:
+                        demanded.update(data.dependencies)
+                        pins.extend(data.pins)
+            if not changed:
+                return True

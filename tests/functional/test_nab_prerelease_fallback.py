@@ -8,13 +8,18 @@ from tests.lib import PipTestEnvironment, create_basic_wheel_for_package
 
 @pytest.mark.parametrize("working_final", [False, True])
 @pytest.mark.parametrize("policy", ["default", "final", "pre"])
+@pytest.mark.parametrize("grouped", [False, True])
 def test_prerelease_after_matching_final_resolution_failure(
-    script: PipTestEnvironment, policy: str, *, working_final: bool
+    script: PipTestEnvironment, policy: str, *, working_final: bool, grouped: bool
 ) -> None:
     create_basic_wheel_for_package(script, "dep", "1")
     create_basic_wheel_for_package(
         script, "dep", "2", depends=[] if working_final else ["missing==1"]
     )
+    if grouped:
+        create_basic_wheel_for_package(
+            script, "dep", "2.0", depends=[] if working_final else ["missing==1"]
+        )
     create_basic_wheel_for_package(script, "dep", "2rc1")
     options = {"default": (), "final": ("--only-final=dep",), "pre": ("--pre",)}
     failed = not working_final and policy != "pre"
@@ -32,12 +37,15 @@ def test_prerelease_after_matching_final_resolution_failure(
         script.pip("check")
 
 
+@pytest.mark.parametrize("grouped", [False, True])
 def test_default_admission_keeps_the_final_with_an_older_parent(
-    script: PipTestEnvironment,
+    script: PipTestEnvironment, *, grouped: bool
 ) -> None:
     create_basic_wheel_for_package(script, "shared", "1")
     create_basic_wheel_for_package(script, "shared", "2")
     create_basic_wheel_for_package(script, "dep", "2", depends=["shared==2"])
+    if grouped:
+        create_basic_wheel_for_package(script, "dep", "2.0", depends=["shared==2"])
     create_basic_wheel_for_package(script, "dep", "2rc1", depends=["shared==1"])
     create_basic_wheel_for_package(script, "app", "1", depends=["shared==2"])
     create_basic_wheel_for_package(script, "app", "2", depends=["shared==1"])
@@ -86,11 +94,14 @@ def test_original_constraint_can_admit_a_prerelease(
 
 @pytest.mark.parametrize("declaration", ["dep!=2", "dep>=2rc1"])
 @pytest.mark.parametrize("indirect", [False, True])
+@pytest.mark.parametrize("grouped", [False, True])
 def test_later_parent_can_admit_a_selected_prerelease(
-    script: PipTestEnvironment, declaration: str, *, indirect: bool
+    script: PipTestEnvironment, declaration: str, *, indirect: bool, grouped: bool
 ) -> None:
     create_basic_wheel_for_package(script, "dep", "1")
     create_basic_wheel_for_package(script, "dep", "2", depends=["missing==1"])
+    if grouped:
+        create_basic_wheel_for_package(script, "dep", "2.0", depends=["missing==1"])
     create_basic_wheel_for_package(script, "dep", "2rc1")
     create_basic_wheel_for_package(script, "app", "1")
     if indirect:
@@ -109,11 +120,14 @@ def test_later_parent_can_admit_a_selected_prerelease(
 
 
 @pytest.mark.parametrize("declaration", ["dep!=2", "dep>=2rc1"])
+@pytest.mark.parametrize("grouped", [False, True])
 def test_backtracking_a_parent_can_admit_the_same_prerelease(
-    script: PipTestEnvironment, declaration: str
+    script: PipTestEnvironment, declaration: str, *, grouped: bool
 ) -> None:
     create_basic_wheel_for_package(script, "dep", "1")
     create_basic_wheel_for_package(script, "dep", "2", depends=["missing==1"])
+    if grouped:
+        create_basic_wheel_for_package(script, "dep", "2.0", depends=["missing==1"])
     create_basic_wheel_for_package(script, "dep", "2rc1")
     create_basic_wheel_for_package(script, "app", "2", depends=["dep>1"])
     create_basic_wheel_for_package(script, "app", "1", depends=[declaration])

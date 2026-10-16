@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from tests.lib import (
     PipTestEnvironment,
     TestPipResult,
@@ -110,8 +112,9 @@ def test_unsatisfiable_fallback_reuses_prepared_wheel(
     assert "NATIVE_ACTIVE_EXCEPTION" not in result.stdout
 
 
+@pytest.mark.parametrize("group", ["numeric", "aliases", "yanked"])
 def test_definitive_fallback_discovers_a_url_after_static_failure(
-    script: PipTestEnvironment,
+    script: PipTestEnvironment, group: str
 ) -> None:
     create_basic_wheel_for_package(script, "dep", "1.0")
     hidden = script.scratch_path / "hidden"
@@ -126,14 +129,31 @@ def test_definitive_fallback_discovers_a_url_after_static_failure(
             f"Requires-Dist: dep @ {direct.as_uri()}\n"
         ),
     ).save_to_dir(script.scratch_path)
+    options: tuple[str, ...] = ()
+    if group == "aliases":
+        create_basic_wheel_for_package(
+            script, "bridge", "1.0.0", depends=[f"dep @ {direct.as_uri()}"]
+        )
+    elif group == "yanked":
+        withdrawn = create_basic_wheel_for_package(script, "bridge", "2.0")
+        files = script.scratch_path / "withdrawn"
+        files.mkdir()
+        withdrawn = withdrawn.rename(files / withdrawn.name)
+        listing = script.scratch_path / "links.html"
+        listing.write_text(
+            f'<a href="{withdrawn.as_uri()}" data-yanked="withdrawn">'
+            f"{withdrawn.name}</a>"
+        )
+        options = ("--find-links", str(listing))
 
-    result = tracked_install(script, "dep>=2", "bridge")
+    result = tracked_install(script, "dep>=2", "bridge", options=options)
 
     script.assert_installed(dep="3.0", bridge="1.0")
     assert "Nab catalogue fallback: ResolutionError" in result.stdout
     assert "NATIVE True" not in result.stdout
     assert result.stdout.splitlines().count("NATIVE False") == 1
     assert "NATIVE_ACTIVE_EXCEPTION" not in result.stdout
+    script.pip("check")
 
 
 def test_catalogue_rejects_an_artifact_without_repreparing_it(

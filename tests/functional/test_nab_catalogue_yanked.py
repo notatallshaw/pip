@@ -151,7 +151,7 @@ def test_rejected_pin_cannot_admit_a_yanked_release_for_another_parent(
     result = script.pip(
         "install", "--no-index", "--find-links", listing, "app", expect_error=True
     )
-    assert "Nab catalogue fallback" not in result.stdout
+    assert "Nab catalogue fallback: ResolutionError" in result.stdout
     script.assert_not_installed("app", "dep")
 
 
