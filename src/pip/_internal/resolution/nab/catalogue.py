@@ -174,6 +174,8 @@ class CatalogueProvider(BaseProvider[str, Version]):
         self.dependencies: dict[tuple[str, Version], DependencyRecord] = {}
         self.templates: dict[str, InstallRequirement] = {}
         self.solution_ranges: Mapping[str, RangeProtocol[Version]] = {}
+        self.solution_decisions: Mapping[str, Version] = {}
+        self.has_conditional_prereleases = False
         self.pending_dependencies: list[Incompatibility[str, Version]] = []
         self.matching_counts: dict[tuple[str, RangeProtocol[Version]], int] = {}
         self.universes: dict[str, list[Version]] = {}
@@ -307,6 +309,11 @@ class CatalogueProvider(BaseProvider[str, Version]):
         previous = self.candidates.setdefault(key, candidate)
         if previous != candidate:
             raise CatalogueUnsupported("same-version source replacement")
+        self.has_conditional_prereleases |= (
+            candidate.version.is_prerelease
+            and candidate.source_link is not None
+            and candidate.project_name not in self.explicit_bases
+        )
 
     def catalogue(self, package: str) -> CandidateCatalogue:
         """Return the request's fixed artifact list, loading it on first use."""
@@ -498,6 +505,7 @@ class CatalogueProvider(BaseProvider[str, Version]):
         decisions: Mapping[str, Version],
     ) -> None:
         self.solution_ranges = positive_ranges
+        self.solution_decisions = decisions
 
     def precheck_base_version(
         self, package: str, version_range: RangeProtocol[Version]
@@ -538,7 +546,77 @@ class CatalogueProvider(BaseProvider[str, Version]):
                     )
                 )
                 return True
+        return self.has_conditional_prereleases and self.precheck_prerelease_admission(
+            package, version
+        )
+
+    def complete_selection(
+        self, package: str, version: Version
+    ) -> dict[str, Version] | None:
+        """Return a fully read reachable plan including the prospective choice."""
+        selected = dict(self.solution_decisions)
+        selected[package] = version
+        reachable: dict[str, Version] = {}
+        pending = list(self.roots)
+        while pending:
+            name = pending.pop()
+            if name in reachable:
+                continue
+            chosen = selected.get(name)
+            if chosen is None:
+                return None
+            record = self.dependencies.get((name, chosen))
+            if record is None:
+                return None
+            reachable[name] = chosen
+            pending.extend(record[1])
+        return reachable if package in reachable else None
+
+    def precheck_prerelease_admission(self, package: str, version: Version) -> bool:
+        """Block a complete inadmissible plan while preserving other parent choices."""
+        pins = self.complete_selection(package, version)
+        if pins is None:
+            return False
+        requirements = self.selected_requirements(Solution(pins, (), tuple(self.roots)))
+        for name, chosen in pins.items():
+            candidate = self.candidates[name, chosen]
+            constraint = self.collected.constraints.get(
+                candidate.project_name, Constraint.empty()
+            )
+            if self.prerelease_is_admitted(candidate, requirements, constraint):
+                continue
+            terms: list[Term[str, Version]] = [
+                Term[str, Version](name, VersionRange.singleton(chosen), positive=True)
+            ]
+            terms.extend(
+                Term[str, Version](other, VersionRange.singleton(value), positive=True)
+                for other, value in pins.items()
+                if other != name
+            )
+            self.pending_dependencies.append(
+                Incompatibility(
+                    terms, cause=IncompatibilityCause.CONTEXTUAL_NO_VERSIONS
+                )
+            )
+            return True
         return False
+
+    def prerelease_is_admitted(
+        self,
+        candidate: Candidate,
+        requirements: Mapping[str, Iterable[Requirement]],
+        constraint: Constraint,
+    ) -> bool:
+        """Apply original declarations to prereleases outside withdrawn groups."""
+        if (
+            not candidate.version.is_prerelease
+            or (self.yank_resolution and self.has_yanked_candidates)
+            or candidate.project_name in self.explicit_bases
+        ):
+            return True
+        return self.factory.catalogue_prerelease_admitted(
+            candidate, requirements, constraint
+        )
 
     def consume_pending_clauses(self) -> list[Incompatibility[str, Version]]:
         pending, self.pending_dependencies = self.pending_dependencies, []
@@ -800,14 +878,7 @@ class CatalogueProvider(BaseProvider[str, Version]):
             if not base.is_satisfied_by(candidate):
                 logger.info("Nab catalogue admission: %s violates a constraint", name)
                 return False
-            if (
-                candidate.version.is_prerelease
-                and (not self.yank_resolution or not self.has_yanked_candidates)
-                and candidate.project_name not in self.explicit_bases
-                and not self.factory.catalogue_prerelease_admitted(
-                    candidate, requirements, base
-                )
-            ):
+            if not self.prerelease_is_admitted(candidate, requirements, base):
                 logger.info(
                     "Nab catalogue admission: %s has an ineligible prerelease", name
                 )
