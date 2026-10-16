@@ -236,6 +236,12 @@ class YankCandidates:
         )
         self.dependencies[candidate] = requirements, ranges
         self.facts[candidate] = data
+        if isinstance(native, ExtrasCandidate):
+            underlying = Candidate(
+                native.base.name, candidate.version, candidate.withdrawn
+            )
+            if underlying not in self.facts:
+                self.record_metadata(underlying, native.base)
         return data
 
     def prepare_candidate(self, candidate: Candidate) -> NativeCandidate | None:
