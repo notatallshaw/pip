@@ -10,12 +10,12 @@ from pip._vendor.packaging.ranges import VersionRange
 from pip._vendor.packaging.utils import canonicalize_name
 
 from pip._internal.exceptions import MetadataInvalid
-from pip._internal.resolution.nab.candidates import ExtrasCandidate
+from pip._internal.resolution.nab.candidates import ExtrasCandidate, as_base_candidate
 from pip._internal.resolution.nab.found_candidates import warn_invalid_metadata
 
 if TYPE_CHECKING:
     import sys
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Iterable, Mapping, Sequence
 
     from pip._vendor.packaging.requirements import Requirement
     from pip._vendor.packaging.version import Version
@@ -87,7 +87,7 @@ class YankCandidates:
         self.dependencies: dict[Candidate, DependencyRecord] = {}
         self.unavailable: set[Candidate] = set()
         self.missing_listings: set[str] = set()
-        self.unavailable_reason = "required metadata is unavailable"
+        self.unavailable_reason = "a complete preference proof is unavailable"
         self.rejections: list[str] = []
         self.rejected_versions: set[tuple[str, Version, bool]] = set()
 
@@ -207,6 +207,12 @@ class YankCandidates:
         if native is None:
             self.facts[candidate] = None
             return None
+        return self.record_metadata(candidate, native)
+
+    def record_metadata(
+        self, candidate: Candidate, native: NativeCandidate
+    ) -> CandidateData:
+        """Cache original declarations from an already prepared native artifact."""
         requirements = tuple(self.provider.native.get_dependencies(native))
         ranges = self.provider.ranges(
             requirement
@@ -286,7 +292,13 @@ class YankCandidates:
             name: candidate.version for name, candidate in selected.items()
         }, provider
 
-    def has_complete_metadata(self, input_pins: Sequence[Requirement]) -> bool:
+    def has_complete_metadata(
+        self,
+        input_pins: Sequence[Requirement],
+        *,
+        fixed: Iterable[Candidate] = (),
+        live: frozenset[str] = frozenset(),
+    ) -> bool:
         """Check every potentially reachable, permitted metadata identity."""
         provider = self.provider
         if (
@@ -296,6 +308,7 @@ class YankCandidates:
             return True
         demanded = set(provider.roots)
         pins = list(input_pins)
+        prescribed = {candidate.package: candidate for candidate in fixed}
         expanded: set[Candidate] = set()
         while True:
             changed = False
@@ -305,7 +318,12 @@ class YankCandidates:
                     return False
                 allowed = provider.input_bounds(package)
                 for candidate in choices:
-                    if candidate in expanded or candidate.version not in allowed:
+                    if (
+                        candidate in expanded
+                        or candidate.version not in allowed
+                        or prescribed.get(package, candidate) != candidate
+                        or (candidate.withdrawn and candidate.base in live)
+                    ):
                         continue
                     if candidate.withdrawn and not any(
                         canonicalize_name(req.name) == candidate.base
@@ -313,6 +331,8 @@ class YankCandidates:
                         for req in pins
                     ):
                         continue
+                    if candidate not in self.facts:
+                        self.record_cached_extras(candidate)
                     if candidate not in self.facts:
                         rejection = package, candidate.version, candidate.withdrawn
                         if rejection not in self.rejected_versions:
@@ -325,3 +345,20 @@ class YankCandidates:
                         pins.extend(data.pins)
             if not changed:
                 return True
+
+    def record_cached_extras(self, candidate: Candidate) -> None:
+        """Expand live extras using an already prepared base artifact."""
+        package, extra = split_extra(candidate.package)
+        if extra is None or candidate.withdrawn:
+            return
+        underlying = Candidate(package, candidate.version, withdrawn=False)
+        prepared = self.prepared.get(underlying)
+        base = None if prepared is None else as_base_candidate(prepared)
+        if base is None:
+            return
+        native = self.provider.factory.make_extras_candidate(
+            base,
+            frozenset(extra.split(",")),
+            comes_from=self.provider.preparation_template(candidate.package),
+        )
+        self.record_metadata(candidate, native)

@@ -150,6 +150,7 @@ class Resolver(BaseResolver):
             upgrade_strategy=self.upgrade_strategy,
             user_requested=collected.user_requested,
         )
+        provider: CatalogueProvider | None = None
         try:
             with factory.catalogue_context():
                 provider = CatalogueProvider(factory, native, collected)
@@ -166,7 +167,10 @@ class Resolver(BaseResolver):
                     )
         except CatalogueUnsupported as error:
             logger.info("Nab catalogue fallback: %s: %s", type(error).__name__, error)
-            return _CatalogueAttempt(None, provisional=True)
+            return _CatalogueAttempt(
+                None,
+                provisional=provider is None or not provider.has_incomplete_queries,
+            )
         logger.info("Nab catalogue success")
         graph: DependencyGraph = {None: set(solution.roots)}
         graph.update((package, set()) for package in solution.pins)
