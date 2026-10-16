@@ -232,6 +232,7 @@ def mixed_files_listing(
     *,
     live_dependency: str = "tools==1",
     withdrawn_dependency: str | None = "tools==2",
+    extra_only: bool = False,
 ) -> Path:
     """Give one version live and withdrawn wheels with different dependencies."""
     links = []
@@ -240,12 +241,17 @@ def mixed_files_listing(
         (2, withdrawn_dependency, True),
     ]:
         filename = f"dep-1.0-{build}-py3-none-any.whl"
+        requirement = (
+            f'{dependency}; extra == "feature"'
+            if extra_only and dependency is not None
+            else dependency
+        )
         make_wheel(
             name="dep",
             version="1.0",
             metadata_updates={
                 "Provides-Extra": "feature",
-                **({} if dependency is None else {"Requires-Dist": dependency}),
+                **({} if requirement is None else {"Requires-Dist": requirement}),
             },
         ).save_to(script.scratch_path / filename)
         flag = ' data-yanked="withdrawn"' if withdrawn else ""
@@ -256,6 +262,40 @@ def mixed_files_listing(
     listing = script.scratch_path / "links.html"
     listing.write_text("\n".join(links))
     return listing
+
+
+@pytest.mark.parametrize(
+    "roots",
+    [("dep[feature]", "app", "tools==2"), ("app", "tools==2", "dep[feature]")],
+)
+def test_transitive_pin_admits_an_unversioned_extra(
+    script: PipTestEnvironment, roots: tuple[str, ...]
+) -> None:
+    """Keep the base facts when another parent permits an unversioned extra."""
+    listing = mixed_files_listing(script, extra_only=True)
+    app = create_basic_wheel_for_package(script, "app", "1", depends=["dep==1.0"])
+    with listing.open("a") as stream:
+        stream.write(f'\n<a href="{app.name}">{app.name}</a>')
+    report = script.scratch_path / "report.json"
+    script.pip_expect_warning = True
+
+    result = tracked_install(
+        script, *roots, find_links=listing, options=("--report", str(report))
+    )
+
+    assert "NATIVE True" not in result.stdout
+    assert "NATIVE False" not in result.stdout
+    assert "Nab catalogue success" in result.stdout
+    selected = next(
+        item
+        for item in json.loads(report.read_text())["install"]
+        if item["metadata"]["name"] == "dep"
+    )
+    expected = script.scratch_path / "dep-1.0-2-py3-none-any.whl"
+    assert selected["download_info"]["url"] == expected.as_uri()
+    assert selected["is_yanked"]
+    script.assert_installed(dep="1.0", tools="2", app="1")
+    script.pip("check")
 
 
 @pytest.mark.parametrize(
