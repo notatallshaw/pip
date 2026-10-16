@@ -12,12 +12,13 @@ Reference: https://github.com/dart-lang/pub/blob/master/doc/solver.md#definition
 from __future__ import annotations
 
 import enum
+from collections.abc import Hashable
 from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar
 
 from ._compat import override
 
 if TYPE_CHECKING:
-    from pip._vendor.typing_extensions import Self
+    from typing_extensions import Self
 
 __all__ = [
     "Incompatibility",
@@ -35,11 +36,11 @@ __all__ = [
 
 
 PackageType = TypeVar("PackageType")
-VersionType = TypeVar("VersionType")
+VersionType = TypeVar("VersionType", bound=Hashable)
 
 # Contravariant so packaging.ranges.VersionRange (accepts Version | str)
 # can satisfy RangeProtocol[Version].
-VersionType_contra = TypeVar("VersionType_contra", contravariant=True)
+VersionType_contra = TypeVar("VersionType_contra", bound=Hashable, contravariant=True)
 
 
 class RangeProtocol(Protocol[VersionType_contra]):

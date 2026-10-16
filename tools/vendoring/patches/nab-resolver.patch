@@ -1,5 +1,5 @@
 diff --git a/src/pip/_vendor/nab_resolver/__init__.py b/src/pip/_vendor/nab_resolver/__init__.py
-index e7f4a80..34ea8f1 100644
+index e7f4a80..f2b1e7d 100644
 --- a/src/pip/_vendor/nab_resolver/__init__.py
 +++ b/src/pip/_vendor/nab_resolver/__init__.py
 @@ -4,7 +4,16 @@ The supported API is the module paths below.  They will not move without a
@@ -8,11 +8,11 @@ index e7f4a80..34ea8f1 100644
  
 -    nab_resolver.errors     ResolutionError
 +    nab_resolver.candidate_provider
-+                           CandidateHost, CandidateProvider,
-+                           CandidateRequirement, PreparedCandidate
++                            CandidateHost, CandidateProvider,
++                            CandidateRequirement, PreparedCandidate
 +    nab_resolver.errors     ResolutionError, ResolutionInvariantError,
-+                            ResolutionLimitError, ResolutionStalledError,
-+                            ResolutionTerminatedError
++                            ResolutionLimitError,
++                            ResolutionStalledError, ResolutionTerminatedError
 +    nab_resolver.priority   CONFLICT_THRESHOLD, CULPRIT_DEMOTE_THRESHOLD,
 +                            MAX_PRECHECK_BACKTRACKS, PRECHECK_REJECTION_THRESHOLD,
 +                            TIER_AFFECTED, TIER_CULPRIT, TIER_NORMAL,
@@ -577,7 +577,7 @@ index 0000000..14be249
 +            (package, candidate) for (package, _), candidate in self._selected.items()
 +        )
 diff --git a/src/pip/_vendor/nab_resolver/conflict.py b/src/pip/_vendor/nab_resolver/conflict.py
-index 48119d5..718223a 100644
+index 48119d5..1d3422f 100644
 --- a/src/pip/_vendor/nab_resolver/conflict.py
 +++ b/src/pip/_vendor/nab_resolver/conflict.py
 @@ -11,7 +11,7 @@ from __future__ import annotations
@@ -589,12 +589,14 @@ index 48119d5..718223a 100644
  from .incompat_index import add_incompatibility
  from .partial_solution import PartialSolution
  from .report import format_error, prior_cause
-@@ -201,7 +201,7 @@ def conflict_resolution(
+@@ -201,7 +201,9 @@ def conflict_resolution(
          "a resolver bug rather than an unsatisfiable requirement. Stalled on "
          f"{current_incompatibility!r}"
      )
 -    raise ResolutionError(stalled_message, incompatibility=current_incompatibility)
-+    raise ResolutionStalledError(stalled_message, incompatibility=current_incompatibility)
++    raise ResolutionStalledError(
++        stalled_message, incompatibility=current_incompatibility
++    )
  
  
  def update_culprit_counts(
@@ -992,6 +994,152 @@ index 08f923e..7b29579 100644
 +
 +class ResolutionStalledError(ResolutionInvariantError):
 +    """Conflict resolution stopped making progress; its graph is diagnostic."""
+diff --git a/src/pip/_vendor/nab_resolver/partial_solution.py b/src/pip/_vendor/nab_resolver/partial_solution.py
+index f056652..9977b4d 100644
+--- a/src/pip/_vendor/nab_resolver/partial_solution.py
++++ b/src/pip/_vendor/nab_resolver/partial_solution.py
+@@ -441,7 +441,9 @@ class PartialSolution(Generic[PackageType, VersionType]):
+         cache[package] = result
+         return result
+ 
+-    def _refresh_effective_range(self, package: PackageType) -> None:
++    def _refresh_effective_range(
++        self, package: PackageType
++    ) -> RangeProtocol[VersionType]:
+         """Recompute the package's range, advancing the epoch if it emptied."""
+         self._effective_range_cache.pop(package, None)
+         self._changed.add(package)
+@@ -449,9 +451,12 @@ class PartialSolution(Generic[PackageType, VersionType]):
+         assert effective is not None
+         if effective.is_empty:
+             self._contradiction_epoch += 1
++        return effective
+ 
+-    def decide(self, package: PackageType, version: VersionType) -> None:
+-        """Record a decision: pick a specific version for a package."""
++    def decide(
++        self, package: PackageType, version: VersionType
++    ) -> RangeProtocol[VersionType]:
++        """Record a decision and return the exact range stored for it."""
+         self._decision_level += 1
+         exact_range = self._range_type.singleton(version)
+ 
+@@ -462,7 +467,7 @@ class PartialSolution(Generic[PackageType, VersionType]):
+         self._refresh_effective_range(package)
+         self._undecided.discard(package)
+ 
+-        assignment = Assignment(
++        assignment: Assignment[PackageType, VersionType] = Assignment(
+             package=package,
+             accumulated_range=exact_range,
+             decision_level=self._decision_level,
+@@ -475,6 +480,7 @@ class PartialSolution(Generic[PackageType, VersionType]):
+         )
+         self._assignments.append(assignment)
+         self._assignments_by_package[package].append(assignment)
++        return exact_range
+ 
+     def derive(
+         self,
+@@ -483,12 +489,14 @@ class PartialSolution(Generic[PackageType, VersionType]):
+         *,
+         positive: bool,
+         cause: Incompatibility[PackageType, VersionType],
+-    ) -> None:
++    ) -> RangeProtocol[VersionType]:
+         """Record a derivation from unit propagation.
+ 
+         A package's first derivation of a sign has nothing to fold into, so it
+         records ``constraint`` itself.
+ 
++        Return the newly computed effective range, including any exclusions.
++
+         See: https://github.com/dart-lang/pub/blob/master/doc/solver.md#unit-propagation
+         """
+         if positive:
+@@ -513,7 +521,7 @@ class PartialSolution(Generic[PackageType, VersionType]):
+             )
+             self._negative_ranges[package] = new_range
+ 
+-        self._refresh_effective_range(package)
++        effective = self._refresh_effective_range(package)
+ 
+         assignment = Assignment(
+             package=package,
+@@ -528,6 +536,7 @@ class PartialSolution(Generic[PackageType, VersionType]):
+         )
+         self._assignments.append(assignment)
+         self._assignments_by_package[package].append(assignment)
++        return effective
+ 
+     def backtrack(self, target_level: int) -> None:
+         """Remove all assignments above target_level.
+@@ -542,40 +551,40 @@ class PartialSolution(Generic[PackageType, VersionType]):
+         _detach_snapshots(self._range_snapshots)
+         _detach_snapshots(self._decision_snapshots)
+ 
+-        # Trail levels never decrease, so this pops exactly the assignments above
+-        # target_level; every other package keeps the positive and negative ranges
+-        # its cached effective range was derived from.
+-        while self._assignments and self._assignments[-1].decision_level > target_level:
+-            package = self._assignments.pop().package
+-            self._effective_range_cache.pop(package, None)
+-            self._changed.add(package)
+-
+         self._decision_level = target_level
+-
+-        empty_packages: list[PackageType] = []
+-        for package, entries in self._assignments_by_package.items():
+-            popped = decision_popped = False
+-            while entries and entries[-1].decision_level > target_level:
+-                popped = True
+-                if entries.pop().is_decision:
+-                    decision_popped = True
+-
+-            if not entries:
+-                empty_packages.append(package)
++        if (
++            not self._assignments
++            or self._assignments[-1].decision_level <= target_level
++        ):
++            return
++
++        # Trail levels never decrease, so removed assignments form a suffix.
++        changed_packages: dict[PackageType, None] = {}
++        assignments = self._assignments
++        while assignments and assignments[-1].decision_level > target_level:
++            changed_packages[assignments.pop().package] = None
++
++        # Untouched packages keep their cached state.
++        self._changed.update(changed_packages)
++        for package in changed_packages:
++            self._effective_range_cache.pop(package, None)
++            entries = self._assignments_by_package[package]
++            if entries[0].decision_level > target_level:
++                entries.clear()
++                del self._assignments_by_package[package]
+                 self._positive_ranges.pop(package, None)
+                 self._negative_ranges.pop(package, None)
+                 self._decided_versions.pop(package, None)
+                 self._undecided.discard(package)
+-            # A package that kept every entry already holds what the rebuild
+-            # would restore.
+-            elif popped:
++            else:
++                decision_popped = False
++                while entries[-1].decision_level > target_level:
++                    if entries.pop().is_decision:
++                        decision_popped = True
+                 self._update_package_state_after_backtrack(
+                     package, entries, decision_popped=decision_popped
+                 )
+ 
+-        for package in empty_packages:
+-            del self._assignments_by_package[package]
+-
+     def _update_package_state_after_backtrack(
+         self,
+         package: PackageType,
 diff --git a/src/pip/_vendor/nab_resolver/priority.py b/src/pip/_vendor/nab_resolver/priority.py
 new file mode 100644
 index 0000000..90178ab
@@ -1066,11 +1214,77 @@ index 0000000..90178ab
 +        default=0,
 +    )
 +    return package_count - second_highest >= CULPRIT_DEMOTE_THRESHOLD
+diff --git a/src/pip/_vendor/nab_resolver/propagate.py b/src/pip/_vendor/nab_resolver/propagate.py
+index bc7edc0..fba4d17 100644
+--- a/src/pip/_vendor/nab_resolver/propagate.py
++++ b/src/pip/_vendor/nab_resolver/propagate.py
+@@ -94,13 +94,12 @@ def unit_propagation(
+             if isinstance(evaluation, Term):
+                 negated_term = evaluation.negate()
+                 range_before = resolver.solution.get(negated_term.package)
+-                resolver.solution.derive(
++                range_after = resolver.solution.derive(
+                     negated_term.package,
+                     negated_term.constraint,
+                     positive=negated_term.is_positive(),
+                     cause=incompatibility,
+                 )
+-                range_after = resolver.solution.get(negated_term.package)
+ 
+                 # A derive that empties a range advances the epoch, which
+                 # retires the stamps taken before it.
+diff --git a/src/pip/_vendor/nab_resolver/ranges.py b/src/pip/_vendor/nab_resolver/ranges.py
+index 4385af4..573b409 100644
+--- a/src/pip/_vendor/nab_resolver/ranges.py
++++ b/src/pip/_vendor/nab_resolver/ranges.py
+@@ -209,7 +209,7 @@ class Range(Generic[VersionType]):
+         ``((1, True, 2, False), (2, True, 3, True))`` is not a legal way to
+         write ``[1, 3]``.
+         """
+-        self._intervals = intervals
++        self._intervals: tuple[Interval, ...] = intervals
+         self._hash = 0
+ 
+     @classmethod
+@@ -700,8 +700,17 @@ class Range(Generic[VersionType]):
+         return (self._intervals,)
+ 
+     def __setstate__(self, state: tuple[tuple[Interval, ...]]) -> None:
+-        """Restore from :meth:`__getstate__`, leaving the hash to be recomputed."""
+-        (self._intervals,) = state
++        """Restore canonical infinity bounds and leave the hash to be recomputed."""
++        (intervals,) = state
++        self._intervals = tuple(
++            (
++                NEGATIVE_INFINITY if isinstance(lower, _NegativeInfinity) else lower,
++                lower_inclusive,
++                POSITIVE_INFINITY if isinstance(upper, _PositiveInfinity) else upper,
++                upper_inclusive,
++            )
++            for lower, lower_inclusive, upper, upper_inclusive in intervals
++        )
+         self._hash = 0
+ 
+     @override
 diff --git a/src/pip/_vendor/nab_resolver/report.py b/src/pip/_vendor/nab_resolver/report.py
-index 52e2ac9..9141910 100644
+index 52e2ac9..14cfefd 100644
 --- a/src/pip/_vendor/nab_resolver/report.py
 +++ b/src/pip/_vendor/nab_resolver/report.py
-@@ -126,7 +126,10 @@ def _shown_terms(
+@@ -82,9 +82,10 @@ def explain_incompatibility(
+     # The flag marks a node whose children are already pushed: it renders after them.
+     stack: list[tuple[Incompatibility[Any, Any], bool]] = [(incompatibility, False)]
+ 
+-    needed, unstated = (
+-        ({}, {}) if narrow is None else _unstated_ranges(incompatibility, narrow)
+-    )
++    needed: dict[int, list[Any]] = {}
++    unstated: dict[Any, Any] = {}
++    if narrow is not None:
++        needed, unstated = _unstated_ranges(incompatibility, narrow)
+ 
+     while stack:
+         node, expanded = stack.pop()
+@@ -126,7 +127,10 @@ def _shown_terms(
      The comparison runs on exactly what the reader sees, so a requirement is
      read as printed, un-narrowed, the way the line states it.
      """
@@ -1082,7 +1296,7 @@ index 52e2ac9..9141910 100644
          return {term.package: term for term in incompatibility.terms}
      return {
          term.package: _narrow_positive(term, narrow) for term in incompatibility.terms
-@@ -273,9 +276,15 @@ def _render_line(
+@@ -273,9 +277,15 @@ def _render_line(
      terms = incompatibility.terms
      # An availability line renders its own range: narrowing it onto the listing
      # is what let it stop covering the requirement it closes against.
@@ -1099,7 +1313,7 @@ index 52e2ac9..9141910 100644
      attributed = _dependency_pair(incompatibility, terms)
      if attributed is not None:
          parent, dep = attributed
-@@ -307,6 +316,21 @@ def _render_line(
+@@ -307,6 +317,21 @@ def _render_line(
      return _render_prefix_line(cause, terms, format_range)
  
  
@@ -1122,7 +1336,7 @@ index 52e2ac9..9141910 100644
      cause: IncompatibilityCause,
      terms: Sequence[Term[Any, Any]],
 diff --git a/src/pip/_vendor/nab_resolver/resolver.py b/src/pip/_vendor/nab_resolver/resolver.py
-index 72787f5..602e493 100644
+index 72787f5..1459cfa 100644
 --- a/src/pip/_vendor/nab_resolver/resolver.py
 +++ b/src/pip/_vendor/nab_resolver/resolver.py
 @@ -27,7 +27,8 @@ from typing import TYPE_CHECKING, Any, Final, Generic, Protocol
@@ -1135,16 +1349,37 @@ index 72787f5..602e493 100644
  from .partial_solution import PartialSolution
  from .ranges import Range
  from .result import build_solution_data
-@@ -45,7 +46,7 @@ from .types import (
- )
+@@ -141,6 +142,13 @@ class Solution(Generic[PackageType, VersionType]):
+ class ResolverProvider(Protocol[PackageType, VersionType]):
+     """Interface for supplying version and dependency information.
  
- if TYPE_CHECKING:
--    from typing_extensions import TypeIs
-+    from pip._vendor.typing_extensions import TypeIs
++    Version values must be hashable, with stable hashes consistent with equality.
++
++    Providers whose readiness depends on selected candidates may implement
++    ``receive_decision_scan_hint(positive_ranges, decisions)``. This optional
++    callback receives current snapshots before ``begin_decision_scan`` and the
++    readiness checks, including after backtracking.
++
+     Modeled after pubgrub-rs v0.3+ ``DependencyProvider``:
+     https://docs.rs/pubgrub/latest/pubgrub/trait.DependencyProvider.html
+     """
+@@ -173,6 +181,15 @@ class ResolverProvider(Protocol[PackageType, VersionType]):
+         The same pair is asked more than once: a backjump that re-decides a
+         version asks again, and building the final :class:`Solution` asks once
+         per pin.  Cache by package and version.
++
++        During one resolution, every call for a package/version pair must
++        describe the same dependencies. Returned mappings must remain unchanged
++        until result construction finishes. Range values must be immutable.
++        Providers may return fresh equal mappings.
++
++        This stability requirement applies to dependency declarations, not to
++        candidate eligibility. Prerelease and yank admission can depend on active
++        requirements and host policy; check it before preparing candidates.
+         """
+         ...
  
- __all__ = [
-     "DEFAULT_MAX_ITERATIONS",
-@@ -240,8 +241,9 @@ class ResolverProvider(Protocol[PackageType, VersionType]):
+@@ -240,8 +257,9 @@ class ResolverProvider(Protocol[PackageType, VersionType]):
      ) -> None:
          """Accept a snapshot of positive ranges and decisions.
  
@@ -1156,7 +1391,18 @@ index 72787f5..602e493 100644
          ``decisions`` is the subset with concrete versions (not derivations);
          decision-based reasoning is safer because decisions cannot be undone
          in isolation.  Default is a no-op.
-@@ -311,7 +313,7 @@ class ResolverProvider(Protocol[PackageType, VersionType]):
+@@ -286,7 +304,9 @@ class ResolverProvider(Protocol[PackageType, VersionType]):
+         every version inside it that could ever be chosen for ``package`` in
+         this resolution must have exactly the dependencies being recorded
+         for ``version``; versions inside it that can never be selected are
+-        harmless.  ``None`` keeps the exact singleton.  Widening merges
++        harmless. Versions excluded only by current admission policy still count
++        if they could become selectable later. ``None`` keeps the exact singleton.
++        Widening merges
+         dependency clauses for adjacent rejected versions into contiguous
+         ranges instead of one hole per version, and lets a single clause
+         reject a whole run of same-dependency versions.
+@@ -311,7 +331,7 @@ class ResolverProvider(Protocol[PackageType, VersionType]):
  
  
  class BaseProvider(Generic[PackageType, VersionType]):
@@ -1165,7 +1411,7 @@ index 72787f5..602e493 100644
  
      Supplies ``begin_decision_scan``, ``is_ready``,
      ``receive_partial_solution_hint``, ``consume_pending_clauses``,
-@@ -321,11 +323,40 @@ class BaseProvider(Generic[PackageType, VersionType]):
+@@ -321,11 +341,40 @@ class BaseProvider(Generic[PackageType, VersionType]):
      ``choose_version``, ``has_satisfying_version``, ``get_dependencies``,
      ``prioritize`` and ``widen_decision``.
  
@@ -1206,7 +1452,7 @@ index 72787f5..602e493 100644
      def begin_decision_scan(self) -> Callable[[PackageType], bool] | None:
          """Freeze nothing and offer no probe: no state moves between scans."""
          return None
-@@ -335,6 +366,11 @@ class BaseProvider(Generic[PackageType, VersionType]):
+@@ -335,6 +384,11 @@ class BaseProvider(Generic[PackageType, VersionType]):
          del package
          return True
  
@@ -1218,7 +1464,44 @@ index 72787f5..602e493 100644
      def receive_partial_solution_hint(
          self,
          positive_ranges: Mapping[PackageType, RangeProtocol[VersionType]],
-@@ -598,6 +634,9 @@ class Resolver(Generic[PackageType, VersionType]):
+@@ -558,16 +612,32 @@ def _as_root_requirements(
+     """Accept either shape ``Resolver.resolve`` takes and return the sequence."""
+     if _is_root_sequence(requirements):
+         return requirements
++    if TYPE_CHECKING:
++        # Older checkers do not narrow the negative branch of a generic TypeIs.
++        assert isinstance(requirements, Mapping)
++
+     # The parameters are spelled out because ``constraint`` is a contravariant
+-    # protocol, which gives the version parameter no inference site.  The
+-    # suppression is ty's: it reads the sequence member of the union as still
+-    # live in the negative branch of a generic ``TypeIs``.
++    # protocol, which gives the version parameter no inference site.
+     return [
+         RootRequirement[PackageType, VersionType](package, required_range)
+-        for package, required_range in requirements.items()  # ty: ignore[unresolved-attribute]
++        for package, required_range in requirements.items()
+     ]
+ 
+ 
++class _RecordedDependencies:
++    """Retain a parent range and refinement causes across repeated decisions."""
++
++    __slots__ = ("parent_range", "refinement_causes")
++
++    def __init__(
++        self,
++        parent_range: RangeProtocol[Any],
++        refinement_causes: list[Incompatibility[Any, Any]],
++    ) -> None:
++        self.parent_range = parent_range
++        self.refinement_causes = refinement_causes
++
++
+ class Resolver(Generic[PackageType, VersionType]):
+     """PubGrub dependency resolver.
+ 
+@@ -598,6 +668,9 @@ class Resolver(Generic[PackageType, VersionType]):
          range_type: type[RangeProtocol[Any]] = Range,
          root_version: Any = 1,
          format_range: Callable[[Any], str] = str,
@@ -1228,7 +1511,7 @@ index 72787f5..602e493 100644
      ) -> None:
          """Create a resolver with the given provider and optional observer.
  
-@@ -608,12 +647,39 @@ class Resolver(Generic[PackageType, VersionType]):
+@@ -608,12 +681,39 @@ class Resolver(Generic[PackageType, VersionType]):
          :class:`packaging.ranges.VersionRange` requires a parseable
          version string or :class:`~packaging.version.Version` here.
  
@@ -1268,7 +1551,19 @@ index 72787f5..602e493 100644
  
          # Recording the provider rather than a flag keeps the answer tied to
          # the object it was asked about, so a provider swapped into
-@@ -725,7 +791,8 @@ class Resolver(Generic[PackageType, VersionType]):
+@@ -655,6 +755,11 @@ class Resolver(Generic[PackageType, VersionType]):
+         # to merge mergeable dependency clauses (pubgrub-rs's merge_dependents).
+         self.dependency_index: dict[Any, int] = {}
+ 
++        # Dependency clauses survive backtracking and restarts.
++        self.recorded_dependencies: dict[
++            tuple[PackageType, VersionType], _RecordedDependencies
++        ] = {}
++
+         self.solution: PartialSolution[Any, Any] = PartialSolution(
+             range_type=range_type
+         )
+@@ -725,7 +830,8 @@ class Resolver(Generic[PackageType, VersionType]):
          """Resolve requirements and return ``{package: version}``.
  
          The pins of :meth:`solve`, for a caller that has no use for the
@@ -1278,7 +1573,7 @@ index 72787f5..602e493 100644
          """
          return self.solve(requirements, constraints).pins
  
-@@ -751,9 +818,13 @@ class Resolver(Generic[PackageType, VersionType]):
+@@ -751,9 +857,13 @@ class Resolver(Generic[PackageType, VersionType]):
          ``~range_type.empty()``, which may be strictly narrower; see
          :class:`~nab_resolver.types.RangeProtocol`.
  
@@ -1293,7 +1588,7 @@ index 72787f5..602e493 100644
          self._add_root_requirements(_as_root_requirements(requirements))
  
          # Threshold doubles each restart (geometric schedule).
-@@ -781,16 +852,35 @@ class Resolver(Generic[PackageType, VersionType]):
+@@ -781,16 +891,35 @@ class Resolver(Generic[PackageType, VersionType]):
                  continue
  
              # Phase 3: Decision making.
@@ -1334,7 +1629,7 @@ index 72787f5..602e493 100644
  
      def _handle_conflict(
          self,
-@@ -799,6 +889,8 @@ class Resolver(Generic[PackageType, VersionType]):
+@@ -799,6 +928,8 @@ class Resolver(Generic[PackageType, VersionType]):
          restarts_remaining: int,
      ) -> tuple[Any, int, int]:
          """Run conflict resolution, targeted backtrack, and restart phases."""
@@ -1343,7 +1638,7 @@ index 72787f5..602e493 100644
          self.stats.conflicts += 1
          self.observer.on_conflict(conflicting_incompatibility)
          learned = conflict.conflict_resolution(self, conflicting_incompatibility)
-@@ -816,9 +908,24 @@ class Resolver(Generic[PackageType, VersionType]):
+@@ -816,9 +947,24 @@ class Resolver(Generic[PackageType, VersionType]):
              changed_package = ROOT
          return changed_package, restart_threshold, restarts_remaining
  
@@ -1370,7 +1665,7 @@ index 72787f5..602e493 100644
          had_pending = decide.absorb_pending_clauses(self)
  
          # Provider-driven force back-track. When the provider returns
-@@ -826,8 +933,7 @@ class Resolver(Generic[PackageType, VersionType]):
+@@ -826,8 +972,7 @@ class Resolver(Generic[PackageType, VersionType]):
          # blockers before the candidate is decided.
          force_targets = list(self.provider.consume_force_backtrack_targets())
          if force_targets:
@@ -1380,7 +1675,14 @@ index 72787f5..602e493 100644
              if triggering is not None:
                  return triggering
  
-@@ -841,6 +947,12 @@ class Resolver(Generic[PackageType, VersionType]):
+@@ -835,33 +980,63 @@ class Resolver(Generic[PackageType, VersionType]):
+             decide.record_no_versions(self, next_package, had_pending=had_pending)
+             return next_package
+ 
+-        self.solution.decide(next_package, chosen_version)
++        exact_range = self.solution.decide(next_package, chosen_version)
+         self.stats.decisions += 1
+         self.observer.on_decision(
              next_package, chosen_version, self.solution.decision_level
          )
  
@@ -1391,9 +1693,75 @@ index 72787f5..602e493 100644
 +            self.priority_epoch += 1
 +
          dependencies = self.provider.get_dependencies(next_package, chosen_version)
-         if not dependencies:
-             return next_package
-@@ -899,6 +1011,8 @@ class Resolver(Generic[PackageType, VersionType]):
+-        if not dependencies:
+-            return next_package
+-        exact_range = self.range_type.singleton(chosen_version)
+-        widened = self.provider.widen_decision(next_package, chosen_version)
++        if dependencies:
++            self._record_dependency_clauses(
++                next_package, chosen_version, exact_range, dependencies
++            )
++        return next_package
++
++    def _record_dependency_clauses(
++        self,
++        package: PackageType,
++        version: VersionType,
++        exact_range: RangeProtocol[Any],
++        dependencies: Mapping[PackageType, RangeProtocol[VersionType]],
++    ) -> None:
++        """Record dependency clauses or reapply their retained refinement causes."""
++        widened = self.provider.widen_decision(package, version)
+         parent_range = exact_range if widened is None else self.as_term_range(widened)
++        record_key = (package, version)
++        prior = self.recorded_dependencies.get(record_key)
++        if prior is not None and (
++            prior.parent_range is parent_range or prior.parent_range == parent_range
++        ):
++            for clause in prior.refinement_causes:
++                dependency = clause.terms[1]
++                decide.absorb_redundant_requirement(
++                    self, dependency.package, dependency.constraint, clause
++                )
++            return
++
++        record = _RecordedDependencies(parent_range, [])
+         for dependency_package, supplied_range in dependencies.items():
+             dependency_range = self.as_term_range(supplied_range)
+-            cross_package = dependency_package != next_package
++            cross_package = dependency_package != package
+             if not cross_package:
+                 # An incompatibility holds at most one term per package,
+                 # so self-dependency terms merge to {v} & ~range: empty
+                 # (a vacuous clause) when the range contains the chosen
+                 # version, else exactly {v}.  The exact singleton is kept:
+                 # widening a single-term clause only degrades error text.
+-                if chosen_version in dependency_range:
++                if version in dependency_range:
+                     continue
+-                terms = [Term(next_package, exact_range, positive=True)]
++                terms = [Term(package, exact_range, positive=True)]
+             else:
+                 terms = [
+-                    Term(next_package, parent_range, positive=True),
++                    Term(package, parent_range, positive=True),
+                     Term(dependency_package, dependency_range, positive=False),
+                 ]
+ 
+@@ -875,10 +1050,11 @@ class Resolver(Generic[PackageType, VersionType]):
+             incompat_index.add_incompatibility(self, incompatibility)
+ 
+             if cross_package:
++                record.refinement_causes.append(incompatibility)
+                 decide.absorb_redundant_requirement(
+                     self, dependency_package, dependency_range, incompatibility
+                 )
+-        return next_package
++        self.recorded_dependencies[record_key] = record
+ 
+     def _build_result(self) -> Solution[PackageType, VersionType]:
+         """Build the final result, including only reachable packages.
+@@ -899,10 +1075,13 @@ class Resolver(Generic[PackageType, VersionType]):
          constraints: Mapping[PackageType, RangeProtocol[VersionType]] | None,
      ) -> None:
          """Reset solver state for a new resolution."""
@@ -1402,7 +1770,12 @@ index 72787f5..602e493 100644
          self.incompatibilities.clear()
          self.package_to_incompatibilities.clear()
          self.clause_contradicted_at.clear()
-@@ -924,6 +1038,9 @@ class Resolver(Generic[PackageType, VersionType]):
+         self.dependency_index.clear()
++        self.recorded_dependencies.clear()
+         self.solution = PartialSolution(range_type=self.range_type)
+         self.stats = ResolverStats()
+ 
+@@ -924,6 +1103,9 @@ class Resolver(Generic[PackageType, VersionType]):
  
          # Re-asked here, so a hook installed since the last resolve is honoured.
          self._hint_ignoring_provider = _provider_with_inherited_hint(self.provider)
@@ -1413,19 +1786,32 @@ index 72787f5..602e493 100644
      def _add_root_requirements(
          self, requirements: Sequence[RootRequirement[PackageType, VersionType]]
 diff --git a/src/pip/_vendor/nab_resolver/types.py b/src/pip/_vendor/nab_resolver/types.py
-index 773ecbc..5777e09 100644
+index 773ecbc..384be68 100644
 --- a/src/pip/_vendor/nab_resolver/types.py
 +++ b/src/pip/_vendor/nab_resolver/types.py
-@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar
+@@ -12,6 +12,7 @@ Reference: https://github.com/dart-lang/pub/blob/master/doc/solver.md#definition
+ from __future__ import annotations
+ 
+ import enum
++from collections.abc import Hashable
+ from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar
+ 
  from ._compat import override
+@@ -35,11 +36,11 @@ __all__ = [
  
- if TYPE_CHECKING:
--    from typing_extensions import Self
-+    from pip._vendor.typing_extensions import Self
  
- __all__ = [
-     "Incompatibility",
-@@ -377,6 +377,9 @@ class IncompatibilityCause(enum.Enum):
+ PackageType = TypeVar("PackageType")
+-VersionType = TypeVar("VersionType")
++VersionType = TypeVar("VersionType", bound=Hashable)
+ 
+ # Contravariant so packaging.ranges.VersionRange (accepts Version | str)
+ # can satisfy RangeProtocol[Version].
+-VersionType_contra = TypeVar("VersionType_contra", contravariant=True)
++VersionType_contra = TypeVar("VersionType_contra", bound=Hashable, contravariant=True)
+ 
+ 
+ class RangeProtocol(Protocol[VersionType_contra]):
+@@ -377,6 +378,9 @@ class IncompatibilityCause(enum.Enum):
      See: https://github.com/dart-lang/pub/blob/master/doc/solver.md#conflict-resolution
      """
  
@@ -1435,7 +1821,7 @@ index 773ecbc..5777e09 100644
  
  class Incompatibility(Generic[PackageType, VersionType]):
      """A set of terms that cannot all be true simultaneously.
-@@ -434,6 +437,13 @@ class Incompatibility(Generic[PackageType, VersionType]):
+@@ -434,6 +438,13 @@ class Incompatibility(Generic[PackageType, VersionType]):
          self.origin = origin
          self.dependency_range = dependency_range
  

@@ -209,7 +209,7 @@ class Range(Generic[VersionType]):
         ``((1, True, 2, False), (2, True, 3, True))`` is not a legal way to
         write ``[1, 3]``.
         """
-        self._intervals = intervals
+        self._intervals: tuple[Interval, ...] = intervals
         self._hash = 0
 
     @classmethod
@@ -700,8 +700,17 @@ class Range(Generic[VersionType]):
         return (self._intervals,)
 
     def __setstate__(self, state: tuple[tuple[Interval, ...]]) -> None:
-        """Restore from :meth:`__getstate__`, leaving the hash to be recomputed."""
-        (self._intervals,) = state
+        """Restore canonical infinity bounds and leave the hash to be recomputed."""
+        (intervals,) = state
+        self._intervals = tuple(
+            (
+                NEGATIVE_INFINITY if isinstance(lower, _NegativeInfinity) else lower,
+                lower_inclusive,
+                POSITIVE_INFINITY if isinstance(upper, _PositiveInfinity) else upper,
+                upper_inclusive,
+            )
+            for lower, lower_inclusive, upper, upper_inclusive in intervals
+        )
         self._hash = 0
 
     @override

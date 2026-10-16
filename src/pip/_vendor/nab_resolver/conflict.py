@@ -201,7 +201,9 @@ def conflict_resolution(
         "a resolver bug rather than an unsatisfiable requirement. Stalled on "
         f"{current_incompatibility!r}"
     )
-    raise ResolutionStalledError(stalled_message, incompatibility=current_incompatibility)
+    raise ResolutionStalledError(
+        stalled_message, incompatibility=current_incompatibility
+    )
 
 
 def update_culprit_counts(
