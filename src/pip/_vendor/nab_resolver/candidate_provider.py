@@ -168,7 +168,8 @@ class _PrecheckFeedback(Generic[_PackageT, _KeyT]):
 
     def consume_targets(self) -> list[_PackageT]:
         """Drain requested blockers without clearing their per-solve counts."""
-        targets, self.targets = self.targets, []
+        targets = self.targets
+        self.targets = []
         return targets
 
     def requested(self, package: _PackageT) -> bool:
@@ -370,7 +371,8 @@ class CandidateProvider(BaseProvider[_PackageT, _KeyT]):
     @override
     def consume_pending_clauses(self) -> list[Incompatibility[_PackageT, _KeyT]]:
         """Drain prechecked dependencies before an ordinary absence is recorded."""
-        pending, self._pending = self._pending, []
+        pending = self._pending
+        self._pending = []
         return pending
 
     @override

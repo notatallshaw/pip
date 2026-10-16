@@ -34,10 +34,10 @@ index 28378a0..cfd633f 100644
      override = getattr(typing, "override", lambda method: method)
 diff --git a/src/pip/_vendor/nab_resolver/candidate_provider.py b/src/pip/_vendor/nab_resolver/candidate_provider.py
 new file mode 100644
-index 0000000..14be249
+index 0000000..c725426
 --- /dev/null
 +++ b/src/pip/_vendor/nab_resolver/candidate_provider.py
-@@ -0,0 +1,538 @@
+@@ -0,0 +1,540 @@
 +"""Drive the resolver with candidates prepared and ordered by a host."""
 +
 +from __future__ import annotations
@@ -208,7 +208,8 @@ index 0000000..14be249
 +
 +    def consume_targets(self) -> list[_PackageT]:
 +        """Drain requested blockers without clearing their per-solve counts."""
-+        targets, self.targets = self.targets, []
++        targets = self.targets
++        self.targets = []
 +        return targets
 +
 +    def requested(self, package: _PackageT) -> bool:
@@ -410,7 +411,8 @@ index 0000000..14be249
 +    @override
 +    def consume_pending_clauses(self) -> list[Incompatibility[_PackageT, _KeyT]]:
 +        """Drain prechecked dependencies before an ordinary absence is recorded."""
-+        pending, self._pending = self._pending, []
++        pending = self._pending
++        self._pending = []
 +        return pending
 +
 +    @override
