@@ -765,6 +765,11 @@ class CatalogueProvider(BaseProvider[str, Version]):
         except IncompletePreferenceError:
             raise
         except ResolutionError as error:
+            if (
+                error.incompatibility is None
+                or not proxy.catalogue.has_complete_metadata(proxy.input_pins)
+            ):
+                raise
             raise yanked_installation_error(error, proxy) from error
         edges = tuple(
             (name, child)

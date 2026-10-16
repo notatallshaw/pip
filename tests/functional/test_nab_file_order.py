@@ -177,9 +177,7 @@ def test_version_text_aliases_preserve_original_prerelease_admission(
         assert "Nab catalogue fallback" not in result.stdout
         script.assert_installed(dep="2rc1")
     else:
-        assert (
-            "Nab catalogue admission: dep has an ineligible prerelease" in result.stdout
-        )
+        assert "Nab catalogue fallback" not in result.stdout
         script.assert_not_installed("dep")
 
 

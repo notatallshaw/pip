@@ -15,6 +15,7 @@ from pip._vendor.nab_resolver.types import Incompatibility, IncompatibilityCause
 from pip._vendor.packaging.ranges import VersionRange
 from pip._vendor.packaging.utils import canonicalize_name
 
+from .base import Constraint
 from .yank_candidates import Candidate, YankCandidates, is_pin, override, split_extra
 from .yank_preference import (
     IncompletePreferenceError,
@@ -30,6 +31,7 @@ if TYPE_CHECKING:
     from pip._vendor.packaging.requirements import Requirement
     from pip._vendor.packaging.version import Version
 
+    from .base import Requirement as NativeRequirement
     from .catalogue import CatalogueProvider
 
 __all__ = ["YankProxyProvider"]
@@ -282,7 +284,48 @@ class YankProxyProvider(BaseProvider[Package, int]):
             if candidate in self.catalogue.unavailable:
                 self.incomplete = True
             return None
+        if (
+            self.catalogue.provider.has_conditional_prereleases
+            and not self.catalogue.provider.has_yanked_candidates
+            and self.precheck_prerelease_admission(package)
+        ):
+            self.block_context(package)
+            return None
         return 0 if 0 in version_range else None
+
+    def precheck_prerelease_admission(self, package: MetadataProxy) -> bool:
+        """Reject an inadmissible plan using its selected artifact identities."""
+        provider = self.catalogue.provider
+        requirements: dict[str, list[NativeRequirement]] = {}
+        for requirement in provider.collected.requirements:
+            requirements.setdefault(requirement.name, []).append(requirement)
+        selected: dict[str, Candidate] = {}
+        pending = list(self.roots)
+        while pending:
+            name = pending.pop()
+            if name in selected:
+                continue
+            token = self.decisions.get(name)
+            if token is None:
+                return False
+            candidate = self.items[token]
+            record = self.catalogue.dependencies.get(candidate)
+            if record is None:
+                return False
+            selected[name] = candidate
+            for requirement in record[0]:
+                requirements.setdefault(requirement.name, []).append(requirement)
+            pending.extend(record[1])
+        if self.items[package.candidate] not in selected.values():
+            return False
+        return any(
+            not provider.prerelease_is_admitted(
+                self.catalogue.prepared[candidate],
+                requirements,
+                provider.collected.constraints.get(candidate.base, Constraint.empty()),
+            )
+            for candidate in selected.values()
+        )
 
     def has_satisfying_version(
         self, package: Package, version_range: RangeProtocol[int]
