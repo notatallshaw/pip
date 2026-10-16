@@ -23,12 +23,8 @@ def test_prerelease_after_matching_final_resolution_failure(
         script, "dep>1", options=options[policy], expect_error=failed
     )
 
-    if not working_final and policy == "default":
-        assert "NATIVE True" not in result.stdout
-        assert result.stdout.splitlines().count("NATIVE False") == 1
-    else:
-        assert "NATIVE True" not in result.stdout
-        assert "NATIVE False" not in result.stdout
+    assert "NATIVE True" not in result.stdout
+    assert "NATIVE False" not in result.stdout
     if failed:
         script.assert_not_installed("dep")
     else:
@@ -48,7 +44,9 @@ def test_default_admission_keeps_the_final_with_an_older_parent(
 
     result = tracked_install(script, "app", "dep>1")
 
-    assert "NATIVE True" in result.stdout
+    assert "NATIVE True" not in result.stdout
+    assert "NATIVE False" not in result.stdout
+    assert "Nab catalogue success" in result.stdout
     script.assert_installed(app="1", dep="2", shared="2")
     script.pip("check")
 
@@ -83,4 +81,47 @@ def test_original_constraint_can_admit_a_prerelease(
     assert "NATIVE True" not in result.stdout
     assert "NATIVE False" not in result.stdout
     script.assert_installed(dep="2rc1")
+    script.pip("check")
+
+
+@pytest.mark.parametrize("declaration", ["dep!=2", "dep>=2rc1"])
+@pytest.mark.parametrize("indirect", [False, True])
+def test_later_parent_can_admit_a_selected_prerelease(
+    script: PipTestEnvironment, declaration: str, *, indirect: bool
+) -> None:
+    create_basic_wheel_for_package(script, "dep", "1")
+    create_basic_wheel_for_package(script, "dep", "2", depends=["missing==1"])
+    create_basic_wheel_for_package(script, "dep", "2rc1")
+    create_basic_wheel_for_package(script, "app", "1")
+    if indirect:
+        create_basic_wheel_for_package(script, "bridge", "1", depends=[declaration])
+    create_basic_wheel_for_package(
+        script, "app", "2", depends=["bridge"] if indirect else [declaration]
+    )
+
+    result = tracked_install(script, "dep>1", "app")
+
+    assert "NATIVE True" not in result.stdout
+    assert "NATIVE False" not in result.stdout
+    assert "Nab catalogue success" in result.stdout
+    script.assert_installed(app="2", dep="2rc1")
+    script.pip("check")
+
+
+@pytest.mark.parametrize("declaration", ["dep!=2", "dep>=2rc1"])
+def test_backtracking_a_parent_can_admit_the_same_prerelease(
+    script: PipTestEnvironment, declaration: str
+) -> None:
+    create_basic_wheel_for_package(script, "dep", "1")
+    create_basic_wheel_for_package(script, "dep", "2", depends=["missing==1"])
+    create_basic_wheel_for_package(script, "dep", "2rc1")
+    create_basic_wheel_for_package(script, "app", "2", depends=["dep>1"])
+    create_basic_wheel_for_package(script, "app", "1", depends=[declaration])
+
+    result = tracked_install(script, "app", "dep>1")
+
+    assert "NATIVE True" not in result.stdout
+    assert "NATIVE False" not in result.stdout
+    assert "Nab catalogue success" in result.stdout
+    script.assert_installed(app="1", dep="2rc1")
     script.pip("check")
