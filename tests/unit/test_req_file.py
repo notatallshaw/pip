@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import codecs
 import collections
+import locale
 import logging
 import os
 import re
+import sys
 import textwrap
 from collections.abc import Iterator
 from optparse import Values
@@ -25,6 +27,7 @@ from pip._internal.req.constructors import (
     install_req_from_parsed_requirement,
 )
 from pip._internal.req.req_file import (
+    _decode_req_file,
     break_args_options,
     ignore_comments,
     join_lines,
@@ -751,6 +754,30 @@ class TestOptionVariants:
 
 class TestParseRequirements:
     """tests for `parse_reqfile`"""
+
+    @pytest.mark.skipif(
+        sys.version_info < (3, 11), reason="locale.getencoding requires 3.11+"
+    )
+    def test_native_locale_fallback(self, caplog: pytest.LogCaptureFixture) -> None:
+        locale_encoding = locale.getencoding()
+        data = b"# comment\xff\npip==24.0\n"
+
+        with caplog.at_level(logging.WARNING):
+            try:
+                expected = data.decode(locale_encoding)
+            except UnicodeDecodeError:
+                with pytest.raises(UnicodeDecodeError):
+                    _decode_req_file(data, "requirements.txt")
+            else:
+                assert _decode_req_file(data, "requirements.txt") == expected
+
+        assert len(caplog.records) == 1
+        assert caplog.records[0].args == (
+            "requirements.txt",
+            "utf-8",
+            locale_encoding,
+            locale_encoding,
+        )
 
     @pytest.mark.network
     def test_remote_reqs_parse(self) -> None:
