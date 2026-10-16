@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import codecs
 import os
 import re
 import subprocess
@@ -75,6 +76,44 @@ def test_no_options_passed_should_error(script: PipTestEnvironment) -> None:
 
 
 class TestBasicLoading(ConfigurationMixin):
+    def test_utf8_save_reload(self, script: PipTestEnvironment) -> None:
+        # Use a real non-UTF-8 locale and configure UTF-8 mode at startup.
+        script.environ["LC_ALL"] = "C"
+        script.environ["PYTHONCOERCECLOCALE"] = "0"
+        script.environ["PYTHONUTF8"] = "0"
+        result = script.run(
+            "python",
+            "-c",
+            "import locale, sys; print(sys.flags.utf8_mode); "
+            "print(locale.getencoding() if hasattr(locale, 'getencoding') "
+            "else locale.getpreferredencoding(False))",
+        )
+        utf8_mode, locale_encoding = result.stdout.splitlines()
+        assert utf8_mode == "0"
+        if codecs.lookup(locale_encoding).name == "utf-8":
+            pytest.skip("Requires a non-UTF-8 locale")
+
+        config_file = script.venv_path / CONFIG_BASENAME
+        config_file.write_bytes(b"[global]\ncert = plain\n")
+        result = script.pip("config", "--site", "get", "global.cert")
+        assert result.stdout.strip() == "plain"
+        config_file.unlink()
+
+        script.environ["PYTHONUTF8"] = "1"
+        value = "C:/丁/中文/cert.pem"
+
+        script.pip("config", "--site", "set", "global.cert", value)
+        script.environ["PYTHONWARNDEFAULTENCODING"] = "1"
+        script.environ["PYTHONWARNINGS"] = "error::EncodingWarning"
+        result = script.pip("config", "--site", "get", "global.cert")
+
+        assert result.stdout.strip() == value
+
+        config_file.write_bytes(b"[global]\ncert = \xff\n")
+        result = script.pip("config", "--site", "get", "global.cert", expect_error=True)
+        assert "contains invalid utf-8 characters" in result.stderr
+        assert str(config_file) in result.stderr
+
     def test_basic_modification_pipeline(self, script: PipTestEnvironment) -> None:
         script.pip("config", "get", "test.blah", expect_error=True)
         script.pip("config", "set", "test.blah", "1")
