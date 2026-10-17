@@ -226,7 +226,12 @@ class CatalogueProvider(BaseProvider[str, Version]):
 
     def expand_fixed_sources(self) -> None:
         """Prepare the URL closure of mandatory explicit input candidates."""
-        queue = deque(self.explicit_candidates.values())
+        queue = deque(
+            candidate
+            for package in self.roots
+            if (candidate := self.explicit_candidate(package)) is not None
+            and candidate.version in self.input_bounds(package)
+        )
         seen: set[str] = set()
         self.factory.catalogue_expanding_sources = True
         try:
@@ -237,8 +242,17 @@ class CatalogueProvider(BaseProvider[str, Version]):
                 seen.add(parent.name)
                 requirements = tuple(self.native.get_dependencies(parent))
                 for requirement in requirements:
-                    candidate, _ = requirement.get_candidate_lookup()
-                    if candidate is None or candidate.name.startswith("<"):
+                    candidate, ireq = requirement.get_candidate_lookup()
+                    if candidate is None and ireq is not None:
+                        candidate = self.explicit_candidate(requirement.name)
+                        if candidate is None:
+                            continue
+                    if candidate is None or not requirement.is_satisfied_by(candidate):
+                        raise self.factory.get_installation_error(
+                            [RequirementCause(requirement, parent)],
+                            self.collected.constraints,
+                        )
+                    if candidate.name.startswith("<"):
                         continue
                     self.register_source(
                         candidate, RequirementCause(requirement, parent)
@@ -408,8 +422,12 @@ class CatalogueProvider(BaseProvider[str, Version]):
             return
         constrained_base = as_base_candidate(candidate)
         assert constrained_base is not None
-        self.explicit_bases[package] = constrained_base
-        self.explicit_candidates[package] = constrained_base
+        self.register_source(
+            constrained_base,
+            RequirementCause(
+                self.factory.make_requirement_from_candidate(constrained_base), None
+            ),
+        )
 
     def installed_version(self, package: str) -> Version | None:
         """Cache installed availability independently of finder versions."""

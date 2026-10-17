@@ -6,13 +6,210 @@ from pathlib import Path
 
 import pytest
 
-from tests.functional.test_nab_preparation_reuse import tracked_install
+from tests.functional.test_nab_preparation_reuse import (
+    preparation_count,
+    tracked_install,
+)
 from tests.lib import (
     PipTestEnvironment,
     create_basic_sdist_for_package,
     create_basic_wheel_for_package,
 )
 from tests.lib.wheel import make_wheel
+
+
+@pytest.mark.parametrize("with_extra", [False, True])
+def test_constrained_root_expands_its_mandatory_dependency_urls(
+    script: PipTestEnvironment, *, with_extra: bool
+) -> None:
+    direct = script.scratch_path / "direct"
+    direct.mkdir()
+    leaf = Path(make_wheel("leaf", "1").save_to_dir(direct))
+    dep = Path(
+        make_wheel(
+            "dep",
+            "1",
+            metadata=(
+                "Metadata-Version: 2.2\nName: dep\nVersion: 1\n"
+                f"Requires-Dist: leaf @ {leaf.as_uri()}\n"
+            ),
+        ).save_to_dir(direct)
+    )
+    marker = ' ; extra == "feature"' if with_extra else ""
+    app = Path(
+        make_wheel(
+            "app",
+            "1",
+            metadata=(
+                "Metadata-Version: 2.2\nName: app\nVersion: 1\n"
+                "Provides-Extra: feature\n"
+                f"Requires-Dist: dep @ {dep.as_uri()}{marker}\n"
+            ),
+        ).save_to_dir(direct)
+    )
+    constraints = script.scratch_path / "constraints.txt"
+    constraints.write_text(f"app @ {app.as_uri()}\n")
+
+    result = tracked_install(
+        script,
+        "app[feature]" if with_extra else "app",
+        options=("-c", str(constraints)),
+    )
+
+    assert "NATIVE True" not in result.stdout
+    assert "NATIVE False" not in result.stdout
+    assert "Nab catalogue success" in result.stdout
+    script.assert_installed(app="1", dep="1", leaf="1")
+    script.pip("check")
+
+
+@pytest.mark.parametrize("inactive", ["extra", "no_deps", "version"])
+def test_ineligible_constrained_root_dependencies_are_not_prepared(
+    script: PipTestEnvironment, inactive: str
+) -> None:
+    direct = script.scratch_path / "direct"
+    direct.mkdir()
+    dep = Path(make_wheel("dep", "1").save_to_dir(direct))
+    marker = ' ; extra == "feature"' if inactive == "extra" else ""
+    app = Path(
+        make_wheel(
+            "app",
+            "1",
+            metadata=(
+                "Metadata-Version: 2.2\nName: app\nVersion: 1\n"
+                "Provides-Extra: feature\n"
+                f"Requires-Dist: dep @ {dep.as_uri()}{marker}\n"
+            ),
+        ).save_to_dir(direct)
+    )
+    constraints = script.scratch_path / "constraints.txt"
+    constraints.write_text(f"app @ {app.as_uri()}\n")
+    options: tuple[str, ...] = ("-c", str(constraints))
+    if inactive == "no_deps":
+        options += ("--no-deps",)
+
+    result = tracked_install(
+        script,
+        "app>=2" if inactive == "version" else "app",
+        options=options,
+        expect_error=inactive == "version",
+    )
+
+    assert "NATIVE True" not in result.stdout
+    assert "NATIVE False" not in result.stdout
+    assert preparation_count(result.stdout, dep) == 0
+    script.assert_not_installed("dep")
+    if inactive == "version":
+        script.assert_not_installed("app")
+    else:
+        script.assert_installed(app="1")
+        if inactive != "no_deps":
+            script.pip("check")
+
+
+def test_fixed_source_closure_follows_a_named_constrained_dependency(
+    script: PipTestEnvironment,
+) -> None:
+    direct = script.scratch_path / "direct"
+    direct.mkdir()
+    leaf = Path(make_wheel("leaf", "1").save_to_dir(direct))
+    dep = Path(
+        make_wheel(
+            "dep",
+            "1",
+            metadata=(
+                "Metadata-Version: 2.2\nName: dep\nVersion: 1\n"
+                f"Requires-Dist: leaf @ {leaf.as_uri()}\n"
+            ),
+        ).save_to_dir(direct)
+    )
+    app = Path(
+        make_wheel(
+            "app", "1", metadata_updates={"Requires-Dist": "dep>=1"}
+        ).save_to_dir(direct)
+    )
+    constraints = script.scratch_path / "constraints.txt"
+    constraints.write_text(f"dep @ {dep.as_uri()}\n")
+
+    result = tracked_install(script, app, options=("-c", str(constraints)))
+
+    assert "NATIVE True" not in result.stdout
+    assert "NATIVE False" not in result.stdout
+    assert "Nab catalogue success" in result.stdout
+    script.assert_installed(app="1", dep="1", leaf="1")
+    script.pip("check")
+
+
+@pytest.mark.parametrize("valid", [False, True])
+def test_mandatory_closure_checks_parent_hashes_against_the_fixed_archive(
+    script: PipTestEnvironment, *, valid: bool
+) -> None:
+    direct = script.scratch_path / "direct"
+    direct.mkdir()
+    dep = Path(make_wheel("dep", "1").save_to_dir(direct))
+    expected = hashlib.sha256(dep.read_bytes()).hexdigest()
+    parent_hash = hashlib.sha512(dep.read_bytes()).hexdigest() if valid else "0" * 128
+    app = Path(
+        make_wheel(
+            "app",
+            "1",
+            metadata=(
+                "Metadata-Version: 2.2\nName: app\nVersion: 1\n"
+                f"Requires-Dist: dep @ {dep.as_uri()}#sha512={parent_hash}\n"
+            ),
+        ).save_to_dir(direct)
+    )
+    constraints = script.scratch_path / "constraints.txt"
+    constraints.write_text(
+        f"app @ {app.as_uri()}\ndep @ {dep.as_uri()}#sha256={expected}\n"
+    )
+
+    result = tracked_install(
+        script, "app", "dep", options=("-c", str(constraints)), expect_error=not valid
+    )
+
+    assert "NATIVE True" not in result.stdout
+    assert "NATIVE False" not in result.stdout
+    if valid:
+        script.assert_installed(app="1", dep="1")
+        script.pip("check")
+    else:
+        assert "DO NOT MATCH THE HASHES" in result.stderr
+        script.assert_not_installed("app", "dep")
+
+
+@pytest.mark.parametrize("source_exists", [False, True])
+def test_mandatory_url_closure_keeps_root_source_constraints(
+    script: PipTestEnvironment, *, source_exists: bool
+) -> None:
+    direct = script.scratch_path / "direct"
+    direct.mkdir()
+    permitted = direct / "dep-1-1-py3-none-any.whl"
+    other = direct / "dep-1-2-py3-none-any.whl"
+    make_wheel("dep", "1").save_to(permitted)
+    if source_exists:
+        make_wheel("dep", "1").save_to(other)
+    app = Path(
+        make_wheel(
+            "app",
+            "1",
+            metadata=(
+                "Metadata-Version: 2.2\nName: app\nVersion: 1\n"
+                f"Requires-Dist: dep @ {other.as_uri()}\n"
+            ),
+        ).save_to_dir(direct)
+    )
+    constraints = script.scratch_path / "constraints.txt"
+    constraints.write_text(f"dep @ {permitted.as_uri()}\n")
+
+    result = tracked_install(
+        script, app, "dep", options=("-c", str(constraints)), expect_error=True
+    )
+
+    assert "NATIVE True" not in result.stdout
+    assert "NATIVE False" not in result.stdout
+    assert preparation_count(result.stdout, other) == 0
+    script.assert_not_installed("app", "dep")
 
 
 @pytest.mark.parametrize("with_extra", [False, True])
