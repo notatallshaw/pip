@@ -6,9 +6,59 @@ from pip._vendor.packaging.specifiers import SpecifierSet
 from pip._vendor.packaging.utils import NormalizedName, canonicalize_name
 
 from pip._internal.req.constructors import install_req_drop_extras
+from pip._internal.req.dependency_sources import Source
 from pip._internal.req.req_install import InstallRequirement
 
 from .base import Candidate, CandidateLookup, Requirement, format_name
+
+
+class SourceRequirement(Requirement):
+    """Keep a source choice on its occurrence so backtracking can revoke it."""
+
+    def __init__(
+        self, requirement: Requirement, source: Source, specifier: SpecifierSet
+    ) -> None:
+        self.requirement = requirement
+        self.source = source
+        self.specifier = specifier
+
+    def __str__(self) -> str:
+        version = f", required version {self.specifier}" if self.specifier else ""
+        return f"{self.requirement} (source: {self.source}{version})"
+
+    def __repr__(self) -> str:
+        return f"SourceRequirement({self.requirement!r}, {str(self.source)!r})"
+
+    def __hash__(self) -> int:
+        return hash((self.requirement, self.source, str(self.specifier)))
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, SourceRequirement):
+            return NotImplemented
+        return (self.requirement, self.source, self.specifier) == (
+            other.requirement,
+            other.source,
+            other.specifier,
+        )
+
+    @property
+    def name(self) -> str:
+        return self.requirement.name
+
+    @property
+    def project_name(self) -> NormalizedName:
+        return self.requirement.project_name
+
+    def get_candidate_lookup(self) -> CandidateLookup:
+        return self.requirement.get_candidate_lookup()
+
+    def format_for_error(self) -> str:
+        return str(self)
+
+    def is_satisfied_by(self, candidate: Candidate) -> bool:
+        return self.requirement.is_satisfied_by(candidate) and self.specifier.contains(
+            candidate.version, prereleases=True
+        )
 
 
 class ExplicitRequirement(Requirement):

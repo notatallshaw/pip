@@ -103,6 +103,7 @@ class InstallRequirement:
             # PEP 508 URL requirement
             link = Link(req.url)
         self.link = self.original_link = link
+        self.source_hashes: dict[str, str] = {}
 
         # When this InstallRequirement is a wheel obtained from the cache of locally
         # built wheels, this is the source link corresponding to the cache entry, which
@@ -287,7 +288,7 @@ class InstallRequirement:
         flags. They satisfy --require-hashes (whether it was implicitly or
         explicitly activated) but do not activate it. md5 and sha224 are not
         allowed in flags, which should nudge people toward good algos. We
-        always OR all hashes together, even ones from URLs.
+        treat flag and URL hashes as alternatives. Source-table hashes must each match.
 
         :param trust_internet: Whether to trust URL-based (#md5=...) hashes
             downloaded from the internet, as by populate_link()
@@ -303,7 +304,7 @@ class InstallRequirement:
         if link and link.hash:
             assert link.hash_name is not None
             good_hashes.setdefault(link.hash_name, []).append(link.hash)
-        return Hashes(good_hashes)
+        return Hashes(good_hashes, required=frozenset(self.source_hashes.items()))
 
     def from_path(self) -> str | None:
         """Format a nice indicator to show where this "comes from" """

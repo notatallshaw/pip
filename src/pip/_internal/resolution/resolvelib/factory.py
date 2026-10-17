@@ -32,13 +32,14 @@ from pip._internal.exceptions import (
 )
 from pip._internal.index.package_finder import PackageFinder
 from pip._internal.metadata import BaseDistribution, get_default_environment
-from pip._internal.models.link import Link
+from pip._internal.models.link import Link, links_equivalent
 from pip._internal.models.wheel import Wheel
 from pip._internal.operations.prepare import RequirementPreparer
 from pip._internal.req.constructors import (
     install_req_drop_extras,
     install_req_from_link_and_ireq,
 )
+from pip._internal.req.dependency_sources import DependencySources
 from pip._internal.req.req_install import (
     InstallRequirement,
     check_invalid_constraint_type,
@@ -63,6 +64,7 @@ from .found_candidates import FoundCandidates, IndexCandidateInfo
 from .requirements import (
     ExplicitRequirement,
     RequiresPythonRequirement,
+    SourceRequirement,
     SpecifierRequirement,
     SpecifierWithoutExtrasRequirement,
     UnsatisfiableRequirement,
@@ -99,8 +101,11 @@ class Factory:
         ignore_installed: bool,
         ignore_requires_python: bool,
         py_version_info: tuple[int, ...] | None = None,
+        dependency_sources: DependencySources | None = None,
     ) -> None:
         self._finder = finder
+        self._dependency_sources = dependency_sources
+        self._source_finders: dict[str, PackageFinder] = {}
         self.preparer = preparer
         self._wheel_cache = wheel_cache
         self._python_candidate = RequiresPythonCandidate(py_version_info)
@@ -130,6 +135,23 @@ class Factory:
     @property
     def force_reinstall(self) -> bool:
         return self._force_reinstall
+
+    def _finder_for_source(self, url: str) -> PackageFinder:
+        """Reuse a finder whose candidates come exclusively from this source index."""
+        if url not in self._source_finders:
+            self._source_finders[url] = self._finder.for_source_index(url)
+        return self._source_finders[url]
+
+    def report_source_usage(self, requirements: Iterable[Requirement]) -> None:
+        """Report unused entries using only requirements in the final resolution."""
+        if self._dependency_sources is not None:
+            self._dependency_sources.warn_unused(
+                {
+                    req.project_name
+                    for req in requirements
+                    if isinstance(req, SourceRequirement)
+                }
+            )
 
     def _fail_if_link_is_unsupported_wheel(self, link: Link) -> None:
         if not link.is_wheel:
@@ -250,6 +272,7 @@ class Factory:
         prefers_installed: bool,
         incompatible_ids: set[int],
         constraint_hash_options: dict[str, list[str]] | None = None,
+        source_index: str | None = None,
     ) -> Iterable[Candidate]:
         if not ireqs:
             return ()
@@ -271,6 +294,9 @@ class Factory:
             }
         assert template.req  # to prevent mypy from being confused by the copy
         name = canonicalize_name(template.req.name)
+        finder = self._finder
+        if source_index is not None:
+            finder = self._finder_for_source(source_index)
 
         extras: frozenset[str] = frozenset()
         for ireq in ireqs:
@@ -283,7 +309,7 @@ class Factory:
             """Get the candidate for the currently-installed version."""
             # If --force-reinstall is set, we want the version from the index
             # instead, so we "pretend" there is nothing installed.
-            if self._force_reinstall:
+            if self._force_reinstall or source_index is not None:
                 return None
             try:
                 installed_dist = self._installed_dists[name]
@@ -309,7 +335,7 @@ class Factory:
             return candidate
 
         def iter_index_candidate_infos() -> Iterator[IndexCandidateInfo]:
-            result = self._finder.find_best_candidate(
+            result = finder.find_best_candidate(
                 project_name=name,
                 specifier=specifier,
                 hashes=hashes,
@@ -420,6 +446,23 @@ class Factory:
         prefers_installed: bool,
         is_satisfied_by: Callable[[Requirement, Candidate], bool],
     ) -> Iterable[Candidate]:
+        source_requirements = list(requirements[identifier])
+        base_name = identifier.partition("[")[0]
+        if base_name != identifier:
+            source_requirements.extend(requirements.get(base_name, ()))
+        sources = {
+            req.source
+            for req in source_requirements
+            if isinstance(req, SourceRequirement)
+        }
+        if len(sources) > 1:
+            logger.info(
+                "Conflicting development sources for %s: %s",
+                base_name,
+                "; ".join(sorted(map(str, sources))),
+            )
+            return ()
+        source = next(iter(sources), None)
         # Collect basic lookup information from the requirements.
         explicit_candidates: set[Candidate] = set()
         ireqs: list[InstallRequirement] = []
@@ -468,9 +511,33 @@ class Factory:
         # can be made quicker by comparing only the id() values.
         incompat_ids = {id(c) for c in incompatibilities.get(identifier, ())}
 
+        if explicit_candidates and source is not None and source.kind == "index":
+            indexed_links = [
+                candidate.link
+                for candidate in self._finder_for_source(
+                    source.location
+                ).find_all_candidates(base_name)
+            ]
+            explicit_candidates = {
+                candidate
+                for candidate in explicit_candidates
+                if candidate.source_link is not None
+                and any(
+                    links_equivalent(candidate.source_link, link)
+                    for link in indexed_links
+                )
+            }
+            if not explicit_candidates:
+                return ()
+
         # If none of the requirements want an explicit candidate, we can ask
         # the finder for candidates.
         if not explicit_candidates:
+            source_index = (
+                source.location
+                if source is not None and source.kind == "index"
+                else None
+            )
             return self._iter_found_candidates(
                 ireqs,
                 constraint.specifier,
@@ -478,6 +545,7 @@ class Factory:
                 prefers_installed,
                 incompat_ids,
                 constraint.hash_options,
+                source_index,
             )
 
         return (
@@ -489,6 +557,30 @@ class Factory:
         )
 
     def _make_requirements_from_install_req(
+        self, ireq: InstallRequirement, requested_extras: Iterable[str]
+    ) -> Iterator[Requirement]:
+        """Apply this occurrence's source before making resolver requirements."""
+        sources = self._dependency_sources
+        requested_extras = tuple(requested_extras)
+        if (
+            sources is None
+            or ireq.req is None
+            or not ireq.match_markers(requested_extras)
+        ):
+            yield from self._make_unredirected_requirements(ireq, requested_extras)
+            return
+        selections = sources.for_requirement(ireq, requested_extras)
+        for source in selections:
+            if source is None:
+                yield from self._make_unredirected_requirements(ireq, requested_extras)
+                continue
+            redirected = sources.apply(ireq, source)
+            for requirement in self._make_unredirected_requirements(
+                redirected, requested_extras
+            ):
+                yield SourceRequirement(requirement, source, ireq.req.specifier)
+
+    def _make_unredirected_requirements(
         self, ireq: InstallRequirement, requested_extras: Iterable[str]
     ) -> Iterator[Requirement]:
         """
@@ -603,6 +695,22 @@ class Factory:
                 extra. This allows centralized constraint handling for the base,
                 resulting in fewer candidate rejections.
         """
+        requested_extras = tuple(requested_extras)
+        sources = self._dependency_sources
+        if sources is not None and not sources.is_target(comes_from):
+            original = get_requirement(specifier)
+            if original.url is not None:
+                # Select a replacement before interpreting the old URL.
+                abstract = copy.copy(original)
+                abstract.url = None
+                ireq = self._make_install_req_from_spec(str(abstract), comes_from)
+                if ireq.match_markers(requested_extras) and any(
+                    source is not None
+                    for source in sources.for_requirement(ireq, requested_extras)
+                ):
+                    return self._make_requirements_from_install_req(
+                        ireq, requested_extras
+                    )
         ireq = self._make_install_req_from_spec(specifier, comes_from)
         return self._make_requirements_from_install_req(ireq, requested_extras)
 
@@ -692,8 +800,18 @@ class Factory:
         else:
             req_disp = f"{req} (from {parent.name})"
 
-        cands = self._finder.find_all_candidates(req.project_name)
-        skipped_by_requires_python = self._finder.requires_python_skipped_reasons()
+        finder = self._finder
+        if isinstance(req, SourceRequirement):
+            if req.source.kind == "index":
+                finder = self._finder_for_source(req.source.location)
+                cands = finder.find_all_candidates(req.project_name)
+                skipped_by_requires_python = finder.requires_python_skipped_reasons()
+            else:
+                cands = []
+                skipped_by_requires_python = []
+        else:
+            cands = finder.find_all_candidates(req.project_name)
+            skipped_by_requires_python = finder.requires_python_skipped_reasons()
 
         versions_set: set[Version] = set()
         yanked_versions_set: set[Version] = set()

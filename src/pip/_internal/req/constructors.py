@@ -516,7 +516,7 @@ def install_req_from_parsed_requirement(
 def install_req_from_link_and_ireq(
     link: Link, ireq: InstallRequirement
 ) -> InstallRequirement:
-    return InstallRequirement(
+    result = InstallRequirement(
         req=ireq.req,
         comes_from=ireq.comes_from,
         editable=ireq.editable,
@@ -527,6 +527,8 @@ def install_req_from_link_and_ireq(
         config_settings=ireq.config_settings,
         user_supplied=ireq.user_supplied,
     )
+    result.source_hashes = ireq.source_hashes.copy()
+    return result
 
 
 def install_req_drop_extras(ireq: InstallRequirement) -> InstallRequirement:
@@ -535,7 +537,7 @@ def install_req_drop_extras(ireq: InstallRequirement) -> InstallRequirement:
     any extras. Sets the original requirement as the new one's parent
     (comes_from).
     """
-    return InstallRequirement(
+    result = InstallRequirement(
         req=(
             _set_requirement_extras(ireq.req, set()) if ireq.req is not None else None
         ),
@@ -550,6 +552,8 @@ def install_req_drop_extras(ireq: InstallRequirement) -> InstallRequirement:
         config_settings=ireq.config_settings,
         user_supplied=ireq.user_supplied,
     )
+    result.source_hashes = ireq.source_hashes.copy()
+    return result
 
 
 def install_req_extend_extras(

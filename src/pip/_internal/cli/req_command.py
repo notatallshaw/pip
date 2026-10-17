@@ -44,6 +44,7 @@ from pip._internal.req.constructors import (
     install_req_from_pylock_package,
     install_req_from_req_string,
 )
+from pip._internal.req.dependency_sources import choose_sources, project_file_path
 from pip._internal.req.pep723 import PEP723Exception, pep723_metadata
 from pip._internal.req.req_dependency_group import parse_dependency_groups
 from pip._internal.req.req_file import parse_requirements
@@ -288,6 +289,7 @@ class RequirementCommand(IndexGroupCommand):
                 force_reinstall=force_reinstall,
                 upgrade_strategy=upgrade_strategy,
                 py_version_info=py_version_info,
+                dependency_sources=getattr(options, "dependency_sources_context", None),
             )
         import pip._internal.resolution.legacy.resolver
 
@@ -317,6 +319,7 @@ class RequirementCommand(IndexGroupCommand):
         Parse command-line arguments into the corresponding requirements.
         """
         requirements: list[InstallRequirement] = []
+        group_requirements = []
 
         if should_ignore_regular_constraints():
             # Inside an isolated build subprocess: apply the build constraints
@@ -341,13 +344,15 @@ class RequirementCommand(IndexGroupCommand):
             requirements.append(req_to_add)
 
         if options.dependency_groups:
-            for req in parse_dependency_groups(options.dependency_groups):
-                req_to_add = install_req_from_req_string(
-                    req,
-                    isolated=options.isolated_mode,
-                    user_supplied=True,
-                )
-                requirements.append(req_to_add)
+            for path, group in options.dependency_groups:
+                for req in parse_dependency_groups([(path, group)]):
+                    req_to_add = install_req_from_req_string(
+                        req,
+                        isolated=options.isolated_mode,
+                        user_supplied=True,
+                    )
+                    requirements.append(req_to_add)
+                    group_requirements.append((req_to_add, path, group))
 
         for req in options.editables:
             req_to_add = install_req_from_editable(
@@ -461,7 +466,36 @@ class RequirementCommand(IndexGroupCommand):
                     '(see "pip help {name}")'.format(**opts)
                 )
 
+        self._configure_sources(
+            options, requirements, group_requirements, finder.target_python
+        )
         return requirements
+
+    def _configure_sources(
+        self,
+        options: Values,
+        requirements: list[InstallRequirement],
+        groups: list[tuple[InstallRequirement, str, str]],
+        target: TargetPython,
+    ) -> None:
+        """Select development inputs once, excluding isolated build requirements."""
+        options.dependency_sources_context = None
+        if should_ignore_regular_constraints() or getattr(options, "no_sources", False):
+            return
+        sources = choose_sources(
+            requirements, options.dependency_groups, getattr(options, "sources", None)
+        )
+        if sources is None or not sources.entries:
+            return
+        sources.set_target_environment(target)
+        if self.determine_resolver_variant(options) != "resolvelib":
+            raise CommandError(
+                "Development sources require the resolvelib resolver; "
+                "use --no-sources with the legacy resolver"
+            )
+        for requirement, path, group in groups:
+            sources.root_groups[requirement] = (project_file_path(path), group)
+        options.dependency_sources_context = sources
 
     @staticmethod
     def trace_basic_info(finder: PackageFinder) -> None:

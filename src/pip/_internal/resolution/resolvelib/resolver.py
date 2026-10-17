@@ -16,6 +16,7 @@ from pip._internal.exceptions import ResolutionTooDeepError
 from pip._internal.index.package_finder import PackageFinder
 from pip._internal.operations.prepare import RequirementPreparer
 from pip._internal.req.constructors import install_req_extend_extras
+from pip._internal.req.dependency_sources import DependencySources
 from pip._internal.req.req_install import InstallRequirement
 from pip._internal.req.req_set import RequirementSet
 from pip._internal.resolution.base import BaseResolver, InstallRequirementProvider
@@ -55,6 +56,7 @@ class Resolver(BaseResolver):
         force_reinstall: bool,
         upgrade_strategy: str,
         py_version_info: tuple[int, ...] | None = None,
+        dependency_sources: DependencySources | None = None,
     ):
         super().__init__()
         assert upgrade_strategy in self._allowed_strategies
@@ -70,6 +72,7 @@ class Resolver(BaseResolver):
             ignore_installed=ignore_installed,
             ignore_requires_python=ignore_requires_python,
             py_version_info=py_version_info,
+            dependency_sources=dependency_sources,
         )
         self.ignore_dependencies = ignore_dependencies
         self.only_dependencies = only_dependencies
@@ -113,6 +116,11 @@ class Resolver(BaseResolver):
         except ResolutionTooDeep:
             raise ResolutionTooDeepError from None
 
+        self.factory.report_source_usage(
+            info.requirement
+            for criterion in result.criteria.values()
+            for info in criterion.information
+        )
         req_set = RequirementSet(check_supported_wheels=check_supported_wheels)
         # process candidates with extras last to ensure their base equivalent is
         # already in the req_set if appropriate.

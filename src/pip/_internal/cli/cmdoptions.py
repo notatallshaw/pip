@@ -1095,6 +1095,23 @@ dependency_groups: Callable[..., Option] = partial(
     'Defaults to using "pyproject.toml" in the current directory.',
 )
 
+sources: Callable[..., Option] = partial(
+    Option,
+    "--sources",
+    dest="sources",
+    metavar="path",
+    help="Read development sources from this project directory or pyproject.toml.",
+)
+
+no_sources: Callable[..., Option] = partial(
+    Option,
+    "--no-sources",
+    dest="no_sources",
+    action="store_true",
+    default=False,
+    help="Ignore all development dependency source tables.",
+)
+
 ignore_requires_python: Callable[..., Option] = partial(
     Option,
     "--ignore-requires-python",

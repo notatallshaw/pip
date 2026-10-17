@@ -709,6 +709,23 @@ class PackageFinder:
     def target_python(self) -> TargetPython:
         return self._target_python
 
+    def for_source_index(self, url: str) -> PackageFinder:
+        """Keep selection policy while restricting search to one source index."""
+        scope = SearchScope.create(
+            find_links=[],
+            index_urls=[] if self.search_scope.no_index else [url],
+            no_index=self.search_scope.no_index,
+        )
+        return PackageFinder(
+            link_collector=LinkCollector(self._link_collector.session, scope),
+            target_python=self._target_python,
+            allow_yanked=self._allow_yanked,
+            format_control=self.format_control,
+            candidate_prefs=self._candidate_prefs,
+            ignore_requires_python=self._ignore_requires_python,
+            uploaded_prior_to=self._uploaded_prior_to,
+        )
+
     @property
     def search_scope(self) -> SearchScope:
         return self._link_collector.search_scope

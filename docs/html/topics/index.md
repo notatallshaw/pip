@@ -14,6 +14,7 @@ authentication
 caching
 configuration
 dependency-resolution
+dependency-sources
 more-dependency-resolution
 https-certificates
 local-project-installs
