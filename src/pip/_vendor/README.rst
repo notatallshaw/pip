@@ -93,6 +93,9 @@ such as OS packages.
 Modifications
 =============
 
+* ``packaging`` includes development source parsing and selection for this
+  prototype. Replace this patch with a released version before shipping the feature.
+
 * ``setuptools`` is completely stripped to only keep ``pkg_resources``.
 * ``pkg_resources`` has been modified to import its dependencies from
   ``pip._vendor``, and to use the vendored copy of ``platformdirs``
