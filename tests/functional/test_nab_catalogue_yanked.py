@@ -3,7 +3,10 @@ from pathlib import Path
 
 import pytest
 
-from tests.functional.test_nab_preparation_reuse import tracked_install
+from tests.functional.test_nab_preparation_reuse import (
+    preparation_count,
+    tracked_install,
+)
 from tests.lib import PipTestEnvironment, create_basic_wheel_for_package
 from tests.lib.wheel import make_wheel
 
@@ -268,14 +271,22 @@ def mixed_files_listing(
     "roots",
     [("dep[feature]", "app", "tools==2"), ("app", "tools==2", "dep[feature]")],
 )
+@pytest.mark.parametrize("extra_version", [False, True])
 def test_transitive_pin_admits_an_unversioned_extra(
-    script: PipTestEnvironment, roots: tuple[str, ...]
+    script: PipTestEnvironment, roots: tuple[str, ...], *, extra_version: bool
 ) -> None:
     """Keep the base facts when another parent permits an unversioned extra."""
     listing = mixed_files_listing(script, extra_only=True)
     app = create_basic_wheel_for_package(script, "app", "1", depends=["dep==1.0"])
+    unrelated: Path | None = None
+    if extra_version:
+        unrelated = create_basic_wheel_for_package(
+            script, "dep", "2.0", extras={"feature": []}
+        )
     with listing.open("a") as stream:
         stream.write(f'\n<a href="{app.name}">{app.name}</a>')
+        if unrelated is not None:
+            stream.write(f'\n<a href="{unrelated.name}">{unrelated.name}</a>')
     report = script.scratch_path / "report.json"
     script.pip_expect_warning = True
 
@@ -295,6 +306,45 @@ def test_transitive_pin_admits_an_unversioned_extra(
     assert selected["download_info"]["url"] == expected.as_uri()
     assert selected["is_yanked"]
     script.assert_installed(dep="1.0", tools="2", app="1")
+    script.pip("check")
+    if unrelated is not None:
+        assert preparation_count(result.stdout, unrelated) == 0
+
+
+@pytest.mark.parametrize("app_requirement", ["app==2", "app"])
+def test_rejected_parent_metadata_cannot_expand_the_live_proof(
+    script: PipTestEnvironment, app_requirement: str
+) -> None:
+    """Ignore an extra reached only through a known contradictory parent."""
+    listing = mixed_files_listing(script)
+    wheels = [
+        create_basic_wheel_for_package(script, "app", "1", depends=["dep==1.0"]),
+        create_basic_wheel_for_package(
+            script,
+            "app",
+            "2",
+            depends=["dep==1.0"],
+            extras={"feature": ["ghost==1"]},
+        ),
+        create_basic_wheel_for_package(script, "parent", "1"),
+        create_basic_wheel_for_package(
+            script, "parent", "2", depends=["app[feature]==1"]
+        ),
+    ]
+    with listing.open("a") as stream:
+        for wheel in wheels:
+            stream.write(f'\n<a href="{wheel.name}">{wheel.name}</a>')
+    script.pip_expect_warning = True
+
+    result = tracked_install(
+        script, app_requirement, "parent", "tools==2", find_links=listing
+    )
+
+    assert "NATIVE True" not in result.stdout
+    assert "NATIVE False" not in result.stdout
+    assert "Nab catalogue success" in result.stdout
+    script.assert_installed(app="2", parent="1", dep="1.0", tools="2")
+    script.assert_not_installed("ghost")
     script.pip("check")
 
 

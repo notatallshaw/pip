@@ -298,6 +298,50 @@ class YankCandidates:
             name: candidate.version for name, candidate in selected.items()
         }, provider
 
+    def mandatory_bounds(
+        self, prescribed: Mapping[str, Candidate]
+    ) -> dict[str, VersionRange]:
+        """Collect bounds from roots and their reachable fixed parent identities."""
+        bounds = {
+            name: self.provider.input_bounds(name) for name in self.provider.roots
+        }
+        expanded: set[str] = set()
+        while True:
+            implied: list[tuple[str, VersionRange]] = []
+            for package, allowed in tuple(bounds.items()):
+                base, extra = split_extra(package)
+                if extra is not None:
+                    implied.append((base, allowed))
+                    implied.append(
+                        (package, bounds.get(base, self.provider.input_bounds(base)))
+                    )
+                candidate = prescribed.get(package)
+                if candidate is not None:
+                    implied.append((package, VersionRange.singleton(candidate.version)))
+                data = self.facts.get(candidate) if candidate is not None else None
+                if data is not None and package not in expanded:
+                    expanded.add(package)
+                    implied.extend(data.dependencies.items())
+            changed = False
+            for package, required in implied:
+                previous = bounds.get(package, self.provider.input_bounds(package))
+                narrowed = previous & required
+                if package not in bounds or narrowed != previous:
+                    bounds[package] = narrowed
+                    changed = True
+            if not changed:
+                return bounds
+
+    def scoped_bounds(
+        self, package: str, mandatory: Mapping[str, VersionRange]
+    ) -> VersionRange:
+        """Intersect input bounds with guaranteed base and extra declarations."""
+        return (
+            self.provider.input_bounds(package)
+            & mandatory.get(package, VersionRange.full())
+            & mandatory.get(split_extra(package)[0], VersionRange.full())
+        )
+
     def has_complete_metadata(
         self,
         input_pins: Sequence[Requirement],
@@ -315,6 +359,9 @@ class YankCandidates:
         demanded = set(provider.roots)
         pins = list(input_pins)
         prescribed = {candidate.package: candidate for candidate in fixed}
+        mandatory = self.mandatory_bounds(prescribed)
+        if any(allowed.is_empty for allowed in mandatory.values()):
+            return True
         expanded: set[Candidate] = set()
         while True:
             changed = False
@@ -322,7 +369,7 @@ class YankCandidates:
                 choices = self.candidates.get(package)
                 if choices is None:
                     return False
-                allowed = provider.input_bounds(package)
+                allowed = self.scoped_bounds(package, mandatory)
                 for candidate in choices:
                     if (
                         candidate in expanded
@@ -346,9 +393,15 @@ class YankCandidates:
                     expanded.add(candidate)
                     changed = True
                     data = self.facts.get(candidate)
-                    if data is not None:
-                        demanded.update(data.dependencies)
-                        pins.extend(data.pins)
+                    if data is None:
+                        continue
+                    if any(
+                        (required & self.scoped_bounds(child, mandatory)).is_empty
+                        for child, required in data.dependencies.items()
+                    ):
+                        continue
+                    demanded.update(data.dependencies)
+                    pins.extend(data.pins)
             if not changed:
                 return True
 
