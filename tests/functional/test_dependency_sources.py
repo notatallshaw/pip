@@ -349,6 +349,7 @@ def test_local_project_automatically_selects_sources(
         '[develop.sources]\ncore = {path = "../core", '
         f"editable = {str(editable).lower()}}}\n",
     )
+    (root / "pyproject.toml").write_text("invalid = [")
     result = script.pip("install", "--no-index", "--no-build-isolation", app, cwd=root)
     info = result.get_created_direct_url("core")
     assert info is not None
@@ -514,15 +515,19 @@ def test_build_requirements_ignore_sources(
     script.assert_installed(app="1.0")
 
 
-def test_dependency_source_tables_are_ignored(script: PipTestEnvironment) -> None:
+@pytest.mark.parametrize("direct_reference", [False, True])
+def test_dependency_source_tables_are_ignored(
+    script: PipTestEnvironment, direct_reference: bool
+) -> None:
     root = script.scratch_path
-    local_project(
+    core = local_project(
         root / "core",
         "core",
         'dependencies = ["leaf"]\n[develop.sources]\nleaf = "../missing"\n',
     )
     make_wheel("leaf", "1.0").save_to_dir(root)
-    source_project(script, '{path = "core"}')
+    dependency = f'"core @ {core.as_uri()}"' if direct_reference else '"core"'
+    source_project(script, '{path = "core"}', dependency)
     script.pip(
         "install",
         "--no-index",
@@ -532,28 +537,143 @@ def test_dependency_source_tables_are_ignored(script: PipTestEnvironment) -> Non
         "--group",
         "test",
         cwd=root,
+        allow_stderr_warning=direct_reference,
     )
     script.assert_installed(core="1.0", leaf="1.0")
 
 
-def test_invocation_table_is_not_an_ancestor_search(script: PipTestEnvironment) -> None:
+def test_current_directory_sources_require_selection(
+    script: PipTestEnvironment,
+) -> None:
+    root = script.scratch_path
+    private = root / "private"
+    private.mkdir()
+    core = Path(make_wheel("core", "1.0").save_to_dir(private))
+    make_wheel("core", "2.0").save_to_dir(root)
+    project = source_project(script, json.dumps("private/" + core.name))
+    result = script.pip("install", "--no-index", "--find-links", root, "core", cwd=root)
+    assert not result.get_created_direct_url("core")
+    script.assert_installed(core="2.0")
+
+    selected = script.pip(
+        "install", "--no-index", "--sources", project, "core", cwd=root
+    )
+    info = selected.get_created_direct_url("core")
+    assert info is not None
+    assert info.url == core.as_uri()
+    script.assert_installed(core="1.0")
+
+
+@pytest.mark.parametrize("invocation", ["parent", "project"])
+def test_local_project_does_not_inherit_sources(
+    script: PipTestEnvironment, invocation: str
+) -> None:
     root = script.scratch_path
     core = Path(make_wheel("core", "1.0").save_to_dir(root))
     source_project(script, json.dumps(core.name))
     app = local_project(root / "app", "app", 'dependencies = ["core"]\n')
-    script.pip(
-        "install", "--dry-run", "--no-index", "--no-build-isolation", app, cwd=root
-    )
     failed = script.pip(
         "install",
         "--dry-run",
         "--no-index",
         "--no-build-isolation",
-        ".",
-        cwd=app,
+        app,
+        cwd=root if invocation == "parent" else app,
         expect_error=True,
     )
     assert "No matching distribution found for core" in failed.stderr
+
+
+def test_explicit_file_replaces_project_sources(script: PipTestEnvironment) -> None:
+    root = script.scratch_path
+    chosen = Path(make_wheel("core", "1.0").save_to_dir(root))
+    other = Path(make_wheel("core", "2.0").save_to_dir(root))
+    make_wheel("leaf", "1.0").save_to_dir(root)
+    configuration = root / "config"
+    configuration.mkdir()
+    project = configuration / "pyproject.toml"
+    project.write_text(f'[develop.sources]\ncore = "../{chosen.name}"\n')
+    (root / "pyproject.toml").write_text("invalid = [")
+    app = local_project(
+        root / "app",
+        "app",
+        'dependencies = ["core", "leaf"]\n'
+        f'[develop.sources]\ncore = "../{other.name}"\nleaf = "missing"\n',
+    )
+    result = script.pip(
+        "install",
+        "--no-index",
+        "--find-links",
+        root,
+        "--no-build-isolation",
+        "--sources",
+        project,
+        app,
+        cwd=root,
+    )
+    info = result.get_created_direct_url("core")
+    assert info is not None
+    assert info.url == chosen.as_uri()
+    assert not result.get_created_direct_url("leaf")
+    script.assert_installed(app="1.0", core="1.0", leaf="1.0")
+
+
+@pytest.mark.parametrize("inputs", ["projects", "groups", "mixed"])
+def test_multiple_files_require_explicit_source_selection(
+    script: PipTestEnvironment, inputs: str
+) -> None:
+    root = script.scratch_path
+    source = Path(make_wheel("core", "1.0").save_to_dir(root))
+    make_wheel("core", "2.0").save_to_dir(root)
+    one = local_project(
+        root / "one",
+        "one",
+        'dependencies = ["core"]\n[dependency-groups]\ntest = ["core"]\n'
+        f'[develop.sources]\ncore = "../{source.name}"\n',
+    )
+    two = local_project(
+        root / "two",
+        "two",
+        'dependencies = ["core"]\n[dependency-groups]\ntest = ["core"]\n',
+    )
+    arguments = []
+    for directory, use_group in (
+        (one, inputs == "groups"),
+        (two, inputs != "projects"),
+    ):
+        if use_group:
+            arguments.extend(["--group", str(directory / "pyproject.toml") + ":test"])
+        else:
+            arguments.append(str(directory))
+    common = [
+        "install",
+        "--no-index",
+        "--find-links",
+        str(root),
+        "--no-build-isolation",
+    ]
+    failed = script.pip(*common, *arguments, cwd=root, expect_error=True)
+    assert failed.returncode == 1
+    assert "Multiple source files" in failed.stderr
+    assert str(one / "pyproject.toml") in failed.stderr
+    assert str(two / "pyproject.toml") in failed.stderr
+
+    selected = script.pip(*common, "--sources", one, *arguments, cwd=root)
+    info = selected.get_created_direct_url("core")
+    assert info is not None
+    assert info.url == source.as_uri()
+    script.assert_installed(core="1.0")
+
+    script.pip(
+        *common,
+        "--upgrade",
+        "--upgrade-strategy",
+        "eager",
+        "--no-sources",
+        *arguments,
+        cwd=root,
+    )
+    script.assert_installed(core="2.0")
 
 
 @pytest.mark.parametrize("explicit", [False, True])

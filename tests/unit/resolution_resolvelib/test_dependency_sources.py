@@ -24,7 +24,7 @@ def test_selected_source_precedes_external_url_prohibition(
     wheel = Path(make_wheel("core", "1.0").save_to_dir(tmp_path))
     project = tmp_path / "pyproject.toml"
     project.write_text(f'[develop.sources]\ncore = {{path = "{wheel.name}"}}')
-    factory._dependency_sources = DependencySources(project, tmp_path)
+    factory._dependency_sources = DependencySources(project)
     factory._make_install_req_from_spec = install_req_from_req_string
     parent = install_req_from_line("outer @ https://files.pythonhosted.org/outer.zip")
     requirements = list(

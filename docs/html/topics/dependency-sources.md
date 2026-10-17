@@ -31,11 +31,15 @@ python -m pip install --group app/pyproject.toml:test
 python -m pip download --sources app/pyproject.toml core
 ```
 
-A local project argument or dependency-group path selects the target project. With neither, pip uses `pyproject.toml` in the current directory if present. `--sources PATH` explicitly selects a project directory or TOML file; it selects sources without adding the project's dependencies to the command.
+A local project argument or dependency-group path selects that file's complete source table. `--group test` uses `pyproject.toml` in the current directory. Installing a named package, wheel or archive does not read sources from the current directory.
 
-Pip also reads the invocation directory's `pyproject.toml` when the target is beneath that directory. Target entries replace invocation entries for the same normalized package name. Each file's relative paths are resolved against that file's directory.
+`--sources PATH` selects exactly one project directory or TOML file, replacing automatic selection without adding dependencies. Pip never merges source tables. For example, use a repository-wide table when installing a subproject:
 
-Pip does not search ancestor or intermediate directories. It ignores source tables in dependencies and downloaded source distributions. For multiple target projects with source tables, select one with `--sources PATH`, or disable sources with `--no-sources`.
+```sh
+python -m pip install --sources pyproject.toml ./app
+```
+
+When project arguments or dependency groups identify different files and any has sources, choose one with `--sources PATH`, or ignore all tables with `--no-sources`. Relative paths are resolved against the selected file's directory. Pip does not search other directories or read source tables in dependencies or downloaded source distributions.
 
 ## Source kinds
 

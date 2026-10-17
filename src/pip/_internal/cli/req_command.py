@@ -482,8 +482,18 @@ class RequirementCommand(IndexGroupCommand):
         options.dependency_sources_context = None
         if should_ignore_regular_constraints() or getattr(options, "no_sources", False):
             return
+        root_groups = {
+            requirement: (project_file_path(path), group)
+            for requirement, path, group in groups
+        }
         sources = choose_sources(
-            requirements, options.dependency_groups, getattr(options, "sources", None)
+            (
+                requirement
+                for requirement in requirements
+                if requirement not in root_groups
+            ),
+            options.dependency_groups,
+            getattr(options, "sources", None),
         )
         if sources is None or not sources.entries:
             return
@@ -493,8 +503,7 @@ class RequirementCommand(IndexGroupCommand):
                 "Development sources require the resolvelib resolver; "
                 "use --no-sources with the legacy resolver"
             )
-        for requirement, path, group in groups:
-            sources.root_groups[requirement] = (project_file_path(path), group)
+        sources.root_groups = root_groups
         options.dependency_sources_context = sources
 
     @staticmethod

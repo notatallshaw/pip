@@ -162,20 +162,11 @@ def project_file_path(path: str | Path) -> Path:
 
 
 class DependencySources:
-    """The target and eligible invocation table for one resolution."""
+    """One file's development sources and selection context for a resolution."""
 
-    def __init__(self, target: Path, invocation_root: Path) -> None:
+    def __init__(self, target: Path) -> None:
         self.target = project_file_path(target)
-        invocation_root = invocation_root.resolve()
-        self.entries: dict[str, tuple[Source, ...]] = {}
-        invocation = invocation_root / "pyproject.toml"
-        if (
-            self.target != invocation
-            and invocation_root in self.target.parents
-            and invocation.is_file()
-        ):
-            self.entries.update(read_sources(invocation))
-        self.entries.update(read_sources(self.target))
+        self.entries = read_sources(self.target)
         self.root_groups: dict[InstallRequirement, tuple[Path, str]] = {}
         self.environment: dict[str, str] = {}
 
@@ -353,12 +344,12 @@ def choose_sources(
     groups: Iterable[tuple[str, str]],
     explicit: str | None,
 ) -> DependencySources | None:
-    """Choose a single project without following dependency or ancestor tables."""
+    """Read one explicit file or an unambiguous local project/group input."""
     if explicit is not None:
         path = Path(explicit)
         if path.is_dir():
             path /= "pyproject.toml"
-        return DependencySources(path, Path.cwd())
+        return DependencySources(path)
     targets = {project_file_path(path) for path, _ in groups}
     for requirement in requirements:
         link = requirement.link
@@ -371,21 +362,16 @@ def choose_sources(
             path = Path(link.file_path) / "pyproject.toml"
             if path.is_file():
                 targets.add(project_file_path(path))
-    if not targets:
-        path = Path.cwd() / "pyproject.toml"
-        return DependencySources(path, Path.cwd()) if path.is_file() else None
-    if len(targets) > 1:
-        if (
-            any(read_sources(path) for path in targets)
-            or (Path.cwd() / "pyproject.toml").is_file()
-            and read_sources(Path.cwd() / "pyproject.toml")
-        ):
-            raise InstallationError(
-                "Multiple source projects were selected. Use --sources PATH "
-                "to choose one, or --no-sources to ignore their source tables."
-            )
+    sources = [DependencySources(path) for path in sorted(targets)]
+    if not any(source.entries for source in sources):
         return None
-    return DependencySources(targets.pop(), Path.cwd())
+    if len(sources) > 1:
+        paths = ", ".join(str(source.target) for source in sources)
+        raise InstallationError(
+            f"Multiple source files were selected: {paths}. "
+            "Use --sources PATH to choose one, or --no-sources to ignore them."
+        )
+    return sources[0]
 
 
 def _platform_environment(platform: str) -> dict[str, str]:
