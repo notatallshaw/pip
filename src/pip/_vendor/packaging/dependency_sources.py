@@ -1,3 +1,7 @@
+# This file is dual licensed under the terms of the Apache License, Version
+# 2.0, and the BSD License. See the LICENSE file in the root of this repository
+# for complete details.
+
 """Validate development source tables and select entries for an environment."""
 
 from __future__ import annotations
@@ -19,6 +23,11 @@ __all__ = [
     "select_dependency_source",
 ]
 
+
+def __dir__() -> list[str]:
+    return __all__
+
+
 logger = logging.getLogger(__name__)
 _KINDS = frozenset({"path", "git", "hg", "bzr", "svn", "url", "index"})
 _SELECTORS = frozenset({"marker", "extra", "group"})
@@ -28,7 +37,7 @@ class InvalidDependencySource(ValueError):
     """A source table does not follow the development source format."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True, slots=True)
 class DependencySource:
     """A source declaration, with paths and credentials left uninterpreted."""
 
