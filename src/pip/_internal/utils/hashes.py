@@ -27,10 +27,16 @@ class Hashes:
 
     """
 
-    def __init__(self, hashes: dict[str, list[str]] | None = None) -> None:
+    def __init__(
+        self,
+        hashes: dict[str, list[str]] | None = None,
+        *,
+        required: frozenset[tuple[str, str]] = frozenset(),
+    ) -> None:
         """
         :param hashes: A dict of algorithm names pointing to lists of allowed
             hex digests
+        :param required: Digests that must each match independently.
         """
         allowed = {}
         if hashes is not None:
@@ -38,6 +44,7 @@ class Hashes:
                 # Make sure values are always sorted (to ease equality checks)
                 allowed[alg] = [k.lower() for k in sorted(keys)]
         self._allowed = allowed
+        self._required = required
 
     def __and__(self, other: Hashes) -> Hashes:
         if not isinstance(other, Hashes):
@@ -50,21 +57,34 @@ class Hashes:
         if not self:
             return other
 
+        required = self._required | other._required
+        if not self._allowed or not other._allowed:
+            return Hashes(self._allowed or other._allowed, required=required)
+
         # Otherwise only hashes that present in both objects are allowed.
         new = {}
         for alg, values in other._allowed.items():
             if alg not in self._allowed:
                 continue
             new[alg] = [v for v in values if v in self._allowed[alg]]
-        return Hashes(new)
+        return Hashes(new, required=required)
 
     @property
     def digest_count(self) -> int:
-        return sum(len(digests) for digests in self._allowed.values())
+        return sum(len(digests) for digests in self._allowed.values()) + len(
+            self._required
+        )
 
     def is_hash_allowed(self, hash_name: str, hex_digest: str) -> bool:
         """Return whether the given hex digest is allowed."""
-        return hex_digest in self._allowed.get(hash_name, [])
+        required_match = all(
+            algorithm == hash_name and digest == hex_digest
+            for algorithm, digest in self._required
+        )
+        return required_match and (
+            (bool(self._required) and not self._allowed)
+            or hex_digest in self._allowed.get(hash_name, [])
+        )
 
     def check_against_chunks(self, chunks: Iterable[bytes]) -> None:
         """Check good hashes against ones built from iterable of chunks of
@@ -74,7 +94,7 @@ class Hashes:
 
         """
         gots = {}
-        for hash_name in self._allowed.keys():
+        for hash_name in self._allowed.keys() | {name for name, _ in self._required}:
             try:
                 gots[hash_name] = hashlib.new(hash_name)
             except (ValueError, TypeError):
@@ -84,8 +104,15 @@ class Hashes:
             for hash in gots.values():
                 hash.update(chunk)
 
-        for hash_name, got in gots.items():
-            if got.hexdigest() in self._allowed[hash_name]:
+        for hash_name, expected in self._required:
+            if gots[hash_name].hexdigest() != expected:
+                raise HashMismatch(
+                    {hash_name: [expected]}, {hash_name: gots[hash_name]}
+                )
+        if self._required and not self._allowed:
+            return
+        for hash_name, expected_digests in self._allowed.items():
+            if gots[hash_name].hexdigest() in expected_digests:
                 return
         self._raise(gots)
 
@@ -106,6 +133,10 @@ class Hashes:
 
     def has_one_of(self, hashes: Mapping[str, str]) -> bool:
         """Return whether any of the given hashes are allowed."""
+        if not all(hashes.get(name) == digest for name, digest in self._required):
+            return False
+        if self._required and not self._allowed:
+            return True
         for hash_name, hex_digest in hashes.items():
             if self.is_hash_allowed(hash_name, hex_digest):
                 return True
@@ -113,21 +144,24 @@ class Hashes:
 
     def __bool__(self) -> bool:
         """Return whether I know any known-good hashes."""
-        return bool(self._allowed)
+        return bool(self._allowed or self._required)
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, Hashes):
             return NotImplemented
-        return self._allowed == other._allowed
+        return self._allowed == other._allowed and self._required == other._required
 
     def __hash__(self) -> int:
         return hash(
-            ",".join(
-                sorted(
-                    ":".join((alg, digest))
-                    for alg, digest_list in self._allowed.items()
-                    for digest in digest_list
-                )
+            (
+                ",".join(
+                    sorted(
+                        ":".join((alg, digest))
+                        for alg, digest_list in self._allowed.items()
+                        for digest in digest_list
+                    )
+                ),
+                self._required,
             )
         )
 
