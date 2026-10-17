@@ -812,18 +812,18 @@ class Factory:
             self.catalogue_only
             and ireq.link is not None
             and ireq.match_markers(requested_extras)
-            and not self.catalogue_expanding_sources
         ):
-            if not self._catalogue_source_is_fixed(ireq):
-                conflict = self._catalogue_constraint_conflict(ireq)
-                if conflict is not None:
-                    yield UnsatisfiableRequirement(conflict)
-                    return
+            conflict = self._catalogue_constraint_conflict(ireq)
+            if conflict is not None:
+                yield UnsatisfiableRequirement(conflict)
+                return
+            if self._catalogue_source_is_fixed(ireq):
+                assert ireq.name is not None
+                known = self.catalogue_sources.get(canonicalize_name(ireq.name))
+                if isinstance(known, (LinkCandidate, EditableCandidate)):
+                    fixed_candidate = known
+            elif not self.catalogue_expanding_sources:
                 raise CatalogueUnsupported("URL dependency")
-            assert ireq.name is not None
-            known = self.catalogue_sources.get(canonicalize_name(ireq.name))
-            if isinstance(known, (LinkCandidate, EditableCandidate)):
-                fixed_candidate = known
         if not ireq.match_markers(requested_extras):
             logger.info(
                 "Ignoring %s: markers '%s' don't match your environment",
