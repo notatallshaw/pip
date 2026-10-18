@@ -337,6 +337,29 @@ def test_clean_url_path_with_local_path(path: str, expected: str) -> None:
 @pytest.mark.parametrize(
     "url, clean_url",
     [
+        (
+            "https://example.com/pkg-1.0+local-py3-none-any.whl?token=abc",
+            "https://example.com/pkg-1.0%2Blocal-py3-none-any.whl?token=abc",
+        ),
+        (
+            "https://example.com/pkg%2bname.whl?token=abc",
+            "https://example.com/pkg%2Bname.whl?token=abc",
+        ),
+        (
+            "HTTPS://example.com/pkg.whl?token=abc",
+            "https://example.com/pkg.whl?token=abc",
+        ),
+        ("https://example.com/pkg.whl?", "https://example.com/pkg.whl"),
+        ("https://example.com/pkg.whl#", "https://example.com/pkg.whl"),
+        (
+            "https://example.com/pkg.whl?#sha256=abc",
+            "https://example.com/pkg.whl#sha256=abc",
+        ),
+        (
+            "https://example.com/pkg.whl?token=abc#",
+            "https://example.com/pkg.whl?token=abc",
+        ),
+        ("https://example.com/pkg.whl?\t", "https://example.com/pkg.whl"),
         # URL with hostname and port. Port separator should not be quoted.
         (
             "https://localhost.localdomain:8181/path/with space/",
@@ -432,6 +455,40 @@ def test_clean_url_path_with_local_path(path: str, expected: str) -> None:
 )
 def test_ensure_quoted_url(url: str, clean_url: str) -> None:
     assert _ensure_quoted_url(url) == clean_url
+
+
+@pytest.mark.parametrize("control", ["\t", "\r", "\n"])
+@pytest.mark.parametrize(
+    "url_template",
+    [
+        "https://exa{control}mple.com/pkg.whl",
+        "https://example.com/p{control}kg.whl",
+        "https://example.com/pkg.whl?token=a{control}bc",
+        "https://example.com/pkg.whl#sha256=a{control}bc",
+    ],
+)
+def test_ensure_quoted_url_strips_controls(url_template: str, control: str) -> None:
+    url = url_template.format(control=control)
+    assert _ensure_quoted_url(url) == url_template.format(control="")
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://example.com/pkg.whl",
+        "https://example.com:8080/pkg.tar.gz#sha256=abc",
+        "https://example.com/pkg.whl?token=abc",
+        "https://example.com/pkg.whl?token=a%2Fb+c&expires=123#sha256=abc",
+        "https://example.com/pkg.whl?token=\u00e9",
+    ],
+)
+def test_ensure_quoted_url_skips_cleaning_unchanged_urls(url: str) -> None:
+    with mock.patch(
+        "pip._internal.models.link._clean_url_path", wraps=_clean_url_path
+    ) as clean_path:
+        assert _ensure_quoted_url(url) == url
+
+    clean_path.assert_not_called()
 
 
 def _test_parse_links_data_attribute(
