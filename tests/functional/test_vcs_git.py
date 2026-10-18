@@ -15,7 +15,7 @@ from pip._internal.utils.misc import HiddenText
 from pip._internal.vcs import vcs
 from pip._internal.vcs.git import Git, RemoteNotFoundError
 
-from tests.lib import PipTestEnvironment, _create_test_package, _git_commit
+from tests.lib import PipTestEnvironment, _create_test_package, git_commit
 
 
 def test_get_backend_for_scheme() -> None:
@@ -45,7 +45,7 @@ def checkout_new_branch(script: PipTestEnvironment, repo_dir: str, branch: str) 
 
 
 def do_commit(script: PipTestEnvironment, dest: str) -> str:
-    _git_commit(dest, message="test commit", allow_empty=True)
+    git_commit(dest, message="test commit", allow_empty=True)
     return get_head_sha(script, dest)
 
 

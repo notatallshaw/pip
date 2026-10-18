@@ -923,7 +923,7 @@ def _create_main_file(
     dir_path.joinpath(filename).write_text(text)
 
 
-def _git_commit(
+def git_commit(
     repo_dir: StrPath,
     message: str | None = None,
     allow_empty: bool = False,
@@ -1055,7 +1055,7 @@ def _create_test_package_with_subdirectory(
 
     script.run("git", "init", cwd=version_pkg_path)
     script.run("git", "add", ".", cwd=version_pkg_path)
-    _git_commit(version_pkg_path, message="initial version")
+    git_commit(version_pkg_path, message="initial version")
 
     return version_pkg_path
 
@@ -1129,7 +1129,7 @@ def _change_test_package_version(
         version_pkg_path, name="version_pkg", output="some different version"
     )
     # Pass -a to stage the change to the main file.
-    _git_commit(version_pkg_path, message="messed version", stage_modified=True)
+    git_commit(version_pkg_path, message="messed version", stage_modified=True)
 
 
 @contextmanager

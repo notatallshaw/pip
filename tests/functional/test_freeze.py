@@ -15,9 +15,9 @@ from tests.lib import (
     TestData,
     _create_test_package,
     _create_test_package_with_srcdir,
-    _git_commit,
     _vcs_add,
     create_test_package_with_setup,
+    git_commit,
     need_bzr,
     need_mercurial,
     need_svn,
@@ -332,7 +332,7 @@ def test_freeze_git_clone(script: PipTestEnvironment) -> None:
     # in issue #1867).
     (repo_dir / "newfile").touch()
     script.run("git", "add", "newfile", cwd=repo_dir)
-    _git_commit(repo_dir, message="...")
+    git_commit(repo_dir, message="...")
     result = script.pip("freeze", expect_stderr=True)
     expected = textwrap.dedent("""
             ...-e ...@...#egg=version_pkg
