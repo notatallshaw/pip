@@ -82,6 +82,7 @@ def make_install_req_from_link(
         config_settings=template.config_settings,
     )
     ireq.original_link = template.original_link
+    ireq.source_hashes = template.source_hashes.copy()
     ireq.link = link
     ireq.extras = template.extras
     return ireq

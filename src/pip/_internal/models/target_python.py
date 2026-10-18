@@ -86,6 +86,15 @@ class TargetPython:
             f"{key}={value!r}" for key, value in key_values if value is not None
         )
 
+    def get_marker_version_overrides(self) -> dict[str, str]:
+        """Override marker versions only when a Python version was requested."""
+        if self._given_py_version_info is None:
+            return {}
+        return {
+            "python_version": self.py_version,
+            "python_full_version": ".".join(map(str, self.py_version_info)),
+        }
+
     def get_sorted_tags(self) -> list[Tag]:
         """
         Return the supported PEP 425 tags to check wheel candidates against.
