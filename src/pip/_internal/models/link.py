@@ -208,12 +208,27 @@ def _clean_url_path(path: str, is_local_path: bool) -> str:
     return "".join(cleaned_parts)
 
 
+# These URLs are unchanged by the cleaner. Empty query/fragment delimiters
+# and URL parser control characters must still be normalized.
+_unchanged_http_url_re = re.compile(
+    r"https?://[A-Za-z0-9._~-]+(?::[0-9]+)?"
+    r"(?:/[A-Za-z0-9._~/-]*)?"
+    r"(?:\?[^\r\n\t#]+)?"
+    r"(?:#[A-Za-z0-9._~=-]+)?"
+)
+
+
 def _ensure_quoted_url(url: str) -> str:
     """
     Make sure a link is fully quoted.
     For example, if ' ' occurs in the URL, it will be replaced with "%20",
     and without double-quoting other characters.
     """
+    # Match a prefix first to avoid backtracking over paths that need cleaning.
+    match = _unchanged_http_url_re.match(url)
+    if match is not None and match.end() == len(url):
+        return url
+
     # Split the URL into parts according to the general structure
     # `scheme://netloc/path?query#fragment`.
     result = urllib.parse.urlsplit(url)
