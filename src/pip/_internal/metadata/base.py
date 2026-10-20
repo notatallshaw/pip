@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import email.message
 import functools
+import io
 import json
 import logging
 import pathlib
@@ -469,7 +470,10 @@ class BaseDistribution(Protocol):
         except FileNotFoundError:
             return None
         # This extra Path-str cast normalizes entries.
-        return (str(pathlib.Path(row[0])) for row in csv.reader(text.splitlines()))
+        return (
+            str(pathlib.Path(row[0]))
+            for row in csv.reader(io.StringIO(text, newline=""))
+        )
 
     def _iter_declared_entries_from_legacy(self) -> Iterator[str] | None:
         try:
