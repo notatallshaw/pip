@@ -398,7 +398,11 @@ def prepare_release(session: nox.Session) -> None:
     if not version:
         session.error("Usage: nox -s prepare-release -- <version>")
 
-    check_vendored_files(session)
+    # Vendoring installs platform-specific files and is checked on Linux in CI.
+    if os.name == "nt":
+        session.log("# Skipping vendored files check on Windows")
+    else:
+        check_vendored_files(session)
 
     session.log(f"# Updating {AUTHORS_FILE}")
     release.generate_authors(AUTHORS_FILE)
