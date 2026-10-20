@@ -143,7 +143,10 @@ Creating a new release
 #. Ensure you have the latest ``nox`` installed.
 #. Create a new ``release/YY.N`` branch off ``main`` and switch to it.
 #. Prepare for release using ``nox -s prepare-release -- YY.N``.
-   This will update the relevant files and tag the correct commit.
+   On non-Windows platforms, this verifies that vendored files are reproducible.
+   It then updates the relevant files and tags the correct commit. If it
+   regenerates vendored files, review and commit those changes before running
+   it again.
 #. Submit the ``release/YY.N`` branch as a pull request and ensure CI passes.
    Merge the changes back into ``main`` and pull them back locally.
 #. Push the tag created by ``prepare-release``. This will trigger the release

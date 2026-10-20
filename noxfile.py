@@ -27,6 +27,7 @@ LOCATIONS = {
 
 AUTHORS_FILE = "AUTHORS.txt"
 VERSION_FILE = "src/pip/__init__.py"
+VENDORING_REQUIREMENT = "vendoring~=1.4.0"
 
 
 def run_with_protected_pip(session: nox.Session, *arguments: str) -> None:
@@ -281,6 +282,29 @@ def lint(session: nox.Session) -> None:
 # git checkout -b vendoring-updates
 # git checkout main
 # git reset --hard origin/main
+def ensure_clean_worktree(session: nox.Session) -> None:
+    """Fail if the worktree contains tracked or untracked changes."""
+    session.log("# Ensure the worktree is clean")
+    if changes := release.get_git_worktree_changes():
+        session.error(
+            "There are modified or untracked files in the worktree:\n"
+            + "\n".join(changes)
+        )
+
+
+def check_vendored_files(session: nox.Session) -> None:
+    """Regenerate vendored files and fail if the worktree changes."""
+    ensure_clean_worktree(session)
+    session.log("# Verify vendored files are synchronized")
+    session.install(VENDORING_REQUIREMENT)
+    session.run("vendoring", "sync", "-v")
+    if changes := release.get_git_worktree_changes():
+        session.error(
+            "Vendored files are not synchronized. Review and commit the "
+            "generated changes, then run the command again:\n" + "\n".join(changes)
+        )
+
+
 @nox.session
 def vendoring(session: nox.Session) -> None:
     parser = argparse.ArgumentParser(prog="nox -s vendoring")
@@ -289,7 +313,7 @@ def vendoring(session: nox.Session) -> None:
     parser.add_argument("--skip", action="append", default=[])
     args = parser.parse_args(session.posargs)
 
-    session.install("vendoring~=1.4.0")
+    session.install(VENDORING_REQUIREMENT)
 
     if not (args.upgrade or args.upgrade_all):
         session.run("vendoring", "sync", "-v")
@@ -374,9 +398,11 @@ def prepare_release(session: nox.Session) -> None:
     if not version:
         session.error("Usage: nox -s prepare-release -- <version>")
 
-    session.log("# Ensure nothing is staged")
-    if release.modified_files_in_git("--staged"):
-        session.error("There are files staged in git")
+    # Vendoring installs platform-specific files and is checked on Linux in CI.
+    if os.name == "nt":
+        session.log("# Skipping vendored files check on Windows")
+    else:
+        check_vendored_files(session)
 
     session.log(f"# Updating {AUTHORS_FILE}")
     release.generate_authors(AUTHORS_FILE)

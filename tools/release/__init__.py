@@ -48,6 +48,17 @@ def modified_files_in_git(*args: str) -> int:
     ).returncode
 
 
+def get_git_worktree_changes() -> list[str]:
+    """Return tracked and untracked changes, excluding ignored files."""
+    result = subprocess.run(
+        ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+        check=True,
+        capture_output=True,
+        encoding="utf-8",
+    )
+    return result.stdout.splitlines()
+
+
 def strip_rtl_ltr_overrides(a: str) -> str:
     """Strip RIGHT-TO-LEFT OVERRIDE and LEFT-TO-RIGHT OVERRIDE characters
     from author names.
