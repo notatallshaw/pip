@@ -411,7 +411,7 @@ cert: Callable[..., Option] = partial(
     type="path",
     metavar="path",
     help=(
-        "Path to PEM-encoded CA certificate bundle. "
+        "Path to a PEM-encoded CA bundle or OpenSSL-compatible certificate directory. "
         "If provided, overrides the default. "
         "See 'SSL Certificate Verification' in pip documentation "
         "for more information."

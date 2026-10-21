@@ -51,6 +51,17 @@ def _create_truststore_ssl_context() -> SSLContext | None:
     return ctx
 
 
+def _get_effective_ca_source(options: Values) -> str | None:
+    """Return the selected pip or Requests-compatible CA source."""
+    cert = options.cert
+    assert cert is None or isinstance(cert, str)
+    if cert:
+        return cert
+    if options.isolated_mode:
+        return None
+    return os.environ.get("REQUESTS_CA_BUNDLE") or os.environ.get("CURL_CA_BUNDLE")
+
+
 class SessionCommandMixin(CommandContextMixIn):
     """
     A class mixin for command classes needing _build_session().
@@ -95,7 +106,11 @@ class SessionCommandMixin(CommandContextMixIn):
         cache_dir = options.cache_dir
         assert not cache_dir or os.path.isabs(cache_dir)
 
-        if "legacy-certs" not in options.deprecated_features_enabled:
+        ca_source = _get_effective_ca_source(options)
+        if (
+            ca_source is None
+            and "legacy-certs" not in options.deprecated_features_enabled
+        ):
             ssl_context = _create_truststore_ssl_context()
         else:
             ssl_context = None
@@ -107,12 +122,12 @@ class SessionCommandMixin(CommandContextMixIn):
             trusted_hosts=options.trusted_hosts,
             index_urls=self._get_index_urls(options),
             ssl_context=ssl_context,
+            ignore_ca_bundle_env=options.isolated_mode,
             refresh_package=getattr(options, "refresh_package", set()),
         )
 
-        # Handle custom ca-bundles from the user
-        if options.cert:
-            session.verify = options.cert
+        if ca_source is not None:
+            session.verify = ca_source
 
         # Handle SSL client certificate
         if options.client_cert:
