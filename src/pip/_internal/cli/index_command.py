@@ -32,7 +32,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-@lru_cache
 def _create_truststore_ssl_context() -> SSLContext | None:
     try:
         import ssl
@@ -49,6 +48,11 @@ def _create_truststore_ssl_context() -> SSLContext | None:
     ctx = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     ctx.load_verify_locations(certifi.where())
     return ctx
+
+
+@lru_cache
+def _get_cached_truststore_ssl_context() -> SSLContext | None:
+    return _create_truststore_ssl_context()
 
 
 class SessionCommandMixin(CommandContextMixIn):
@@ -96,9 +100,15 @@ class SessionCommandMixin(CommandContextMixIn):
         assert not cache_dir or os.path.isabs(cache_dir)
 
         if "legacy-certs" not in options.deprecated_features_enabled:
-            ssl_context = _create_truststore_ssl_context()
+            proxy_ssl_context = _get_cached_truststore_ssl_context()
+            ssl_context = (
+                _create_truststore_ssl_context()
+                if options.client_cert and proxy_ssl_context is not None
+                else proxy_ssl_context
+            )
         else:
             ssl_context = None
+            proxy_ssl_context = None
 
         session = PipSession(
             cache=os.path.join(cache_dir, "http-v2") if cache_dir else None,
@@ -107,6 +117,7 @@ class SessionCommandMixin(CommandContextMixIn):
             trusted_hosts=options.trusted_hosts,
             index_urls=self._get_index_urls(options),
             ssl_context=ssl_context,
+            proxy_ssl_context=proxy_ssl_context,
             refresh_package=getattr(options, "refresh_package", set()),
         )
 

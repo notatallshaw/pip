@@ -1,0 +1,2 @@
+Use a fresh origin SSL context for ``--client-cert`` and do not apply that
+certificate to HTTPS proxy handshakes.
