@@ -34,6 +34,7 @@ from pip._internal.exceptions import (
 )
 from pip._internal.models.link import Link
 from pip._internal.network.session import (
+    CacheControlAdapter,
     HTTPAdapter,
     PipSession,
     user_agent,
@@ -503,6 +504,92 @@ class TestRedirectScheme:
     def test_get_redirect_target_allows_http_schemes(self, location: str) -> None:
         resp = self._make_redirect_response(location)
         assert PipSession().get_redirect_target(resp) == location
+
+
+class TestSSLContextAdapterMixin:
+    @staticmethod
+    def _verified_connection(
+        *,
+        ssl_context: ssl.SSLContext,
+        cache: str | None = None,
+        verify: bool | str = True,
+    ) -> HTTPSConnectionPool:
+        """Return the HTTPS pool after Requests applies verification settings."""
+        request = requests.Request("GET", "https://example.com/").prepare()
+        assert request.url is not None
+
+        with PipSession(cache=cache, ssl_context=ssl_context) as session:
+            adapter = session.get_adapter(request.url)
+            assert isinstance(adapter, (CacheControlAdapter, HTTPAdapter))
+            connection = adapter.get_connection_with_tls_context(request, verify=verify)
+            assert isinstance(connection, HTTPSConnectionPool)
+            adapter.cert_verify(connection, request.url, verify=verify, cert=None)
+        return connection
+
+    @pytest.mark.parametrize("cache", [False, True], ids=["direct", "cached"])
+    def test_supplied_context_owns_default_ca_bundle(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        cache: bool,
+    ) -> None:
+        monkeypatch.setattr(
+            "pip._vendor.requests.adapters.DEFAULT_CA_BUNDLE_PATH",
+            str(tmp_path / "missing.pem"),
+        )
+        ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        connection = self._verified_connection(
+            cache=str(tmp_path / "cache") if cache else None,
+            ssl_context=ssl_context,
+        )
+
+        assert connection.cert_reqs == "CERT_REQUIRED"
+        assert connection.ca_certs is None
+        assert connection.ca_cert_dir is None
+        assert connection.conn_kw["ssl_context"] is ssl_context
+
+    @pytest.mark.parametrize(
+        "verify, cert_reqs",
+        [(False, "CERT_NONE"), ("ca.pem", "CERT_REQUIRED")],
+        ids=["disabled", "ca-file"],
+    )
+    def test_explicit_verifier_overrides_supplied_context(
+        self, tmp_path: Path, verify: bool | str, cert_reqs: str
+    ) -> None:
+        if isinstance(verify, str):
+            ca_source = tmp_path / verify
+            ca_source.touch()
+            verify = str(ca_source)
+        connection = self._verified_connection(
+            ssl_context=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT),
+            verify=verify,
+        )
+
+        assert connection.cert_reqs == cert_reqs
+        assert connection.ca_certs == (verify if isinstance(verify, str) else None)
+        assert connection.ca_cert_dir is None
+
+    def test_missing_client_key_keeps_verification_enabled(
+        self, tmp_path: Path
+    ) -> None:
+        cert_file = tmp_path / "client.pem"
+        key_file = tmp_path / "client.key"
+        cert_file.touch()
+        ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        adapter = HTTPAdapter(ssl_context=ssl_context)
+        connection = HTTPSConnectionPool("example.com", ssl_context=ssl_context)
+
+        with pytest.raises(OSError, match="TLS key file"):
+            adapter.cert_verify(
+                connection,
+                "https://example.com/",
+                verify=True,
+                cert=(str(cert_file), str(key_file)),
+            )
+
+        assert connection.cert_reqs == "CERT_REQUIRED"
+        assert connection.ca_certs is None
+        assert connection.ca_cert_dir is None
 
 
 class TestSSLContextAdapterMixinProxy:
