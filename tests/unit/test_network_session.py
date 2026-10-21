@@ -537,6 +537,70 @@ class TestSSLContextAdapterMixinProxy:
         assert proxy_manager.proxy_ssl_context is None
 
 
+class TestClientCertificateContexts:
+    def test_client_certificate_uses_fresh_origin_context(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        shared_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        client_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        monkeypatch.setattr(
+            "pip._internal.cli.index_command._get_cached_truststore_ssl_context",
+            lambda: shared_context,
+        )
+        monkeypatch.setattr(
+            "pip._internal.cli.index_command._create_truststore_ssl_context",
+            lambda: client_context,
+        )
+
+        def build_session(*args: str) -> PipSession:
+            command = create_command("download")
+            assert isinstance(command, SessionCommandMixin)
+            options, _ = command.parse_args(["--no-cache-dir", *args, "example"])
+            return command._build_session(options)
+
+        with build_session("--client-cert", "client.pem") as client_session:
+            client_adapter = client_session.adapters["https://"]
+            assert isinstance(client_adapter, HTTPAdapter)
+            assert client_adapter._ssl_context is client_context
+            assert client_adapter._proxy_ssl_context is shared_context
+            assert client_session.cert == "client.pem"
+
+        with build_session() as default_session:
+            default_adapter = default_session.adapters["https://"]
+            assert isinstance(default_adapter, HTTPAdapter)
+            assert default_adapter._ssl_context is shared_context
+            assert default_adapter._proxy_ssl_context is shared_context
+            assert default_session.cert is None
+
+    def test_http_origin_omits_client_certificate_from_https_proxy(self) -> None:
+        session = PipSession()
+        request = requests.Request("GET", "http://example.com/").prepare()
+        assert request.url is not None
+        proxies = {"http": "https://proxy.example:443"}
+        adapter = session.get_adapter(request.url)
+        assert isinstance(adapter, HTTPAdapter)
+
+        connection = adapter.get_connection_with_tls_context(
+            request,
+            verify=True,
+            proxies=proxies,
+            cert="client.pem",
+        )
+        adapter.cert_verify(
+            connection,
+            request.url,
+            verify=True,
+            cert="client.pem",
+        )
+
+        assert isinstance(connection, HTTPSConnectionPool)
+        assert connection.host == "proxy.example"
+        assert connection.cert_file is None
+        assert connection.key_file is None
+        assert "cert_file" not in connection.conn_kw
+
+
 class TestConnectionErrors:
     @pytest.fixture
     def session(self) -> Iterator[PipSession]:

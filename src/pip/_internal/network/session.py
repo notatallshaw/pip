@@ -239,9 +239,13 @@ class _SSLContextAdapterMixin:
         self,
         *,
         ssl_context: SSLContext | None = None,
+        proxy_ssl_context: SSLContext | None = None,
         **kwargs: Any,
     ) -> None:
         self._ssl_context = ssl_context
+        self._proxy_ssl_context = (
+            ssl_context if proxy_ssl_context is None else proxy_ssl_context
+        )
         super().__init__(**kwargs)
 
     def init_poolmanager(
@@ -265,12 +269,27 @@ class _SSLContextAdapterMixin:
         # context here too. https://github.com/pypa/pip/issues/13288
         if self._ssl_context is not None:
             proxy_kwargs.setdefault("ssl_context", self._ssl_context)
-            # For HTTPS proxies, urllib3 also opens a separate TLS connection
-            # to the proxy itself (before tunnelling to the destination) and
-            # uses "proxy_ssl_context" for that handshake.
-            # https://github.com/pypa/pip/issues/13465
-            proxy_kwargs.setdefault("proxy_ssl_context", self._ssl_context)
+        # HTTPS proxies use a separate context for their outer TLS connection.
+        # https://github.com/pypa/pip/issues/13465
+        if self._proxy_ssl_context is not None:
+            proxy_kwargs.setdefault("proxy_ssl_context", self._proxy_ssl_context)
         return super().proxy_manager_for(proxy, **proxy_kwargs)  # type: ignore[misc]
+
+    def build_connection_pool_key_attributes(
+        self,
+        request: PreparedRequest,
+        verify: bool | str,
+        cert: str | tuple[str, str] | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        if (
+            request.url is not None
+            and urllib.parse.urlsplit(request.url).scheme == "http"
+        ):
+            cert = None
+        assert isinstance(self, _BaseHTTPAdapter)
+        return _BaseHTTPAdapter.build_connection_pool_key_attributes(
+            self, request, verify, cert
+        )
 
 
 class HTTPAdapter(_SSLContextAdapterMixin, _BaseHTTPAdapter):
@@ -289,6 +308,8 @@ class InsecureHTTPAdapter(HTTPAdapter):
         verify: bool | str,
         cert: str | tuple[str, str] | None,
     ) -> None:
+        if urllib.parse.urlsplit(url).scheme == "http":
+            cert = None
         super().cert_verify(conn=conn, url=url, verify=False, cert=cert)
 
 
@@ -300,6 +321,8 @@ class InsecureCacheControlAdapter(CacheControlAdapter):
         verify: bool | str,
         cert: str | tuple[str, str] | None,
     ) -> None:
+        if urllib.parse.urlsplit(url).scheme == "http":
+            cert = None
         super().cert_verify(conn=conn, url=url, verify=False, cert=cert)
 
 
@@ -315,6 +338,7 @@ class PipSession(requests.Session):
         trusted_hosts: Sequence[str] = (),
         index_urls: list[str] | None = None,
         ssl_context: SSLContext | None = None,
+        proxy_ssl_context: SSLContext | None = None,
         refresh_package: set[str] | None = None,
         **kwargs: Any,
     ) -> None:
@@ -381,13 +405,18 @@ class PipSession(requests.Session):
                 cache=SafeFileCache(cache),
                 max_retries=retries,
                 ssl_context=ssl_context,
+                proxy_ssl_context=proxy_ssl_context,
             )
             self._trusted_host_adapter = InsecureCacheControlAdapter(
                 cache=SafeFileCache(cache),
                 max_retries=retries,
             )
         else:
-            secure_adapter = HTTPAdapter(max_retries=retries, ssl_context=ssl_context)
+            secure_adapter = HTTPAdapter(
+                max_retries=retries,
+                ssl_context=ssl_context,
+                proxy_ssl_context=proxy_ssl_context,
+            )
             self._trusted_host_adapter = insecure_adapter
 
         self.mount("https://", secure_adapter)
