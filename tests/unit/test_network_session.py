@@ -11,17 +11,21 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from optparse import Values
 from pathlib import Path
 from typing import Any, cast
+from unittest.mock import Mock
 from urllib.parse import urlparse
 from urllib.request import getproxies
 
 import pytest
 
-from pip._vendor import requests
+from pip._vendor import certifi, requests
+from pip._vendor.requests import adapters as requests_adapters
 from pip._vendor.requests.utils import select_proxy
 from pip._vendor.urllib3.connection import DummyConnection
 from pip._vendor.urllib3.connectionpool import HTTPSConnectionPool
+from pip._vendor.urllib3.util import ssl_
 
 from pip import __version__
+from pip._internal.cli import index_command
 from pip._internal.cli.index_command import SessionCommandMixin
 from pip._internal.commands import create_command
 from pip._internal.exceptions import (
@@ -34,8 +38,10 @@ from pip._internal.exceptions import (
 )
 from pip._internal.models.link import Link
 from pip._internal.network.session import (
+    CacheControlAdapter,
     HTTPAdapter,
     PipSession,
+    create_proxy_ssl_context,
     user_agent,
 )
 from pip._internal.utils.misc import CI_ENVIRONMENT_VARIABLES
@@ -43,6 +49,13 @@ from pip._internal.utils.urls import path_to_url
 
 from tests.lib.output import render_to_text
 from tests.lib.server import make_mock_server, server_running
+
+
+class RecordingSOCKSProxyManager:
+    """Record pool keywords without requiring the optional PySocks package."""
+
+    def __init__(self, _proxy: str, **kwargs: Any) -> None:
+        self.connection_pool_kw = kwargs
 
 
 def render_diagnostic_error(error: DiagnosticPipError) -> tuple[str, str | None]:
@@ -506,35 +519,396 @@ class TestRedirectScheme:
 
 
 class TestSSLContextAdapterMixinProxy:
-    """Regression tests for https://github.com/pypa/pip/issues/13465
+    """Test independent origin and HTTPS proxy context routing."""
 
-    When connecting through an HTTPS proxy, urllib3's ``ProxyManager`` opens
-    a TLS connection to the proxy itself using ``proxy_ssl_context``, which
-    is separate from the ``ssl_context`` used for the tunnelled connection to
-    the destination host. Only setting ``ssl_context`` leaves the proxy leg
-    verified with a plain, default SSL context (i.e. not truststore's system
-    trust store), which can cause spurious certificate verification errors.
-    """
+    @pytest.mark.parametrize(
+        "cache,url,trusted_hosts,uses_origin_context",
+        [
+            (False, "https://origin.example/", [], True),
+            (True, "https://origin.example/", [], True),
+            (False, "http://origin.example/", [], False),
+            (True, "https://origin.example/", ["origin.example"], False),
+        ],
+        ids=["secure", "secure-cached", "http", "trusted-cached"],
+    )
+    def test_https_proxy_context_reaches_every_http_adapter(
+        self,
+        tmp_path: Path,
+        cache: bool,
+        url: str,
+        trusted_hosts: list[str],
+        uses_origin_context: bool,
+    ) -> None:
+        origin_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        proxy_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context_factory = Mock(return_value=proxy_context)
+        session = PipSession(
+            cache=str(tmp_path / "cache") if cache else None,
+            trusted_hosts=trusted_hosts,
+            ssl_context=origin_context,
+            proxy_ssl_context_factory=context_factory,
+        )
 
-    def test_https_proxy_uses_same_ssl_context_for_both_legs(self) -> None:
+        adapter = session.get_adapter(url)
+        assert isinstance(adapter, (CacheControlAdapter, HTTPAdapter))
+        context_factory.assert_not_called()
+        proxy_manager = adapter.proxy_manager_for("https://proxy.example:443")
+
+        context_factory.assert_called_once_with()
+        expected_origin_context = origin_context if uses_origin_context else None
+        assert (
+            proxy_manager.connection_pool_kw.get("ssl_context")
+            is expected_origin_context
+        )
+        assert proxy_manager.proxy_config is not None
+        assert proxy_manager.proxy_config.ssl_context is proxy_context
+
+    def test_supplied_context_remains_the_default_for_https_proxies(self) -> None:
         ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         session = PipSession(ssl_context=ssl_context)
+        session.trust_env = False
 
         adapter = session.adapters["https://"]
         assert isinstance(adapter, HTTPAdapter)
         proxy_manager = adapter.proxy_manager_for("https://proxy.example:443")
 
-        assert proxy_manager.proxy_ssl_context is ssl_context
         assert proxy_manager.connection_pool_kw["ssl_context"] is ssl_context
+        assert proxy_manager.proxy_ssl_context is ssl_context
 
-    def test_no_ssl_context_leaves_proxy_ssl_context_unset(self) -> None:
-        session = PipSession()
+    def test_session_ca_policy_overrides_supplied_origin_context(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("REQUESTS_CA_BUNDLE", "proxy.pem")
+        origin_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        proxy_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        create_context = Mock(return_value=proxy_context)
+        monkeypatch.setattr(
+            "pip._internal.network.session.create_proxy_ssl_context",
+            create_context,
+        )
+        session = PipSession(ssl_context=origin_context)
 
         adapter = session.adapters["https://"]
         assert isinstance(adapter, HTTPAdapter)
         proxy_manager = adapter.proxy_manager_for("https://proxy.example:443")
 
+        create_context.assert_called_once_with("proxy.pem")
+        assert proxy_manager.connection_pool_kw["ssl_context"] is origin_context
+        assert proxy_manager.proxy_config is not None
+        assert proxy_manager.proxy_config.ssl_context is proxy_context
+
+    @pytest.mark.parametrize(
+        "trust_env,requests_ca,curl_ca,session_verify,expected_ca",
+        [
+            (True, "requests.pem", "curl.pem", "session.pem", "requests.pem"),
+            (True, None, "curl.pem", "session.pem", "curl.pem"),
+            (True, None, None, "session.pem", "session.pem"),
+            (False, "requests.pem", "curl.pem", "session.pem", "session.pem"),
+            (False, None, None, True, True),
+            (False, None, None, False, False),
+        ],
+    )
+    def test_default_proxy_context_uses_session_ca_policy(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        trust_env: bool,
+        requests_ca: str | None,
+        curl_ca: str | None,
+        session_verify: bool | str,
+        expected_ca: bool | str,
+    ) -> None:
+        session = PipSession()
+        for name, value in (
+            ("REQUESTS_CA_BUNDLE", requests_ca),
+            ("CURL_CA_BUNDLE", curl_ca),
+        ):
+            if value is None:
+                monkeypatch.delenv(name, raising=False)
+            else:
+                monkeypatch.setenv(name, value)
+        proxy_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        create_context = Mock(return_value=proxy_context)
+        monkeypatch.setattr(
+            "pip._internal.network.session.create_proxy_ssl_context",
+            create_context,
+        )
+        session.trust_env = trust_env
+        session.verify = session_verify
+
+        managers = []
+        for scheme in ("http://", "https://"):
+            adapter = session.adapters[scheme]
+            assert isinstance(adapter, HTTPAdapter)
+            managers.append(adapter.proxy_manager_for("https://proxy.example:443"))
+
+        create_context.assert_called_once_with(expected_ca)
+        for manager in managers:
+            assert manager.proxy_config is not None
+            assert manager.proxy_config.ssl_context is proxy_context
+
+    def test_explicit_proxy_context_does_not_create_the_configured_one(self) -> None:
+        configured_context = Mock()
+        explicit_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        session = PipSession(proxy_ssl_context_factory=configured_context)
+
+        adapter = session.adapters["https://"]
+        assert isinstance(adapter, HTTPAdapter)
+        proxy_manager = adapter.proxy_manager_for(
+            "https://proxy.example:443",
+            proxy_ssl_context=explicit_context,
+        )
+
+        configured_context.assert_not_called()
+        assert proxy_manager.proxy_ssl_context is explicit_context
+
+    def test_request_override_does_not_weaken_https_proxy(self) -> None:
+        origin_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        proxy_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        session = PipSession(
+            ssl_context=origin_context,
+            proxy_ssl_context_factory=Mock(return_value=proxy_context),
+        )
+        request = requests.Request("GET", "https://origin.example/").prepare()
+        assert request.url is not None
+
+        adapter = session.get_adapter(request.url)
+        assert isinstance(adapter, HTTPAdapter)
+        connection = adapter.get_connection_with_tls_context(
+            request,
+            verify=False,
+            proxies={"https": "https://proxy.example:443"},
+        )
+
+        assert isinstance(connection, HTTPSConnectionPool)
+        assert connection.cert_reqs == "CERT_NONE"
+        assert "ssl_context" not in connection.conn_kw
+        assert connection.proxy_config is not None
+        assert connection.proxy_config.ssl_context is proxy_context
+
+    def test_http_proxy_does_not_create_https_proxy_context(self) -> None:
+        origin_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context_factory = Mock()
+        session = PipSession(
+            ssl_context=origin_context,
+            proxy_ssl_context_factory=context_factory,
+        )
+
+        adapter = session.adapters["https://"]
+        assert isinstance(adapter, HTTPAdapter)
+        proxy_manager = adapter.proxy_manager_for("http://proxy.example:8080")
+
+        context_factory.assert_not_called()
+        assert proxy_manager.connection_pool_kw["ssl_context"] is origin_context
         assert proxy_manager.proxy_ssl_context is None
+        assert proxy_manager.proxy_config is not None
+        assert proxy_manager.proxy_config.ssl_context is None
+
+    def test_socks_proxy_uses_only_origin_context(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            requests_adapters,
+            "SOCKSProxyManager",
+            RecordingSOCKSProxyManager,
+        )
+        origin_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context_factory = Mock()
+        session = PipSession(
+            ssl_context=origin_context,
+            proxy_ssl_context_factory=context_factory,
+        )
+
+        adapter = session.adapters["https://"]
+        assert isinstance(adapter, HTTPAdapter)
+        proxy_manager = adapter.proxy_manager_for("socks5h://proxy.example:1080")
+
+        context_factory.assert_not_called()
+        assert proxy_manager.connection_pool_kw["ssl_context"] is origin_context
+        assert "proxy_ssl_context" not in proxy_manager.connection_pool_kw
+
+    @pytest.mark.parametrize(
+        "pip_cert,requests_cert,curl_cert,args,expected_ca_source,use_truststore",
+        [
+            ("pip.pem", "requests.pem", "curl.pem", (), "requests.pem", True),
+            ("pip.pem", None, "curl.pem", (), "curl.pem", True),
+            (None, None, None, ("--cert", "cli.pem"), "cli.pem", True),
+            (None, None, None, ("--cert", ""), None, True),
+            (None, None, None, (), None, True),
+            (
+                "pip.pem",
+                "requests.pem",
+                None,
+                ("--proxy", "https://proxy.example:443"),
+                "pip.pem",
+                True,
+            ),
+            (
+                None,
+                "requests.pem",
+                None,
+                ("--cert", "cli.pem", "--no-proxy-env"),
+                "cli.pem",
+                True,
+            ),
+            (None, None, None, (), None, False),
+        ],
+    )
+    def test_command_selects_proxy_ca_policy(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        pip_cert: str | None,
+        requests_cert: str | None,
+        curl_cert: str | None,
+        args: tuple[str, ...],
+        expected_ca_source: str | None,
+        use_truststore: bool,
+    ) -> None:
+        for name, value in (
+            ("PIP_CERT", pip_cert),
+            ("REQUESTS_CA_BUNDLE", requests_cert),
+            ("CURL_CA_BUNDLE", curl_cert),
+        ):
+            if value is None:
+                monkeypatch.delenv(name, raising=False)
+            else:
+                monkeypatch.setenv(name, value)
+        origin_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        proxy_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        monkeypatch.setattr(
+            index_command,
+            "_get_cached_truststore_ssl_context",
+            lambda: origin_context if use_truststore else None,
+        )
+        create_proxy_context = Mock(return_value=proxy_context)
+        monkeypatch.setattr(
+            "pip._internal.network.session.create_proxy_ssl_context",
+            create_proxy_context,
+        )
+
+        _, session = TestSessionProxy._build_session(
+            monkeypatch,
+            [*args, "example"],
+        )
+        disables_proxy_environment = "--no-proxy-env" in args or "--proxy" in args
+        assert session.trust_env == (not disables_proxy_environment)
+        origin_settings = session.merge_environment_settings(
+            "https://origin.example/", {}, None, None, None
+        )
+        assert origin_settings["verify"] == (expected_ca_source or True)
+        adapter = session.adapters["https://"]
+        assert isinstance(adapter, (CacheControlAdapter, HTTPAdapter))
+        create_proxy_context.assert_not_called()
+        adapter.proxy_manager_for("https://proxy.example:443")
+        create_proxy_context.assert_called_once_with(
+            expected_ca_source,
+            context_factory=(
+                index_command._create_truststore_ssl_context if use_truststore else None
+            ),
+        )
+
+    def test_command_client_cert_is_not_in_proxy_context(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        for name in ("PIP_CERT", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"):
+            monkeypatch.delenv(name, raising=False)
+        origin_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        proxy_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        monkeypatch.setattr(
+            index_command,
+            "_get_cached_truststore_ssl_context",
+            lambda: origin_context,
+        )
+        monkeypatch.setattr(
+            "pip._internal.network.session.create_proxy_ssl_context",
+            Mock(return_value=proxy_context),
+        )
+
+        _, session = TestSessionProxy._build_session(
+            monkeypatch,
+            ["--client-cert", "client.pem", "example"],
+        )
+        adapter = session.adapters["https://"]
+        assert isinstance(adapter, (CacheControlAdapter, HTTPAdapter))
+        proxy_manager = adapter.proxy_manager_for("https://proxy.example:443")
+
+        assert session.cert == "client.pem"
+        assert adapter._ssl_context is origin_context
+        assert proxy_manager.proxy_config is not None
+        assert proxy_manager.proxy_config.ssl_context is proxy_context
+        assert proxy_context is not origin_context
+
+    @pytest.mark.parametrize("directory", [False, True], ids=["file", "directory"])
+    def test_custom_ca_context_uses_selected_source(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        directory: bool,
+    ) -> None:
+        ca_source = tmp_path / ("certs" if directory else "ca.pem")
+        if directory:
+            ca_source.mkdir()
+        else:
+            ca_source.touch()
+        context = Mock()
+        create_context = Mock(return_value=context)
+        monkeypatch.setattr(ssl_, "create_urllib3_context", create_context)
+
+        context_factory = Mock()
+        result = create_proxy_ssl_context(
+            str(ca_source),
+            context_factory=context_factory,
+        )
+
+        assert result is context
+        context_factory.assert_not_called()
+        create_context.assert_called_once_with()
+        if directory:
+            context.load_verify_locations.assert_called_once_with(capath=str(ca_source))
+        else:
+            context.load_verify_locations.assert_called_once_with(cafile=str(ca_source))
+
+    def test_default_proxy_context_is_fresh_truststore(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        fresh_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        create_context = Mock(return_value=fresh_context)
+
+        result = create_proxy_ssl_context(
+            None,
+            context_factory=create_context,
+        )
+
+        assert result is fresh_context
+        create_context.assert_called_once_with()
+
+    def test_proxy_context_falls_back_to_certifi(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        context = Mock()
+        create_context = Mock(return_value=context)
+        monkeypatch.setattr(certifi, "where", lambda: "certifi.pem")
+        monkeypatch.setattr(ssl_, "create_urllib3_context", create_context)
+
+        result = create_proxy_ssl_context(None)
+
+        assert result is context
+        create_context.assert_called_once_with()
+        context.load_verify_locations.assert_called_once_with(cafile="certifi.pem")
+
+    @pytest.mark.parametrize("verify", [False, ""], ids=["false", "empty"])
+    def test_proxy_context_can_disable_verification(
+        self,
+        verify: bool | str,
+    ) -> None:
+        result = create_proxy_ssl_context(verify)
+
+        assert result is not None
+        assert result.verify_mode == ssl.CERT_NONE
 
 
 class TestConnectionErrors:
