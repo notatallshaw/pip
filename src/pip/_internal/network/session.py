@@ -244,6 +244,28 @@ class _SSLContextAdapterMixin:
         self._ssl_context = ssl_context
         super().__init__(**kwargs)
 
+    def build_connection_pool_key_attributes(
+        self,
+        request: PreparedRequest,
+        verify: bool | str,
+        cert: str | tuple[str, str] | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Keep nondefault verification separate from the supplied context."""
+        assert isinstance(self, _BaseHTTPAdapter)
+        host_params, pool_kwargs = (
+            _BaseHTTPAdapter.build_connection_pool_key_attributes(
+                self,
+                request,
+                verify,
+                cert,
+            )
+        )
+        if self._ssl_context is not None and verify is not True:
+            # urllib3 treats None as an instruction to remove the context
+            # inherited from the pool manager for this pool.
+            pool_kwargs["ssl_context"] = None
+        return host_params, pool_kwargs
+
     def init_poolmanager(
         self,
         connections: int,
@@ -315,6 +337,7 @@ class PipSession(requests.Session):
         trusted_hosts: Sequence[str] = (),
         index_urls: list[str] | None = None,
         ssl_context: SSLContext | None = None,
+        ignore_ca_bundle_env: bool = False,
         refresh_package: set[str] | None = None,
         **kwargs: Any,
     ) -> None:
@@ -330,6 +353,7 @@ class PipSession(requests.Session):
         # "" disables proxying; None means no --proxy was given.
         self.pip_proxy: str | None = None
         self.pip_no_proxy_env = False
+        self.pip_ignore_ca_bundle_env = ignore_ca_bundle_env
         self.refresh_package: set[str] = refresh_package or set()
 
         # Attach our User Agent to the request
@@ -405,6 +429,30 @@ class PipSession(requests.Session):
             handler with.
         """
         self.auth.index_urls = new_index_urls
+
+    # Python 3.10 has no typing.override, and pip does not require typing_extensions.
+    def merge_environment_settings(  # ty: ignore[missing-override-decorator]
+        self,
+        url: str,
+        proxies: dict[str, str] | None,
+        stream: bool | None,
+        verify: bool | str | None,
+        cert: Any,
+    ) -> dict[str, Any]:
+        """Merge Requests settings without restoring ignored CA variables."""
+        ignore_ca_bundle = self.pip_ignore_ca_bundle_env and (
+            verify is True or verify is None
+        )
+        settings = super().merge_environment_settings(
+            url,
+            proxies,
+            stream,
+            verify,
+            cert,
+        )
+        if ignore_ca_bundle:
+            settings["verify"] = self.verify if verify is None else verify
+        return settings
 
     def add_trusted_host(
         self, host: str, source: str | None = None, suppress_logging: bool = False
@@ -533,6 +581,8 @@ class PipSession(requests.Session):
         kwargs.setdefault("timeout", self.timeout)
         # Allow setting a default proxies on a session
         kwargs.setdefault("proxies", self.proxies)
+        # Preserve a CA source selected before Requests reads its environment.
+        kwargs.setdefault("verify", self.verify)
 
         # Dispatch the actual request
         try:

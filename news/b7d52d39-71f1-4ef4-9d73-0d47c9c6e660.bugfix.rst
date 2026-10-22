@@ -1,0 +1,2 @@
+Make custom CA sources replace pip's default roots for HTTPS origins and take
+precedence over Requests-compatible CA environment variables.

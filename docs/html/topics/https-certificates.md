@@ -13,9 +13,16 @@ attacks against package downloads.
 ## Using a specific certificate store
 
 The `--cert` option (and the corresponding `PIP_CERT` environment variable)
-allow users to specify a different certificate store/bundle for pip to use. It
-is also possible to use `REQUESTS_CA_BUNDLE` or `CURL_CA_BUNDLE` environment
-variables.
+allows users to specify a different certificate source for pip to use. The
+source can be a PEM-encoded CA bundle or an OpenSSL-compatible certificate
+directory. Directory entries must use OpenSSL's hash naming, which can be
+generated with `openssl rehash`.
+
+A custom CA source replaces pip's default roots for HTTPS origin verification
+and uses OpenSSL verification on supported platforms. Pip's `cert`
+configuration takes precedence over the `REQUESTS_CA_BUNDLE` and
+`CURL_CA_BUNDLE` compatibility environment variables; `REQUESTS_CA_BUNDLE`
+takes precedence over `CURL_CA_BUNDLE`.
 
 If you need a specific certificate bundle, you can download the
 [Mozilla CA bundle provided by the curl project](https://curl.se/docs/caextract.html).
