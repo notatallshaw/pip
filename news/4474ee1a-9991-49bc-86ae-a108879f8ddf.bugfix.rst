@@ -1,0 +1,1 @@
+Do not add Requests' default CA bundle when pip supplies an SSL context.

@@ -30,7 +30,7 @@ from pip._vendor.requests.adapters import DEFAULT_POOLBLOCK, BaseAdapter
 from pip._vendor.requests.adapters import HTTPAdapter as _BaseHTTPAdapter
 from pip._vendor.requests.models import PreparedRequest, Response
 from pip._vendor.requests.structures import CaseInsensitiveDict
-from pip._vendor.urllib3.connectionpool import ConnectionPool
+from pip._vendor.urllib3.connectionpool import ConnectionPool, HTTPSConnectionPool
 from pip._vendor.urllib3.exceptions import InsecureRequestWarning
 
 from pip import __version__
@@ -271,6 +271,29 @@ class _SSLContextAdapterMixin:
             # https://github.com/pypa/pip/issues/13465
             proxy_kwargs.setdefault("proxy_ssl_context", self._ssl_context)
         return super().proxy_manager_for(proxy, **proxy_kwargs)  # type: ignore[misc]
+
+    def cert_verify(
+        self,
+        conn: ConnectionPool,
+        url: str,
+        verify: bool | str,
+        cert: str | tuple[str, str] | None,
+    ) -> None:
+        assert isinstance(self, _BaseHTTPAdapter)
+        if (
+            isinstance(conn, HTTPSConnectionPool)
+            and self._ssl_context is not None
+            and verify is True
+        ):
+            try:
+                _BaseHTTPAdapter.cert_verify(
+                    self, conn=conn, url=url, verify=False, cert=cert
+                )
+            finally:
+                conn.cert_reqs = "CERT_REQUIRED"
+            return
+
+        _BaseHTTPAdapter.cert_verify(self, conn=conn, url=url, verify=verify, cert=cert)
 
 
 class HTTPAdapter(_SSLContextAdapterMixin, _BaseHTTPAdapter):
