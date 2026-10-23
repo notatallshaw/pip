@@ -192,6 +192,24 @@ class Distribution(BaseDistribution):
             yield child.name
 
     def read_text(self, path: InfoPath) -> str:
+        if str(path) == "RECORD" and isinstance(
+            self._info_location, (pathlib.Path, zipfile.Path)
+        ):
+            # CSV fields need untranslated line endings.
+            try:
+                with self._info_location.joinpath("RECORD").open(
+                    encoding="utf-8", newline=""
+                ) as stream:
+                    return stream.read()
+            except (
+                FileNotFoundError,
+                IsADirectoryError,
+                KeyError,
+                NotADirectoryError,
+                PermissionError,
+            ):
+                # Let importlib handle missing or unreadable metadata.
+                pass
         content = self._dist.read_text(str(path))
         if content is None:
             raise FileNotFoundError(path)
