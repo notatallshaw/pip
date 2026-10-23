@@ -174,12 +174,7 @@ jobs:
 
       - name: Install MacOS dependencies
         if: runner.os == 'macOS'
-        run: |
-          DEPS=breezy
-          if ! which svn; then
-            DEPS="${DEPS} subversion"
-          fi
-          brew install ${DEPS}
+        run: bash .github/scripts/install-macos-dependencies.sh
 
       - run: python -m pip install .
       - run: python -m pip install nox
@@ -228,6 +223,7 @@ jobs:
       # The D: drive is significantly faster than the system C: drive.
       # https://github.com/actions/runner-images/issues/8755
       - name: Set TEMP to D:/Temp
+        shell: pwsh
         run: |
           mkdir "D:\\Temp"
           echo "TEMP=D:\\Temp" >> $env:GITHUB_ENV
