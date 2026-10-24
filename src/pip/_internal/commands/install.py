@@ -8,6 +8,7 @@ import os
 import shutil
 import site
 import sys
+import types
 from collections.abc import Iterable, Iterator
 from optparse import SUPPRESS_HELP, Values
 from pathlib import Path
@@ -132,6 +133,49 @@ def _eagerly_import_modules(module_names: Iterable[str]) -> None:
             __import__(module)
         except ImportError as error:
             _IMPORT_ERRORS[module] = error.with_traceback(None)
+
+
+def _reify_lazy_imports(module_names: Iterable[str]) -> None:
+    """Resolve lazy bindings in installation dependencies before imports are blocked."""
+    if sys.version_info < (3, 15):
+        return
+
+    modules = {
+        name: module
+        for name in module_names
+        if isinstance(module := sys.modules.get(name), types.ModuleType)
+    }
+    attempted: set[object] = set()
+
+    # Resolving a binding can add lazy imports to modules already scanned.
+    while pending := [
+        (module, name, value)
+        for module in modules.values()
+        for name, value in tuple(vars(module).items())
+        if isinstance(value, types.LazyImportType) and value not in attempted
+    ]:
+        for module, name, value in pending:
+            attempted.add(value)
+            before = set(sys.modules)
+
+            try:
+                resolved = getattr(module, name)
+
+                # The binding may resolve to an already-loaded module.
+                if isinstance(resolved, types.ModuleType):
+                    modules[resolved.__name__] = resolved
+            except ImportError as error:
+                if error.name is not None:
+                    _IMPORT_ERRORS[error.name] = error.with_traceback(None)
+            except Exception:
+                # Optional lazy imports need not succeed for installation to proceed.
+                pass
+
+            # Include dependencies loaded indirectly, even by a failed import.
+            for dependency in sys.modules.keys() - before:
+                imported = sys.modules[dependency]
+                if isinstance(imported, types.ModuleType):
+                    modules[dependency] = imported
 
 
 @contextlib.contextmanager
@@ -568,6 +612,7 @@ class InstallCommand(RequirementCommand):
             # from a distribution pip is about to install.
             module_names = (*_INTERNAL_EAGER_IMPORTS, *pip._EAGER_IMPORTS)
             _eagerly_import_modules(module_names)
+            _reify_lazy_imports(module_names)
             with _prevent_further_imports():
                 installed = install_given_reqs(
                     to_install,

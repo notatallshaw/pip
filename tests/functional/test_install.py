@@ -481,6 +481,57 @@ def test_install_blocked_import_preserves_uninstall(
         assert not (script.site_packages_path / "mypackage-1.0.dist-info").exists()
 
 
+def test_install_preloads_registered_import_before_replacing_module(
+    script: PipTestEnvironment,
+) -> None:
+    """A post-install lazy reference must use the module loaded before replacement."""
+    dependency = "pip_reify_dependency.py"
+    script.site_packages_path.joinpath(dependency).write_text(
+        "import pip._internal.commands.install as install\n"
+        "assert not install._ACTIVE_INSTALLATIONS\n"
+        'value = "before installation"\n'
+    )
+    script.site_packages_path.joinpath("pip_eager_owner.py").write_text(
+        '__lazy_modules__ = ["pip_reify_dependency"]\n'
+        "import pip_reify_dependency as dependency\n"
+    )
+    wheel_path = create_basic_wheel_for_package(
+        script,
+        "mypackage",
+        "1.0",
+        extra_files={dependency: 'raise AssertionError("New module executed")\n'},
+    )
+    runner = script.scratch_path / "run_install.py"
+    runner.write_text(textwrap.dedent("""\
+        import sys
+        import pip
+
+        pip._EAGER_IMPORTS.add("pip_eager_owner")
+
+        import pip._internal.commands.install as install
+        from pip._internal.cli.main import main
+
+        original = install.get_environment
+
+        def get_environment(locations):
+            assert (
+                sys.modules["pip_eager_owner"].dependency.value
+                == "before installation"
+            )
+            return original(locations)
+
+        install.get_environment = get_environment
+        sys.exit(main(["install", "--no-index", sys.argv[1]]))
+    """))
+
+    result = script.run("python", str(runner), str(wheel_path))
+
+    assert result.returncode == SUCCESS
+    result.assert_installed("mypackage", editable=False)
+    result.did_update(script.site_packages / dependency)
+    result.did_create(script.site_packages / "mypackage-1.0.dist-info" / "RECORD")
+
+
 def test_install_exit_status_code_when_no_requirements(
     script: PipTestEnvironment,
 ) -> None:
