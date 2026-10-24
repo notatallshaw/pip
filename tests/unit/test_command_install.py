@@ -1,19 +1,18 @@
 import errno
 import sys
-import warnings
 from unittest import mock
 
 import pytest
 
 from pip._vendor.requests.exceptions import InvalidProxyURL
 
+import pip
 from pip._internal.commands import install
 from pip._internal.commands.install import (
     _prevent_further_imports,
     create_os_error_message,
     decide_user_install,
 )
-from pip._internal.utils.deprecation import PipDeprecationWarning
 
 
 class TestDecideUserInstall:
@@ -191,34 +190,88 @@ def test_create_os_error_message(
     assert msg == expected
 
 
-def test_prevent_further_imports_warns_on_import() -> None:
-    """
-    An import issued after _prevent_further_imports() has run must emit a
-    deprecation warning via the registered audit hook, except when the
-    imported module lives in the standard library.
-    """
-    captured_hooks: list[mock.Mock] = []
+def test_prevent_further_imports_blocks_import(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(install, "_IMPORT_AUDIT_HOOK_INSTALLED", False)
+    monkeypatch.setattr(install, "_ACTIVE_INSTALLATIONS", set())
+    monkeypatch.setattr(install, "_WARNED_IMPORTS", set())
+    monkeypatch.setattr(pip, "_EAGER_IMPORTS", {"unknown_module"})
+    add_hook = mock.Mock()
+    monkeypatch.setattr(sys, "addaudithook", add_hook)
+    with _prevent_further_imports():
+        with _prevent_further_imports():
+            pass
+        for module in ("unknown_module", "os", "encodings.iso8859_15"):
+            with pytest.raises(install.BlockedImportError, match=module):
+                install._prevent_import_hook("import", (module,))
+        install._prevent_import_hook("open", ("unknown_module",))
 
-    with mock.patch.object(install, "_IMPORT_AUDIT_HOOK_INSTALLED", False):
-        with mock.patch.object(sys, "addaudithook", side_effect=captured_hooks.append):
-            _prevent_further_imports()
+    assert not install._ACTIVE_INSTALLATIONS
+    for _ in range(2):
+        install._prevent_import_hook("import", ("after_install",))
+    assert len(caplog.records) == 1
+    assert "Unsafe import" in caplog.text
+    assert "all required modules before running pip install" in caplog.text
+    with _prevent_further_imports():
+        with pytest.raises(install.BlockedImportError, match="after_install"):
+            install._prevent_import_hook("import", ("after_install",))
+    add_hook.assert_called_once_with(install._prevent_import_hook)
 
-    assert len(captured_hooks) == 1, "Expected exactly one audit hook to be registered"
-    audit_hook = captured_hooks[0]
 
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        audit_hook("import", ("unknown_module",))
+def test_import_guard_restores_warning_mode_after_error(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(install, "_IMPORT_AUDIT_HOOK_INSTALLED", False)
+    monkeypatch.setattr(install, "_ACTIVE_INSTALLATIONS", set())
+    monkeypatch.setattr(install, "_WARNED_IMPORTS", set())
+    with mock.patch.object(sys, "addaudithook"):
+        with pytest.raises(RuntimeError):
+            with _prevent_further_imports():
+                raise RuntimeError("installation failed")
 
-    assert len(caught) == 1
-    assert "unknown_module" in str(caught[0].message)
-    assert issubclass(caught[0].category, PipDeprecationWarning)
+    assert not install._ACTIVE_INSTALLATIONS
+    install._prevent_import_hook("import", ("after_failure",))
+    assert "Unsafe import" in caplog.text
 
-    # Standard library imports must not emit a warning: pip cannot shadow
-    # them with a freshly installed distribution.
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        audit_hook("import", ("os",))
-        audit_hook("import", ("encodings.iso8859_15",))
 
-    assert caught == []
+def test_post_install_warning_allows_logging_imports(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(install, "_ACTIVE_INSTALLATIONS", set())
+    monkeypatch.setattr(install, "_WARNED_IMPORTS", set())
+
+    def warning(*args: object) -> None:
+        install._prevent_import_hook("import", ("handler_module",))
+        raise RuntimeError("The caller's logging handler failed")
+
+    with mock.patch.object(install.logger, "warning", side_effect=warning) as log:
+        install._prevent_import_hook("import", ("handler_module",))
+    log.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ImportError("Optional backend unavailable"),
+        ModuleNotFoundError("Missing dependency", name="backend_dependency"),
+    ],
+)
+def test_eager_import_errors_are_preserved(
+    monkeypatch: pytest.MonkeyPatch, error: ImportError
+) -> None:
+    monkeypatch.setattr(install, "_IMPORT_ERRORS", {"previous_backend": error})
+    importer = mock.Mock(side_effect=error)
+    monkeypatch.setattr(install, "__import__", importer, raising=False)
+
+    install._eagerly_import_modules(("optional_backend", "optional_backend"))
+    assert "previous_backend" not in install._IMPORT_ERRORS
+    monkeypatch.setattr(install, "_ACTIVE_INSTALLATIONS", {object()})
+
+    for _ in range(2):
+        with pytest.raises(type(error)) as caught:
+            install._prevent_import_hook("import", ("optional_backend",))
+        assert caught.value is error
+    importer.assert_called_once_with("optional_backend")
+    monkeypatch.setattr(install, "_ACTIVE_INSTALLATIONS", set())
+    install._prevent_import_hook("import", ("optional_backend",))

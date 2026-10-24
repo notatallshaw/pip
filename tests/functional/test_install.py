@@ -411,53 +411,74 @@ def test_pip_second_command_line_interface_works(
     result.did_create(initools_folder)
 
 
-def test_install_warns_on_unexpected_post_install_import(
+@pytest.mark.parametrize("use_target", [False, True])
+def test_install_blocked_import_preserves_uninstall(
     script: PipTestEnvironment,
+    use_target: bool,
 ) -> None:
-    """
-    Verify that pip warns when an unexpected import happens after the
-    install audit hook has been registered. The hook is installed before
-    ``install_given_reqs`` runs, so imports issued from code running after
-    that point must trigger the deprecation warning.
-    """
+    """An interrupted wheel warns about corruption and remains uninstallable."""
     wheel_path = create_basic_wheel_for_package(script, "mypackage", "1.0")
+    script.scratch_path.joinpath("after_install.py").write_text("value = 42\n")
+    script.scratch_path.joinpath("at_shutdown.py").write_text("value = 43\n")
     runner = script.scratch_path / "run_install.py"
     runner.write_text(textwrap.dedent("""\
+            import atexit
             import sys
-            import pip._internal.commands.install as _install_mod
-            _orig_get_environment = _install_mod.get_environment
-
-            def _patched_get_environment(lib_locations):
-                try:
-                    import pip_unexpected_module_xyz
-                except ModuleNotFoundError:
-                    pass
-                return _orig_get_environment(lib_locations)
-
-            _install_mod.get_environment = _patched_get_environment
-
             from pip._internal.cli.main import main
-            wheels_dir = sys.argv[1]
-            sys.exit(main([
-                "install",
-                "--no-index",
-                "--find-links",
-                wheels_dir,
-                "mypackage"
-                ])
-            )
+            from pip._internal.operations.install.wheel import ZipBackedFile
+
+            sys.modules.pop("wave", None)
+            original = ZipBackedFile.save
+
+            def save(self):
+                if self.src_record_path.endswith(".dist-info/RECORD"):
+                    import wave
+                original(self)
+
+            ZipBackedFile.save = save
+
+            def shutdown():
+                from at_shutdown import value
+                assert value == 43
+                print("Shutdown import succeeded")
+
+            atexit.register(shutdown)
+            status = main(["install", "--no-index", sys.argv[1]] + sys.argv[2:])
+            from after_install import value
+            assert value == 42
+            sys.exit(status)
         """))
 
-    # Make sure PipDeprecationWarnings don't turn into errors
-    script.environ["_PIP_TEST_ENV"] = ""
-    result = script.run(
-        "python", str(runner), str(wheel_path.parent), expect_stderr=True
+    args = ["python", str(runner), str(wheel_path)]
+    destination = script.site_packages
+    if use_target:
+        destination = script.scratch / "target"
+        args.extend(["--target", str(script.scratch_path / "target")])
+
+    result = script.run(*args, expect_stderr=True)
+    assert result.returncode == SUCCESS
+    assert "WARNING: Installation of 'mypackage' was interrupted" in result.stderr
+    assert "Blocked import of 'wave' after pip install started" in result.stderr
+    assert "Hook authors must import required modules before installation starts" in (
+        result.stderr
     )
+    assert "Traceback" not in result.stderr
+    assert "the package may be corrupt" in result.stderr
+    assert "pip uninstall mypackage" in result.stderr
     assert (
-        "Unexpected import of 'pip_unexpected_module_xyz' "
-        "after pip install started" in result.stderr
+        "Unsafe import of 'after_install' after pip install completed" in result.stderr
     )
-    assert "run_install.py:7)" in result.stderr
+    assert "Unsafe import of 'at_shutdown' after pip install completed" in result.stderr
+    assert "all required modules before running pip install" in result.stderr
+    assert "Shutdown import succeeded" in result.stdout
+
+    result.did_create(destination / "mypackage" / "__init__.py")
+    result.did_create(destination / "mypackage-1.0.dist-info" / "RECORD")
+    if not use_target:
+        result = script.pip("uninstall", "mypackage", "-y")
+        assert "Successfully uninstalled mypackage-1.0" in result.stdout
+        assert not (script.site_packages_path / "mypackage").exists()
+        assert not (script.site_packages_path / "mypackage-1.0.dist-info").exists()
 
 
 def test_install_exit_status_code_when_no_requirements(
