@@ -9,16 +9,17 @@ import sys
 import textwrap
 from email import message_from_string
 from pathlib import Path
-from typing import cast
-from unittest.mock import patch
+from typing import BinaryIO, cast
+from unittest.mock import Mock, patch
 
 import pytest
 
 from pip._vendor.packaging.requirements import Requirement
 from pip._vendor.packaging.utils import canonicalize_name
 
-from pip._internal.exceptions import InstallationError
+from pip._internal.exceptions import BlockedImportError, InstallationError
 from pip._internal.locations import get_scheme
+from pip._internal.metadata import get_environment
 from pip._internal.models.direct_url import (
     DIRECT_URL_METADATA_NAME,
     ArchiveInfo,
@@ -213,6 +214,159 @@ class TestWheelFile:
         filepath = os.path.join(DATA_DIR, "packages", "meta-1.0-py2.py3-none-any.whl")
         unpack_file(filepath, os.fspath(tmpdir))
         assert os.path.isdir(os.path.join(tmpdir, "meta-1.0.dist-info"))
+
+
+@pytest.mark.parametrize(
+    "error",
+    [BlockedImportError("Unexpected import"), ModuleNotFoundError("Unavailable")],
+)
+def test_wheel_compilation_import_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> None:
+    path = tmp_path / "sample.py"
+    path.write_text("value = 42\n")
+    monkeypatch.setattr(wheel.compileall, "compile_file", Mock(side_effect=error))
+
+    assert wheel._compile_wheel_file(str(path)) is False
+
+
+def test_blocked_preparation_preserves_existing_install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = make_wheel(
+        "sample", "1.0", extra_files={"sample/__init__.py": "value = 42\n"}
+    ).save_to_dir(tmp_path)
+    installed = tmp_path / "installed"
+    scheme = get_scheme("sample", home=str(installed))
+    wheel.install_wheel("sample", str(path), scheme=scheme, req_description="sample")
+    before = {p: p.read_bytes() for p in installed.rglob("*") if p.is_file()}
+    monkeypatch.setattr(
+        wheel, "get_entrypoints", Mock(side_effect=BlockedImportError("preparation"))
+    )
+
+    with pytest.raises(BlockedImportError):
+        wheel.install_wheel(
+            "sample", str(path), scheme=scheme, req_description="sample"
+        )
+
+    assert {p: p.read_bytes() for p in installed.rglob("*") if p.is_file()} == before
+
+
+@pytest.mark.parametrize("partial_copy", [False, True])
+def test_blocked_copy_records_only_written_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, partial_copy: bool
+) -> None:
+    path = make_wheel(
+        "sample",
+        "1.0",
+        extra_files={
+            "sample/a_source.py": "value = 42\n",
+            "sample/z_foreign.py": "value = 43\n",
+        },
+    ).save_to_dir(tmp_path)
+    scheme = get_scheme("sample", home=str(tmp_path / "installed"))
+    lib = Path(scheme.purelib)
+    foreign = lib / "sample/z_foreign.py"
+    foreign.parent.mkdir(parents=True)
+    foreign.write_text("not installed by this wheel\n")
+    if partial_copy:
+        original = wheel.shutil.copyfileobj
+
+        def copyfileobj(source: BinaryIO, dest: BinaryIO, length: int) -> None:
+            if Path(dest.name).name == "a_source.py":
+                dest.write(b"partial")
+                raise BlockedImportError("Unexpected import during copying")
+            original(source, dest, length)
+
+        monkeypatch.setattr(wheel.shutil, "copyfileobj", copyfileobj)
+    else:
+        monkeypatch.setattr(
+            wheel.ZipBackedFile, "save", Mock(side_effect=BlockedImportError("cold"))
+        )
+
+    with pytest.raises(BlockedImportError, match="sample.*may be corrupt"):
+        wheel.install_wheel(
+            "sample", str(path), scheme=scheme, req_description="sample"
+        )
+
+    dist = get_environment([scheme.purelib]).get_distribution("sample")
+    assert dist is not None
+    assert dist.metadata["Name"] == "sample"
+    assert dist.metadata["Version"] == "1.0"
+    with (lib / "sample-1.0.dist-info/RECORD").open() as record:
+        recorded = {row[0] for row in csv.reader(record)}
+    assert "sample-1.0.dist-info/METADATA" in recorded
+    assert "sample-1.0.dist-info/RECORD" in recorded
+    assert "sample/z_foreign.py" not in recorded
+    assert foreign.read_text() == "not installed by this wheel\n"
+    assert ("sample/a_source.py" in recorded) == partial_copy
+    if partial_copy:
+        assert (lib / "sample/a_source.py").read_bytes() == b"partial"
+
+
+@pytest.mark.parametrize("stage", ["scripts", "record"])
+def test_blocked_finalization_retains_installed_file_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str
+) -> None:
+    path = make_wheel(
+        "sample",
+        "1.0",
+        extra_files={"sample/__init__.py": "def main(): pass\n"},
+        entry_points={
+            "console_scripts": ["created = sample:main", "unreached = sample:main"]
+        },
+    ).save_to_dir(tmp_path)
+    scheme = get_scheme("sample", home=str(tmp_path / "installed"))
+    suffix = ".exe" if WINDOWS else ""
+    foreign = Path(scheme.scripts) / f"unreached{suffix}"
+    foreign.parent.mkdir(parents=True)
+    foreign.write_text("not installed by this wheel\n")
+    if stage == "scripts":
+        original_make = wheel.PipScriptMaker.make
+
+        def make(
+            maker: wheel.PipScriptMaker,
+            specification: str,
+            options: dict[str, object] | None = None,
+        ) -> list[str]:
+            paths = original_make(maker, specification, options)
+            if specification.startswith("created ="):
+                raise BlockedImportError("Unexpected import after writing a script")
+            return paths
+
+        monkeypatch.setattr(wheel.PipScriptMaker, "make", make)
+    else:
+        original_rows = wheel.get_csv_rows_for_installed
+
+        def rows(
+            old_csv_rows: list[list[str]],
+            installed: dict[RecordPath, RecordPath],
+            changed: set[RecordPath],
+            generated: list[str],
+            lib_dir: str,
+        ) -> list[InstalledCSVRow]:
+            original_rows(old_csv_rows, installed, changed, generated, lib_dir)
+            raise BlockedImportError("Unexpected import while writing RECORD")
+
+        monkeypatch.setattr(wheel, "get_csv_rows_for_installed", rows)
+
+    with pytest.raises(BlockedImportError, match="sample.*may be corrupt"):
+        wheel.install_wheel(
+            "sample", str(path), scheme=scheme, req_description="sample"
+        )
+
+    lib = Path(scheme.purelib)
+    with (lib / "sample-1.0.dist-info/RECORD").open() as record:
+        recorded = {row[0] for row in csv.reader(record)}
+    assert "sample/__init__.py" in recorded
+    scripts = Path(os.path.relpath(scheme.scripts, scheme.purelib)).as_posix()
+    assert f"{scripts}/created{suffix}" in recorded
+    assert (f"{scripts}/unreached{suffix}" in recorded) == (stage == "record")
+    if stage == "scripts":
+        dist = get_environment([scheme.purelib]).get_distribution("sample")
+        assert dist is not None
+        assert "unreached" not in {entry.name for entry in dist.iter_entry_points()}
+        assert foreign.read_text() == "not installed by this wheel\n"
 
 
 class TestInstallUnpackedWheel:
