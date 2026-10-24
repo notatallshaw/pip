@@ -5,6 +5,7 @@ import os
 import platform
 import shutil
 import sysconfig
+import textwrap
 from pathlib import Path
 from typing import Any
 
@@ -670,11 +671,103 @@ def test_install_from_wheel_uninstalls_old_version(
     result.did_not_create(dist_info_folder)
 
 
-def test_wheel_compile_syntax_error(script: PipTestEnvironment, data: TestData) -> None:
-    package = data.packages.joinpath("compilewheel-1.0-py2.py3-none-any.whl")
+def test_wheel_compile_syntax_error(script: PipTestEnvironment) -> None:
+    package = create_basic_wheel_for_package(
+        script,
+        "syntaxwheel",
+        "1.0",
+        extra_files={
+            "syntaxwheel/a_bad.py": "value = 1)\n",
+            "syntaxwheel/b_good.py": "value = 42\n",
+        },
+    )
     result = script.pip("install", "--compile", package, "--no-index")
-    assert "yield from" not in result.stdout
-    assert "SyntaxError: " not in result.stdout
+
+    result.assert_installed("syntaxwheel", editable=False)
+    assert not list(
+        script.site_packages_path.glob("syntaxwheel/__pycache__/a_bad.*.pyc")
+    )
+    assert list(script.site_packages_path.glob("syntaxwheel/__pycache__/b_good.*.pyc"))
+    result.did_create(script.site_packages / "syntaxwheel-1.0.dist-info/RECORD")
+
+    result = script.pip("uninstall", "syntaxwheel", "-y")
+    assert "Successfully uninstalled syntaxwheel-1.0" in result.stdout
+    assert not (script.site_packages_path / "syntaxwheel").exists()
+    assert not (script.site_packages_path / "syntaxwheel-1.0.dist-info").exists()
+
+
+def test_wheel_compilation_blocks_cold_codecs(script: PipTestEnvironment) -> None:
+    package = create_basic_wheel_for_package(
+        script,
+        "encoded",
+        "1.0",
+        extra_files={
+            "encoded/cold.py": "# coding: big5\nvalue = 42\n",
+            "encoded/warm.py": "# coding: cp874\nvalue = 42\n",
+            "encoded/registered_cold.py": "# coding: cold_probe\nvalue = 42\n",
+            "encoded/registered_warm.py": "# coding: warm_probe\nvalue = 42\n",
+        },
+    )
+    runner = script.scratch_path / "install_encoded.py"
+    runner.write_text(textwrap.dedent("""\
+        import codecs
+        import sys
+        from pip._internal.cli.main import main
+        from pip._internal.commands import install
+        from pip._internal.exceptions import BlockedImportError
+
+        calls = []
+
+        def search(name):
+            if name in {"cold_probe", "warm_probe"}:
+                calls.append(name)
+                return codecs.lookup("utf-8")
+
+        codecs.register(search)
+        codecs.lookup("warm_probe")
+        codecs.lookup("cp874")
+        calls.clear()
+        original = install.install_given_reqs
+
+        def install_given_reqs(*args, **kwargs):
+            installed = original(*args, **kwargs)
+            for encoding in ("big5", "cold_probe"):
+                try:
+                    codecs.lookup(encoding)
+                except BlockedImportError:
+                    pass
+                else:
+                    raise AssertionError("Blocked codec was cached as missing")
+            assert not calls, calls
+            return installed
+
+        install.install_given_reqs = install_given_reqs
+        status = main(["install", "--compile", "--no-index", sys.argv[1]])
+        codecs.lookup("big5")
+        codecs.lookup("cold_probe")
+        assert calls == ["cold_probe"], calls
+        sys.exit(status)
+    """))
+
+    result = script.run("python", str(runner), str(package), expect_stderr=True)
+
+    result.assert_installed("encoded", editable=False)
+    assert "Unsafe import" in result.stderr
+    assert "after pip install completed" in result.stderr
+    for module in ("__init__", "warm", "registered_warm"):
+        assert list(
+            script.site_packages_path.glob(f"encoded/__pycache__/{module}.*.pyc")
+        )
+    for module in ("cold", "registered_cold"):
+        assert not list(
+            script.site_packages_path.glob(f"encoded/__pycache__/{module}.*.pyc")
+        )
+    result.did_create(script.site_packages / "encoded-1.0.dist-info" / "RECORD")
+
+    result = script.pip("uninstall", "encoded", "-y")
+    assert "Successfully uninstalled encoded-1.0" in result.stdout
+    assert not (script.site_packages_path / "encoded").exists()
+    assert not (script.site_packages_path / "encoded-1.0.dist-info").exists()
 
 
 def test_wheel_install_with_no_cache_dir(

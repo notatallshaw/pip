@@ -1,19 +1,21 @@
 import errno
 import sys
-import warnings
+from collections.abc import Iterator
+from pathlib import Path
+from types import ModuleType
 from unittest import mock
 
 import pytest
 
 from pip._vendor.requests.exceptions import InvalidProxyURL
 
+import pip
 from pip._internal.commands import install
 from pip._internal.commands.install import (
     _prevent_further_imports,
     create_os_error_message,
     decide_user_install,
 )
-from pip._internal.utils.deprecation import PipDeprecationWarning
 
 
 class TestDecideUserInstall:
@@ -191,34 +193,259 @@ def test_create_os_error_message(
     assert msg == expected
 
 
-def test_prevent_further_imports_warns_on_import() -> None:
-    """
-    An import issued after _prevent_further_imports() has run must emit a
-    deprecation warning via the registered audit hook, except when the
-    imported module lives in the standard library.
-    """
-    captured_hooks: list[mock.Mock] = []
+def test_prevent_further_imports_blocks_import(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(install, "_IMPORT_AUDIT_HOOK_INSTALLED", False)
+    monkeypatch.setattr(install, "_ACTIVE_INSTALLATIONS", set())
+    monkeypatch.setattr(install, "_WARNED_IMPORTS", set())
+    monkeypatch.setattr(pip, "_EAGER_IMPORTS", {"unknown_module"})
+    add_hook = mock.Mock()
+    monkeypatch.setattr(sys, "addaudithook", add_hook)
+    with _prevent_further_imports():
+        with _prevent_further_imports():
+            pass
+        for module in ("unknown_module", "os", "encodings.iso8859_15"):
+            with pytest.raises(install.BlockedImportError, match=module):
+                install._prevent_import_hook("import", (module,))
+        install._prevent_import_hook("open", ("unknown_module",))
 
-    with mock.patch.object(install, "_IMPORT_AUDIT_HOOK_INSTALLED", False):
-        with mock.patch.object(sys, "addaudithook", side_effect=captured_hooks.append):
-            _prevent_further_imports()
+    assert not install._ACTIVE_INSTALLATIONS
+    for _ in range(2):
+        install._prevent_import_hook("import", ("after_install",))
+    assert len(caplog.records) == 1
+    assert "Unsafe import" in caplog.text
+    assert "all required modules before running pip install" in caplog.text
+    with _prevent_further_imports():
+        with pytest.raises(install.BlockedImportError, match="after_install"):
+            install._prevent_import_hook("import", ("after_install",))
+    add_hook.assert_called_once_with(install._prevent_import_hook)
 
-    assert len(captured_hooks) == 1, "Expected exactly one audit hook to be registered"
-    audit_hook = captured_hooks[0]
 
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        audit_hook("import", ("unknown_module",))
+def test_import_guard_restores_warning_mode_after_error(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(install, "_IMPORT_AUDIT_HOOK_INSTALLED", False)
+    monkeypatch.setattr(install, "_ACTIVE_INSTALLATIONS", set())
+    monkeypatch.setattr(install, "_WARNED_IMPORTS", set())
+    with mock.patch.object(sys, "addaudithook"):
+        with pytest.raises(RuntimeError):
+            with _prevent_further_imports():
+                raise RuntimeError("installation failed")
 
-    assert len(caught) == 1
-    assert "unknown_module" in str(caught[0].message)
-    assert issubclass(caught[0].category, PipDeprecationWarning)
+    assert not install._ACTIVE_INSTALLATIONS
+    install._prevent_import_hook("import", ("after_failure",))
+    assert "Unsafe import" in caplog.text
 
-    # Standard library imports must not emit a warning: pip cannot shadow
-    # them with a freshly installed distribution.
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        audit_hook("import", ("os",))
-        audit_hook("import", ("encodings.iso8859_15",))
 
-    assert caught == []
+def test_post_install_warning_allows_logging_imports(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(install, "_ACTIVE_INSTALLATIONS", set())
+    monkeypatch.setattr(install, "_WARNED_IMPORTS", set())
+
+    def warning(*args: object) -> None:
+        install._prevent_import_hook("import", ("handler_module",))
+        raise RuntimeError("The caller's logging handler failed")
+
+    with mock.patch.object(install.logger, "warning", side_effect=warning) as log:
+        install._prevent_import_hook("import", ("handler_module",))
+    log.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ImportError("Optional backend unavailable"),
+        ModuleNotFoundError("Missing dependency", name="backend_dependency"),
+    ],
+)
+def test_eager_import_errors_are_preserved(
+    monkeypatch: pytest.MonkeyPatch, error: ImportError
+) -> None:
+    monkeypatch.setattr(install, "_IMPORT_ERRORS", {"previous_backend": error})
+    importer = mock.Mock(side_effect=error)
+    monkeypatch.setattr(install, "__import__", importer, raising=False)
+
+    install._eagerly_import_modules(("optional_backend", "optional_backend"))
+    assert "previous_backend" not in install._IMPORT_ERRORS
+    monkeypatch.setattr(install, "_ACTIVE_INSTALLATIONS", {object()})
+
+    for _ in range(2):
+        with pytest.raises(type(error)) as caught:
+            install._prevent_import_hook("import", ("optional_backend",))
+        assert caught.value is error
+    importer.assert_called_once_with("optional_backend")
+    monkeypatch.setattr(install, "_ACTIVE_INSTALLATIONS", set())
+    install._prevent_import_hook("import", ("optional_backend",))
+
+
+@pytest.fixture
+def lazy_import_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[ModuleType]:
+    """Isolate installation dependencies with real lazy bindings on Python 3.15+."""
+    if sys.version_info < (3, 15):
+        pytest.skip("Lazy imports require Python 3.15")
+
+    owner = ModuleType("_pip_reify_owner")
+    monkeypatch.setitem(sys.modules, owner.__name__, owner)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.setattr(install, "_IMPORT_ERRORS", {})
+    try:
+        yield owner
+    finally:
+        for name in tuple(sys.modules):
+            if name.startswith("_pip_reify_") and name != owner.__name__:
+                del sys.modules[name]
+        sys.lazy_modules.difference_update(
+            name for name in tuple(sys.lazy_modules) if name.startswith("_pip_reify_")
+        )
+
+
+@pytest.mark.parametrize(
+    "statement, preloaded",
+    [
+        ("lazy import _pip_reify_first as alias", False),
+        ("lazy from _pip_reify_first import value as alias", False),
+        ("lazy import _pip_reify_first as alias", True),
+    ],
+)
+def test_reify_lazy_imports_loads_transitive_targets(
+    lazy_import_owner: ModuleType, tmp_path: Path, statement: str, preloaded: bool
+) -> None:
+    (tmp_path / "_pip_reify_first.py").write_text(
+        "lazy import _pip_reify_second\nvalue = 42\n"
+    )
+    (tmp_path / "_pip_reify_second.py").write_text("value = 43\n")
+    if preloaded:
+        __import__("_pip_reify_first")
+    exec(statement, lazy_import_owner.__dict__)
+    assert ("_pip_reify_first" in sys.modules) == preloaded
+
+    install._reify_lazy_imports((lazy_import_owner.__name__,))
+
+    assert "_pip_reify_first" in sys.modules
+    assert "_pip_reify_second" in sys.modules
+    assert not install._IMPORT_ERRORS
+
+
+def test_reify_lazy_imports_revisits_existing_owner(
+    lazy_import_owner: ModuleType, tmp_path: Path
+) -> None:
+    (tmp_path / "_pip_reify_first.py").write_text(
+        'import sys\nexec("lazy import _pip_reify_second", '
+        'sys.modules["_pip_reify_owner"].__dict__)\n'
+    )
+    (tmp_path / "_pip_reify_second.py").write_text("value = 42\n")
+    exec("lazy import _pip_reify_first", lazy_import_owner.__dict__)
+
+    install._reify_lazy_imports((lazy_import_owner.__name__,))
+
+    assert "_pip_reify_second" in sys.modules
+
+
+def test_reify_lazy_imports_resolves_exported_attributes(
+    lazy_import_owner: ModuleType, tmp_path: Path
+) -> None:
+    source = tmp_path / "_pip_reify_exports.py"
+    source.write_text(
+        "def __getattr__(name):\n"
+        '    if name == "exported":\n'
+        "        import _pip_reify_dependency\n"
+        "        return _pip_reify_dependency\n"
+        "    raise AttributeError(name)\n"
+    )
+    (tmp_path / "_pip_reify_dependency.py").write_text("value = 42\n")
+    exec(
+        "lazy from _pip_reify_exports import exported as alias",
+        lazy_import_owner.__dict__,
+    )
+
+    install._reify_lazy_imports((lazy_import_owner.__name__,))
+
+    assert "_pip_reify_dependency" in sys.modules
+    assert not install._IMPORT_ERRORS
+
+
+def test_reify_lazy_imports_leaves_unrelated_targets_lazy(
+    lazy_import_owner: ModuleType, tmp_path: Path
+) -> None:
+    unrelated = ModuleType("_pip_reify_unrelated")
+    marker = tmp_path / "unrelated-imported"
+    (tmp_path / "_pip_reify_unneeded.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).touch()\n"
+        'raise AssertionError("Unrelated lazy import executed")\n'
+    )
+    exec("lazy import _pip_reify_unneeded", unrelated.__dict__)
+
+    install._reify_lazy_imports((lazy_import_owner.__name__,))
+
+    assert not marker.exists()
+    assert "_pip_reify_unneeded" not in sys.modules
+
+
+def test_reify_lazy_imports_ignores_unavailable_eager_module(
+    lazy_import_owner: ModuleType,
+) -> None:
+    name = "_pip_reify_disabled"
+    with mock.patch.dict(sys.modules, {name: None}):
+        install._eagerly_import_modules((name,))
+        install._reify_lazy_imports((name,))
+
+    assert isinstance(install._IMPORT_ERRORS[name], ModuleNotFoundError)
+
+
+@pytest.mark.parametrize("exception", ["ImportError", "RuntimeError"])
+def test_reify_lazy_imports_attempts_failed_targets_once(
+    lazy_import_owner: ModuleType,
+    tmp_path: Path,
+    exception: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts: list[int] = []
+    lazy_import_owner.__dict__["attempts"] = attempts
+    arguments = (
+        "'optional dependency unavailable', name='_pip_reify_failure'"
+        if exception == "ImportError"
+        else "'optional dependency unavailable'"
+    )
+    (tmp_path / "_pip_reify_failure.py").write_text(
+        "import _pip_reify_owner\n"
+        "_pip_reify_owner.attempts.append(1)\n"
+        "lazy import _pip_reify_second\n"
+        f"raise {exception}({arguments})\n"
+    )
+    (tmp_path / "_pip_reify_second.py").write_text("value = 42\n")
+    exec("lazy import _pip_reify_failure", lazy_import_owner.__dict__)
+
+    install._reify_lazy_imports((lazy_import_owner.__name__,))
+
+    assert attempts == [1]
+    assert "_pip_reify_second" not in sys.modules
+    assert ("_pip_reify_failure" in install._IMPORT_ERRORS) == (
+        exception == "ImportError"
+    )
+    if exception == "ImportError":
+        monkeypatch.setattr(install, "_ACTIVE_INSTALLATIONS", {object()})
+        with pytest.raises(ImportError) as cached:
+            install._prevent_import_hook("import", ("_pip_reify_failure",))
+        assert type(cached.value) is ImportError
+        assert str(cached.value) == "optional dependency unavailable"
+
+
+def test_reify_lazy_imports_preserves_dependency_import_error(
+    lazy_import_owner: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    name = "_pip_reify_failure"
+    source = tmp_path / f"{name}.py"
+    source.write_text("import _pip_reify_missing_dependency\n")
+    exec(f"lazy import {name} as dependency", lazy_import_owner.__dict__)
+
+    install._reify_lazy_imports((lazy_import_owner.__name__,))
+
+    assert "_pip_reify_missing_dependency" in install._IMPORT_ERRORS
+    monkeypatch.setattr(install, "_ACTIVE_INSTALLATIONS", {object()})
+    with pytest.raises(ModuleNotFoundError, match="No module named") as missing:
+        install._prevent_import_hook("import", ("_pip_reify_missing_dependency",))
+    assert missing.value.name == "_pip_reify_missing_dependency"
