@@ -72,11 +72,18 @@ logger = getLogger(__name__)
 _IMPORT_AUDIT_HOOK_INSTALLED = False
 _MISSING_MODULES: set[str] = set()
 
-# Non-stdlib modules pip (or its vendored dependencies) may import lazily
-# after installation has started. Importing them eagerly keeps the audit
-# hook from misattributing them to a freshly installed distribution.
+# Modules pip or its vendored dependencies may import lazily after
+# installation starts. Load them before their files can be replaced.
 _EAGER_IMPORTS: tuple[str, ...] = (
     "pip._internal.operations.install.wheel",
+    # Python 3.13+ colored tracebacks import helpers while reporting errors.
+    # Preload them so a blocked import does not hide the original exception.
+    "traceback",
+    "_colorize",
+    "_suggestions",
+    "ast",
+    "difflib",
+    "unicodedata",
     # Used by rich when emitting output to a legacy Windows console.
     "pip._vendor.rich._windows_renderer",
 )

@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from pip._internal.cache import SimpleWheelCache
-from pip._internal.cli.status_codes import ERROR, SUCCESS
+from pip._internal.cli.status_codes import ERROR, SUCCESS, UNKNOWN_ERROR
 from pip._internal.models.direct_url import DirectUrl
 from pip._internal.models.index import PyPI, TestPyPI
 from pip._internal.models.link import Link
@@ -458,6 +458,33 @@ def test_install_warns_on_unexpected_post_install_import(
         "after pip install started" in result.stderr
     )
     assert "run_install.py:7)" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "code, expected",
+    [
+        ('raise RuntimeError("reporting failed")', "RuntimeError: reporting failed"),
+        ("missing_name", "NameError: name 'missing_name' is not defined"),
+        (
+            'compile("improt os", "<reporting>", "exec")',  # codespell:ignore improt
+            "SyntaxError: invalid syntax",
+        ),
+    ],
+)
+def test_install_preloads_traceback_dependencies(
+    script: PipTestEnvironment, code: str, expected: str
+) -> None:
+    """Preserve the original exception when reporting errors under the import guard."""
+    wheel_path = create_basic_wheel_for_package(script, "mypackage", "1.0")
+    runner = script.scratch_path / "run_install.py"
+    shutil.copyfile(
+        Path(__file__).parents[1] / "lib" / "install_with_traceback.py", runner
+    )
+
+    result = script.run("python", str(runner), str(wheel_path), code, expect_error=True)
+    assert result.returncode == UNKNOWN_ERROR
+    assert expected in result.stderr
+    assert "Blocked import" not in result.stderr
 
 
 def test_install_exit_status_code_when_no_requirements(
