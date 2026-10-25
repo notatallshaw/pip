@@ -1,14 +1,46 @@
 """Tests for all things related to the configuration"""
 
 import re
+import sys
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
 from pip._internal.configuration import Configuration, Kind, get_configuration_files
-from pip._internal.exceptions import ConfigurationError
+from pip._internal.exceptions import (
+    ConfigurationError,
+    ConfigurationFileCouldNotBeLoaded,
+)
 
 from tests.lib.configuration_helpers import ConfigurationMixin
+
+
+@pytest.mark.parametrize("value", ["plain", "café", "中文"])
+def test_configuration_default_encoding(tmpdir: Path, value: str) -> None:
+    config_file = tmpdir / "pip.ini"
+    try:
+        config_file.write_text(f"[global]\n# {value}\ncert = {value}\n")
+    except UnicodeEncodeError:
+        pytest.skip("Value cannot be represented in Python's default text encoding")
+
+    parser = Configuration(isolated=True)._construct_parser(str(config_file))
+
+    assert parser.get("global", "cert") == value
+
+
+@pytest.mark.skipif(not sys.flags.utf8_mode, reason="Requires Python UTF-8 mode")
+def test_configuration_invalid_utf8(tmpdir: Path) -> None:
+    config_file = tmpdir / "pip.ini"
+    config_file.write_bytes(b"[global]\ncert = \xff\n")
+
+    with pytest.raises(
+        ConfigurationFileCouldNotBeLoaded,
+        match="contains invalid utf-8 characters",
+    ) as error:
+        Configuration(isolated=True)._construct_parser(str(config_file))
+
+    assert str(config_file) in str(error.value)
 
 
 def test_invalid_load_only_lists_source_values() -> None:
