@@ -1,5 +1,8 @@
 import errno
 import sys
+from collections.abc import Iterator
+from pathlib import Path
+from types import ModuleType
 from unittest import mock
 
 import pytest
@@ -309,3 +312,174 @@ def test_eager_import_errors_are_preserved(
     importer.assert_called_once_with("optional_backend")
     monkeypatch.setattr(install, "_ACTIVE_INSTALLATIONS", set())
     install._prevent_import_hook("import", ("optional_backend",))
+
+
+@pytest.fixture
+def lazy_import_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[ModuleType]:
+    """Isolate installation dependencies with real lazy bindings on Python 3.15+."""
+    if sys.version_info < (3, 15):
+        pytest.skip("Lazy imports require Python 3.15")
+
+    owner = ModuleType("_pip_reify_owner")
+    monkeypatch.setitem(sys.modules, owner.__name__, owner)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.setattr(install, "_IMPORT_ERRORS", {})
+    try:
+        yield owner
+    finally:
+        for name in tuple(sys.modules):
+            if name.startswith("_pip_reify_") and name != owner.__name__:
+                del sys.modules[name]
+        sys.lazy_modules.difference_update(
+            name for name in tuple(sys.lazy_modules) if name.startswith("_pip_reify_")
+        )
+
+
+@pytest.mark.parametrize(
+    "statement, preloaded",
+    [
+        ("lazy import _pip_reify_first as alias", False),
+        ("lazy from _pip_reify_first import value as alias", False),
+        ("lazy import _pip_reify_first as alias", True),
+    ],
+)
+def test_reify_lazy_imports_loads_transitive_targets(
+    lazy_import_owner: ModuleType, tmp_path: Path, statement: str, preloaded: bool
+) -> None:
+    (tmp_path / "_pip_reify_first.py").write_text(
+        "lazy import _pip_reify_second\nvalue = 42\n"
+    )
+    (tmp_path / "_pip_reify_second.py").write_text("value = 43\n")
+    if preloaded:
+        __import__("_pip_reify_first")
+    exec(statement, lazy_import_owner.__dict__)
+    assert ("_pip_reify_first" in sys.modules) == preloaded
+
+    install._reify_lazy_imports((lazy_import_owner.__name__,))
+
+    assert "_pip_reify_first" in sys.modules
+    assert "_pip_reify_second" in sys.modules
+    assert not install._IMPORT_ERRORS
+
+
+def test_reify_lazy_imports_revisits_existing_owner(
+    lazy_import_owner: ModuleType, tmp_path: Path
+) -> None:
+    (tmp_path / "_pip_reify_first.py").write_text(
+        'import sys\nexec("lazy import _pip_reify_second", '
+        'sys.modules["_pip_reify_owner"].__dict__)\n'
+    )
+    (tmp_path / "_pip_reify_second.py").write_text("value = 42\n")
+    exec("lazy import _pip_reify_first", lazy_import_owner.__dict__)
+
+    install._reify_lazy_imports((lazy_import_owner.__name__,))
+
+    assert "_pip_reify_second" in sys.modules
+
+
+def test_reify_lazy_imports_resolves_exported_attributes(
+    lazy_import_owner: ModuleType, tmp_path: Path
+) -> None:
+    source = tmp_path / "_pip_reify_exports.py"
+    source.write_text(
+        "def __getattr__(name):\n"
+        '    if name == "exported":\n'
+        "        import _pip_reify_dependency\n"
+        "        return _pip_reify_dependency\n"
+        "    raise AttributeError(name)\n"
+    )
+    (tmp_path / "_pip_reify_dependency.py").write_text("value = 42\n")
+    exec(
+        "lazy from _pip_reify_exports import exported as alias",
+        lazy_import_owner.__dict__,
+    )
+
+    install._reify_lazy_imports((lazy_import_owner.__name__,))
+
+    assert "_pip_reify_dependency" in sys.modules
+    assert not install._IMPORT_ERRORS
+
+
+def test_reify_lazy_imports_leaves_unrelated_targets_lazy(
+    lazy_import_owner: ModuleType, tmp_path: Path
+) -> None:
+    unrelated = ModuleType("_pip_reify_unrelated")
+    marker = tmp_path / "unrelated-imported"
+    (tmp_path / "_pip_reify_unneeded.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).touch()\n"
+        'raise AssertionError("Unrelated lazy import executed")\n'
+    )
+    exec("lazy import _pip_reify_unneeded", unrelated.__dict__)
+
+    install._reify_lazy_imports((lazy_import_owner.__name__,))
+
+    assert not marker.exists()
+    assert "_pip_reify_unneeded" not in sys.modules
+
+
+def test_reify_lazy_imports_ignores_unavailable_eager_module(
+    lazy_import_owner: ModuleType,
+) -> None:
+    name = "_pip_reify_disabled"
+    with mock.patch.dict(sys.modules, {name: None}):
+        install._eagerly_import_modules((name,))
+        install._reify_lazy_imports((name,))
+
+    assert isinstance(install._IMPORT_ERRORS[name], ModuleNotFoundError)
+
+
+@pytest.mark.parametrize("exception", ["ImportError", "RuntimeError"])
+def test_reify_lazy_imports_attempts_failed_targets_once(
+    lazy_import_owner: ModuleType,
+    tmp_path: Path,
+    exception: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts: list[int] = []
+    lazy_import_owner.__dict__["attempts"] = attempts
+    arguments = (
+        "'optional dependency unavailable', name='_pip_reify_failure'"
+        if exception == "ImportError"
+        else "'optional dependency unavailable'"
+    )
+    (tmp_path / "_pip_reify_failure.py").write_text(
+        "import _pip_reify_owner\n"
+        "_pip_reify_owner.attempts.append(1)\n"
+        "lazy import _pip_reify_second\n"
+        f"raise {exception}({arguments})\n"
+    )
+    (tmp_path / "_pip_reify_second.py").write_text("value = 42\n")
+    exec("lazy import _pip_reify_failure", lazy_import_owner.__dict__)
+
+    install._reify_lazy_imports((lazy_import_owner.__name__,))
+
+    assert attempts == [1]
+    assert "_pip_reify_second" not in sys.modules
+    assert ("_pip_reify_failure" in install._IMPORT_ERRORS) == (
+        exception == "ImportError"
+    )
+    if exception == "ImportError":
+        monkeypatch.setattr(install, "_ACTIVE_INSTALLATIONS", {object()})
+        with pytest.raises(ImportError) as cached:
+            install._prevent_import_hook("import", ("_pip_reify_failure",))
+        assert type(cached.value) is ImportError
+        assert str(cached.value) == "optional dependency unavailable"
+
+
+def test_reify_lazy_imports_preserves_dependency_import_error(
+    lazy_import_owner: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    name = "_pip_reify_failure"
+    source = tmp_path / f"{name}.py"
+    source.write_text("import _pip_reify_missing_dependency\n")
+    exec(f"lazy import {name} as dependency", lazy_import_owner.__dict__)
+
+    install._reify_lazy_imports((lazy_import_owner.__name__,))
+
+    assert "_pip_reify_missing_dependency" in install._IMPORT_ERRORS
+    monkeypatch.setattr(install, "_ACTIVE_INSTALLATIONS", {object()})
+    with pytest.raises(ModuleNotFoundError, match="No module named") as missing:
+        install._prevent_import_hook("import", ("_pip_reify_missing_dependency",))
+    assert missing.value.name == "_pip_reify_missing_dependency"

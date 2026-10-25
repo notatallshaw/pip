@@ -496,6 +496,39 @@ def test_install_preloads_traceback_dependencies(
     assert "Blocked import" not in result.stderr
 
 
+def test_install_preloads_registered_import_before_replacing_module(
+    script: PipTestEnvironment,
+) -> None:
+    """A post-install lazy reference must use the module loaded before replacement."""
+    dependency = "pip_reify_dependency.py"
+    script.site_packages_path.joinpath(dependency).write_text(
+        "import pip._internal.commands.install as install\n"
+        "assert not install._ACTIVE_INSTALLATIONS\n"
+        'value = "before installation"\n'
+    )
+    script.site_packages_path.joinpath("pip_eager_owner.py").write_text(
+        '__lazy_modules__ = ["pip_reify_dependency"]\n'
+        "import pip_reify_dependency as dependency\n"
+    )
+    wheel_path = create_basic_wheel_for_package(
+        script,
+        "mypackage",
+        "1.0",
+        extra_files={dependency: 'raise AssertionError("New module executed")\n'},
+    )
+    runner = script.scratch_path / "run_install.py"
+    shutil.copyfile(
+        Path(__file__).parents[1] / "lib" / "install_with_registered_import.py", runner
+    )
+
+    result = script.run("python", str(runner), str(wheel_path))
+
+    assert result.returncode == SUCCESS
+    result.assert_installed("mypackage", editable=False)
+    result.did_update(script.site_packages / dependency)
+    result.did_create(script.site_packages / "mypackage-1.0.dist-info" / "RECORD")
+
+
 def test_install_exit_status_code_when_no_requirements(
     script: PipTestEnvironment,
 ) -> None:
