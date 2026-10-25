@@ -11,7 +11,7 @@ from pip._internal.req import InstallationResult
 
 def main() -> int:
     def summary(installed: list[InstallationResult], env: BaseEnvironment) -> str:
-        assert install._IMPORT_AUDIT_HOOK_INSTALLED
+        assert install._ACTIVE_INSTALLATIONS
         exec(sys.argv[2])
         raise AssertionError("Expected reporting code to raise an exception")
 

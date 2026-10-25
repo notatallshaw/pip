@@ -695,6 +695,44 @@ def test_wheel_compile_syntax_error(script: PipTestEnvironment) -> None:
     assert not (script.site_packages_path / "syntaxwheel-1.0.dist-info").exists()
 
 
+def test_wheel_compilation_blocks_cold_codecs(script: PipTestEnvironment) -> None:
+    package = create_basic_wheel_for_package(
+        script,
+        "encoded",
+        "1.0",
+        extra_files={
+            "encoded/cold.py": "# coding: big5\nvalue = 42\n",
+            "encoded/warm.py": "# coding: cp874\nvalue = 42\n",
+            "encoded/registered_cold.py": "# coding: cold_probe\nvalue = 42\n",
+            "encoded/registered_warm.py": "# coding: warm_probe\nvalue = 42\n",
+        },
+    )
+    runner = script.scratch_path / "install_encoded.py"
+    shutil.copyfile(
+        Path(__file__).parents[1] / "lib" / "install_with_cold_codecs.py", runner
+    )
+
+    result = script.run("python", str(runner), str(package), expect_stderr=True)
+
+    result.assert_installed("encoded", editable=False)
+    assert "Unsafe import" in result.stderr
+    assert "after pip install completed" in result.stderr
+    for module in ("__init__", "warm", "registered_warm"):
+        assert list(
+            script.site_packages_path.glob(f"encoded/__pycache__/{module}.*.pyc")
+        )
+    for module in ("cold", "registered_cold"):
+        assert not list(
+            script.site_packages_path.glob(f"encoded/__pycache__/{module}.*.pyc")
+        )
+    result.did_create(script.site_packages / "encoded-1.0.dist-info" / "RECORD")
+
+    result = script.pip("uninstall", "encoded", "-y")
+    assert "Successfully uninstalled encoded-1.0" in result.stdout
+    assert not (script.site_packages_path / "encoded").exists()
+    assert not (script.site_packages_path / "encoded-1.0.dist-info").exists()
+
+
 def test_wheel_install_with_no_cache_dir(
     script: PipTestEnvironment, data: TestData
 ) -> None:
