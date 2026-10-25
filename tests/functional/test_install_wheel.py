@@ -670,11 +670,29 @@ def test_install_from_wheel_uninstalls_old_version(
     result.did_not_create(dist_info_folder)
 
 
-def test_wheel_compile_syntax_error(script: PipTestEnvironment, data: TestData) -> None:
-    package = data.packages.joinpath("compilewheel-1.0-py2.py3-none-any.whl")
+def test_wheel_compile_syntax_error(script: PipTestEnvironment) -> None:
+    package = create_basic_wheel_for_package(
+        script,
+        "syntaxwheel",
+        "1.0",
+        extra_files={
+            "syntaxwheel/a_bad.py": "value = 1)\n",
+            "syntaxwheel/b_good.py": "value = 42\n",
+        },
+    )
     result = script.pip("install", "--compile", package, "--no-index")
-    assert "yield from" not in result.stdout
-    assert "SyntaxError: " not in result.stdout
+
+    result.assert_installed("syntaxwheel", editable=False)
+    assert not list(
+        script.site_packages_path.glob("syntaxwheel/__pycache__/a_bad.*.pyc")
+    )
+    assert list(script.site_packages_path.glob("syntaxwheel/__pycache__/b_good.*.pyc"))
+    result.did_create(script.site_packages / "syntaxwheel-1.0.dist-info/RECORD")
+
+    result = script.pip("uninstall", "syntaxwheel", "-y")
+    assert "Successfully uninstalled syntaxwheel-1.0" in result.stdout
+    assert not (script.site_packages_path / "syntaxwheel").exists()
+    assert not (script.site_packages_path / "syntaxwheel-1.0.dist-info").exists()
 
 
 def test_wheel_install_with_no_cache_dir(
