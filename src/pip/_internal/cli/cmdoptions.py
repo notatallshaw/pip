@@ -425,7 +425,8 @@ client_cert: Callable[..., Option] = partial(
     type="path",
     default=None,
     metavar="path",
-    help="Path to SSL client certificate, a single file containing the "
+    help="Path to SSL client certificate for origin server authentication, "
+    "a single file containing the "
     "private key and the certificate in PEM format.",
 )
 
