@@ -32,9 +32,13 @@ def static_sdist(script: PipTestEnvironment) -> Path:
 
 
 @pytest.mark.parametrize("command", ["download", "lock", "install"])
+@pytest.mark.parametrize("resolver", ["resolvelib", "legacy"])
 def test_static_sdist_without_backend(
-    script: PipTestEnvironment, static_sdist: Path, command: str
+    script: PipTestEnvironment, static_sdist: Path, command: str, resolver: str
 ) -> None:
+    script.environ["PIP_USE_DEPRECATED"] = (
+        "legacy-resolver" if resolver == "legacy" else ""
+    )
     wheelhouse = script.scratch_path / "wheelhouse"
     wheelhouse.mkdir()
     for name in ("dependency", "accelerator"):
@@ -232,3 +236,37 @@ def test_static_sdist_preserves_direct_dependency_url(
     )
     result = script.pip("download", "--no-index", "--dest", "download", archive)
     result.did_create(Path("scratch") / "download" / dependency.name)
+
+
+@pytest.mark.parametrize("ignore_requires_python", [False, True])
+def test_legacy_static_sdist_python_compatibility(
+    script: PipTestEnvironment, ignore_requires_python: bool
+) -> None:
+    archive = create_basic_sdist_for_package(
+        script,
+        "demo",
+        "1.0",
+        extra_files={
+            "PKG-INFO": (
+                "Metadata-Version: 2.2\nName: demo\nVersion: 1.0\n"
+                "Requires-Python: >=99\n"
+            ),
+            "pyproject.toml": (
+                '[build-system]\nrequires = ["unavailable-build-backend"]\n'
+                'build-backend = "backend"\nbackend-path = ["."]\n'
+            ),
+            "backend.py": 'raise RuntimeError("backend must not execute")\n',
+        },
+    )
+    args = ["--ignore-requires-python"] if ignore_requires_python else []
+    result = script.pip(
+        "download",
+        "--use-deprecated=legacy-resolver",
+        "--no-index",
+        "--no-deps",
+        *args,
+        archive,
+        expect_error=not ignore_requires_python,
+    )
+    if not ignore_requires_python:
+        assert "requires a different Python" in result.stderr

@@ -783,7 +783,6 @@ class RequirementPreparer:
             and not link.subdirectory_fragment
             and self.static_metadata_fields is not None
             and not self.check_build_deps
-            and not self.legacy_resolver
         ):
             assert req.source_dir is not None
             static_dist = self._get_static_sdist_metadata(req)
