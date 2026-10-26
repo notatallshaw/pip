@@ -9,6 +9,7 @@ from pip._vendor.packaging.utils import canonicalize_name
 from pip._vendor.packaging.version import Version
 
 from pip._internal.distributions.sdist import SDIST_RESOLUTION_FIELDS
+from pip._internal.exceptions import InstallationError
 from pip._internal.metadata import get_metadata_distribution
 from pip._internal.req.constructors import install_req_from_line
 from pip._internal.resolution.resolvelib.factory import (
@@ -243,3 +244,52 @@ def test_reusing_factory_does_not_reuse_root_dependent_partial_metadata(
         factory._make_base_candidate_from_link(
             template.link, template, canonicalize_name("cache-demo"), Version("1.0")
         )
+
+
+@pytest.mark.parametrize(
+    "marker", ['"test" in dependency_groups', 'os_name ~= "not-a-version"']
+)
+def test_marker_errors_preserve_constraint_validation_and_reset_preflight(
+    factory: Factory, marker: str
+) -> None:
+    roots = [
+        install_req_from_line("dependency==1"),
+        install_req_from_line("source[speed]"),
+        install_req_from_line(
+            "unused @ https://example.invalid/unused-1-py3-none-any.whl",
+            constraint=True,
+        ),
+        install_req_from_line(
+            "unused @ https://example.invalid/unused-2-py3-none-any.whl",
+            constraint=True,
+        ),
+    ]
+    factory.collect_root_requirements(roots)
+    dist = get_metadata_distribution(
+        b"Metadata-Version: 2.6\nName: source\nVersion: 1\n"
+        b"Requires-Dist: dependency==2\nDynamic: Requires-Dist\n",
+        "source-1.tar.gz",
+        "source",
+    )
+    linked = install_req_from_line("source @ https://example.invalid/source-1.tar.gz")
+    assert factory.reject_static_dependencies(linked, dist)
+    assert factory._mandatory_extras
+    assert factory._empty_link_domains
+    invalid_constraint = install_req_from_line(
+        "https://example.invalid/snapshot.tar.gz", constraint=True
+    )
+    uncertain = install_req_from_line(f"other==1; {marker}")
+
+    with pytest.raises(InstallationError, match="Unnamed requirements"):
+        factory.collect_root_requirements([invalid_constraint, uncertain])
+
+    assert not factory._mandatory_versions
+    assert not factory._mandatory_extras
+    assert not factory._mandatory_candidate_versions
+    assert not factory._empty_link_domains
+    assert not factory._uses_dependency_preflight()
+    assert not factory._static_dependency_rejections
+    assert not factory.reject_static_dependencies(linked, dist)
+
+    factory.collect_root_requirements(roots)
+    assert factory.reject_static_dependencies(linked, dist)

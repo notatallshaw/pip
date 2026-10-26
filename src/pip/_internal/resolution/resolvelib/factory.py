@@ -14,6 +14,7 @@ from typing import (
     cast,
 )
 
+from pip._vendor.packaging.markers import UndefinedComparison, UndefinedEnvironmentName
 from pip._vendor.packaging.requirements import InvalidRequirement
 from pip._vendor.packaging.specifiers import SpecifierSet
 from pip._vendor.packaging.utils import NormalizedName, canonicalize_name
@@ -165,6 +166,7 @@ class Factory:
         ] = MappingProxyType({})
         self._static_dependency_rejections: set[Link] = set()
         self._empty_link_domains: frozenset[NormalizedName] = frozenset()
+        self._dependency_preflight_enabled = True
 
         if not ignore_installed:
             env = get_default_environment()
@@ -607,6 +609,7 @@ class Factory:
     def _set_mandatory_root_requirements(
         self, root_ireqs: list[InstallRequirement]
     ) -> None:
+        self._dependency_preflight_enabled = True
         # Rejected partial metadata is only valid for the previous root domains.
         for link in self._static_dependency_rejections:
             self._link_candidate_cache.pop(link, None)
@@ -656,7 +659,8 @@ class Factory:
 
     def _uses_dependency_preflight(self) -> bool:
         return (
-            self.preparer.static_dependency_rejector is not None
+            self._dependency_preflight_enabled
+            and self.preparer.static_dependency_rejector is not None
             and self.preparer.static_metadata_fields is not None
             and not self.preparer.check_build_deps
             and not self.preparer.legacy_resolver
@@ -689,7 +693,15 @@ class Factory:
     def collect_root_requirements(
         self, root_ireqs: list[InstallRequirement]
     ) -> CollectedRootRequirements:
-        self._set_mandatory_root_requirements(root_ireqs)
+        try:
+            self._set_mandatory_root_requirements(root_ireqs)
+        except (UndefinedComparison, UndefinedEnvironmentName):
+            # Preserve the owning collection's order of validation and preparation.
+            self._mandatory_versions = MappingProxyType({})
+            self._mandatory_extras = MappingProxyType({})
+            self._mandatory_candidate_versions = MappingProxyType({})
+            self._empty_link_domains = frozenset()
+            self._dependency_preflight_enabled = False
         collected = CollectedRootRequirements([], {}, {})
         for i, ireq in enumerate(root_ireqs):
             if ireq.constraint:
@@ -735,6 +747,8 @@ class Factory:
         self, req: InstallRequirement, dist: BaseDistribution
     ) -> bool:
         """Reject fixed dependencies that cannot meet mandatory root domains."""
+        if not self._dependency_preflight_enabled:
+            return False
         if req.name is not None and canonicalize_name(req.name) != dist.canonical_name:
             raise MetadataInconsistent(
                 req, "name", canonicalize_name(req.name), dist.canonical_name
