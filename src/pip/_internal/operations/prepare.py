@@ -22,6 +22,7 @@ from pip._internal.distributions.installed import InstalledDistribution
 from pip._internal.distributions.sdist import SourceDistribution, read_sdist_metadata
 from pip._internal.exceptions import (
     DirectoryUrlHashUnsupported,
+    HashError,
     HashMismatch,
     HashUnpinned,
     InstallationError,
@@ -696,9 +697,36 @@ class RequirementPreparer:
                 )
             req.needs_build_preparation = False
 
-    def _prepare_linked_requirement(
+    def prepare_download_without_metadata(self, req: InstallRequirement) -> None:
+        """Validate an anonymous source archive without requesting its metadata."""
+        assert req.link is not None
+        self._log_preparing_link(req)
+        with indent_log():
+            try:
+                local_file = self._prepare_linked_requirement_files(req, False)
+            except HashError as error:
+                error.req = req
+                raise
+            assert local_file is not None
+            req.load_pyproject_toml()
+            if self.check_build_deps:
+                dist = SourceDistribution(req)
+                tracker_id = dist.build_tracker_id
+                assert tracker_id is not None
+                with self.build_tracker.track(req, tracker_id):
+                    dist.prepare_build_environment(
+                        self.build_env_installer,
+                        self.build_isolation,
+                        self.check_build_deps,
+                        self.allow_editables,
+                    )
+            else:
+                req.configure_backend(req.build_env.python_executable)
+
+    def _prepare_linked_requirement_files(
         self, req: InstallRequirement, parallel_builds: bool
-    ) -> BaseDistribution:
+    ) -> File | None:
+        """Acquire, verify and unpack a linked requirement's files."""
         assert req.link
         link = req.link
 
@@ -782,6 +810,15 @@ class RequirementPreparer:
         # preserve the file path on the requirement.
         if local_file:
             req.local_file_path = local_file.path
+
+        return local_file
+
+    def _prepare_linked_requirement(
+        self, req: InstallRequirement, parallel_builds: bool
+    ) -> BaseDistribution:
+        local_file = self._prepare_linked_requirement_files(req, parallel_builds)
+        assert req.link is not None
+        link = req.link
 
         req.build_wheel_for_metadata = self._should_build_wheel_for_metadata(req)
 

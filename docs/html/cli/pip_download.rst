@@ -59,6 +59,15 @@ and let pip download know where to find them using ``--find-links``.
    - For the Python version, use :func:`sysconfig.get_python_version() <sysconfig.get_python_version>`.
    - For the platform, use :func:`packaging.tags.platform_tags() <packaging.tags.platform_tags>`.
 
+Downloading one source archive without metadata
+-----------------------------------------------
+
+Use ``--no-deps --ignore-requires-python`` to download a single unnamed source
+archive URL or path without requesting project metadata. This requires no other
+active requirements and no active runtime constraints. The downloaded file keeps
+the URI's filename. Hash verification, archive extraction and project declaration
+checks still apply. Explicit ``--check-build-dependencies`` can run build code.
+
 Options
 =======
 
