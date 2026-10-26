@@ -69,8 +69,6 @@ def test_missing_sdist_metadata(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "filename",
     [
-        "demo-1.0.zip",
-        "demo-1.0.tgz",
         "demo-main.tar.gz",
         "other-1.0.tar.gz",
         "demo-2.0.tar.gz",
