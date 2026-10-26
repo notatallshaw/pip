@@ -145,6 +145,9 @@ class Factory:
         self._mandatory_extras: Mapping[NormalizedName, frozenset[NormalizedName]] = (
             MappingProxyType({})
         )
+        self._mandatory_candidate_versions: Mapping[
+            NormalizedName, tuple[Version, ...]
+        ] = MappingProxyType({})
         self._static_dependency_rejections: set[Link] = set()
 
         if not ignore_installed:
@@ -592,6 +595,7 @@ class Factory:
         if self._static_dependency_rejections:
             self._extras_candidate_cache.clear()
             self._static_dependency_rejections.clear()
+        self._mandatory_candidate_versions = MappingProxyType({})
 
         versions: dict[NormalizedName, SpecifierSet] = {}
         extras: dict[NormalizedName, frozenset[NormalizedName]] = {}
@@ -608,6 +612,52 @@ class Factory:
                 )
         # Build the complete snapshot before collecting eager URL requirements.
         self._mandatory_versions = MappingProxyType(versions)
+        self._mandatory_extras = MappingProxyType(extras)
+
+        if self._uses_dependency_preflight():
+            wheel_roots: list[Requirement] = []
+            for ireq in root_ireqs:
+                if (
+                    ireq.constraint
+                    or ireq.link is None
+                    or not ireq.link.is_wheel
+                    or not ireq.match_markers()
+                ):
+                    continue
+                # Mandatory wheel roots expose actual metadata without a backend.
+                wheel_roots.extend(self._make_requirements_from_install_req(ireq, ()))
+            self._add_mandatory_candidate_facts(wheel_roots)
+
+    def _uses_dependency_preflight(self) -> bool:
+        return (
+            self.preparer.static_dependency_rejector is not None
+            and self.preparer.static_metadata_fields is not None
+            and not self.preparer.check_build_deps
+            and not self.preparer.legacy_resolver
+        )
+
+    def _add_mandatory_candidate_facts(
+        self, requirements: Iterable[Requirement]
+    ) -> None:
+        versions = dict(self._mandatory_candidate_versions)
+        extras = dict(self._mandatory_extras)
+        for requirement in requirements:
+            candidate, _ = requirement.get_candidate_lookup()
+            if candidate is None:
+                continue
+            name = candidate.project_name
+            requested = get_requirement(candidate.name).extras
+            extras[name] = extras.get(name, frozenset()) | frozenset(
+                canonicalize_name(extra) for extra in requested
+            )
+            try:
+                version = candidate.version
+            except InvalidVersion:
+                continue
+            known = versions.get(name, ())
+            if not any(str(previous) == str(version) for previous in known):
+                versions[name] = (*known, version)
+        self._mandatory_candidate_versions = MappingProxyType(versions)
         self._mandatory_extras = MappingProxyType(extras)
 
     def collect_root_requirements(
@@ -642,6 +692,8 @@ class Factory:
                 if ireq.user_supplied and template.name not in collected.user_requested:
                     collected.user_requested[template.name] = i
                 collected.requirements.extend(reqs)
+                if self._uses_dependency_preflight():
+                    self._add_mandatory_candidate_facts(reqs)
         # Put requirements with extras at the end of the root requires. This does not
         # affect resolvelib's picking preference but it does affect its initial criteria
         # population: by putting extras at the end we enable the candidate finder to
@@ -674,7 +726,11 @@ class Factory:
             versions[name] = versions.get(name, SpecifierSet()) & dependency.specifier
         for name, required in versions.items():
             mandatory = self._mandatory_versions.get(name, SpecifierSet())
-            if _has_pinned_version_conflict(mandatory, required):
+            combined = mandatory & required
+            known = self._mandatory_candidate_versions.get(name, ())
+            if any(
+                not combined.contains(version, prereleases=True) for version in known
+            ) or _has_pinned_version_conflict(mandatory, required):
                 assert req.link is not None
                 self._static_dependency_rejections.add(req.link)
                 return True
