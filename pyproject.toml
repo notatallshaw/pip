@@ -194,8 +194,6 @@ drop = [
   '^pygments/lexers/(?!python|__init__|_mapping).*\.py$',
   '^pygments/formatters/(?!__init__|_mapping).*\.py$',
   '^pygments/cmdline\.py$',
-  # trim rich's markdown support
-  "rich/markdown.py",
   # trim parts of distlib that aren't related to scripts
   '^distlib/(?!__init__|compat|resources|scripts|util).*\.py$',
 ]
