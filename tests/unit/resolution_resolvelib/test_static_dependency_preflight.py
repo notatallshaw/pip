@@ -34,6 +34,9 @@ from tests.lib.wheel import make_wheel
         ("!=2+local", "==2", False),
         ("!=2", "==2+local", True),
         ("===1", "==2", False),
+        ("===1,==1", "==2", True),
+        ("===1,>=2", "==1", True),
+        ("===1", "==1+local", False),
         ("==1.*", "==2.*", False),
         ("==1.*", "==2", True),
         ("==1", "==2.*", True),
@@ -167,6 +170,30 @@ def test_linked_root_extras_need_actual_candidate_provenance(factory: Factory) -
     linked = install_req_from_line("source @ https://example.invalid/source-1.tar.gz")
 
     assert not factory.reject_static_dependencies(linked, dist)
+
+
+@pytest.mark.parametrize(
+    "root, dependency, conflict",
+    [
+        ("source<2", "", True),
+        ("source>=2", "", False),
+        ("source===2", "", False),
+        ("source", "source<2", True),
+        ("source", "source>=2", False),
+        ("source", "source===2", False),
+    ],
+)
+def test_known_source_identity_points(
+    factory: Factory, root: str, dependency: str, conflict: bool
+) -> None:
+    factory.collect_root_requirements([install_req_from_line(root)])
+    metadata = "Metadata-Version: 2.2\nName: source\nVersion: 2.0\n"
+    if dependency:
+        metadata += f"Requires-Dist: {dependency}\n"
+    dist = get_metadata_distribution(metadata.encode(), "source-2.tar.gz", "source")
+    linked = install_req_from_line("source @ https://example.invalid/source-2.tar.gz")
+
+    assert factory.reject_static_dependencies(linked, dist) == conflict
 
 
 def test_reusing_factory_does_not_reuse_root_dependent_partial_metadata(

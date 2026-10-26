@@ -33,7 +33,7 @@ from pip._internal.exceptions import (
 )
 from pip._internal.index.package_finder import PackageFinder
 from pip._internal.metadata import BaseDistribution, get_default_environment
-from pip._internal.models.link import Link
+from pip._internal.models.link import Link, links_equivalent
 from pip._internal.models.wheel import Wheel
 from pip._internal.operations.prepare import RequirementPreparer
 from pip._internal.req.constructors import (
@@ -82,22 +82,37 @@ C = TypeVar("C")
 Cache = dict[Link, C]
 
 
+def _ordinary_specifiers(specifiers: SpecifierSet) -> SpecifierSet:
+    """Weaken a rejection proof by dropping arbitrary string equalities."""
+    if not any(specifier.operator == "===" for specifier in specifiers):
+        return specifiers
+    ordinary = (
+        str(specifier) for specifier in specifiers if specifier.operator != "==="
+    )
+    return SpecifierSet(",".join(ordinary))
+
+
 def _has_pinned_version_conflict(left: SpecifierSet, right: SpecifierSet) -> bool:
     """Prove an empty intersection when an ordinary equality fixes the version."""
-    specifiers = tuple(left) + tuple(right)
-    if any(specifier.operator == "===" for specifier in specifiers):
-        return False
+    combined = _ordinary_specifiers(left & right)
     pins = {
         Version(specifier.version)
-        for specifier in specifiers
+        for specifier in combined
         if specifier.operator == "==" and not specifier.version.endswith(".*")
     }
     if not pins:
         return False
 
     # Include local pins from both sides: ==1 and ==1+local are compatible.
-    combined = left & right
     return not any(combined.contains(version, prereleases=True) for version in pins)
+
+
+def _has_conflicting_links(links: Iterable[Link]) -> bool:
+    iterator = iter(links)
+    first = next(iterator, None)
+    return first is not None and any(
+        not links_equivalent(first, link) for link in iterator
+    )
 
 
 class CollectedRootRequirements(NamedTuple):
@@ -149,6 +164,7 @@ class Factory:
             NormalizedName, tuple[Version, ...]
         ] = MappingProxyType({})
         self._static_dependency_rejections: set[Link] = set()
+        self._empty_link_domains: frozenset[NormalizedName] = frozenset()
 
         if not ignore_installed:
             env = get_default_environment()
@@ -465,6 +481,8 @@ class Factory:
         prefers_installed: bool,
         is_satisfied_by: Callable[[Requirement, Candidate], bool],
     ) -> Iterable[Candidate]:
+        if _has_conflicting_links(constraint.links):
+            return ()
         # Collect basic lookup information from the requirements.
         explicit_candidates: set[Candidate] = set()
         ireqs: list[InstallRequirement] = []
@@ -599,6 +617,7 @@ class Factory:
 
         versions: dict[NormalizedName, SpecifierSet] = {}
         extras: dict[NormalizedName, frozenset[NormalizedName]] = {}
+        constraint_links: dict[NormalizedName, list[Link]] = {}
         for ireq in root_ireqs:
             if ireq.req is None or not ireq.match_markers():
                 continue
@@ -606,6 +625,8 @@ class Factory:
             # Explicit URL roots use their candidate's version, not filename hints.
             if ireq.link is None or ireq.constraint:
                 versions[name] = versions.get(name, SpecifierSet()) & ireq.req.specifier
+            if ireq.constraint and ireq.link is not None:
+                constraint_links.setdefault(name, []).append(ireq.link)
             if not ireq.constraint and ireq.link is None:
                 extras[name] = extras.get(name, frozenset()) | frozenset(
                     canonicalize_name(extra) for extra in ireq.extras
@@ -613,6 +634,11 @@ class Factory:
         # Build the complete snapshot before collecting eager URL requirements.
         self._mandatory_versions = MappingProxyType(versions)
         self._mandatory_extras = MappingProxyType(extras)
+        self._empty_link_domains = frozenset(
+            name
+            for name, links in constraint_links.items()
+            if _has_conflicting_links(links)
+        )
 
         if self._uses_dependency_preflight():
             wheel_roots: list[Requirement] = []
@@ -709,6 +735,23 @@ class Factory:
         self, req: InstallRequirement, dist: BaseDistribution
     ) -> bool:
         """Reject fixed dependencies that cannot meet mandatory root domains."""
+        if req.name is not None and canonicalize_name(req.name) != dist.canonical_name:
+            raise MetadataInconsistent(
+                req, "name", canonicalize_name(req.name), dist.canonical_name
+            )
+        own_domain = _ordinary_specifiers(
+            self._mandatory_versions.get(dist.canonical_name, SpecifierSet())
+        )
+        known_own = self._mandatory_candidate_versions.get(dist.canonical_name, ())
+        if (
+            dist.canonical_name in self._empty_link_domains
+            or not own_domain.contains(dist.version, prereleases=True)
+            or any(version != dist.version for version in known_own)
+        ):
+            assert req.link is not None
+            self._static_dependency_rejections.add(req.link)
+            return True
+
         requested_extras = self._mandatory_extras.get(dist.canonical_name, frozenset())
         known_extras = requested_extras.intersection(dist.iter_provided_extras())
         try:
@@ -726,11 +769,20 @@ class Factory:
             versions[name] = versions.get(name, SpecifierSet()) & dependency.specifier
         for name, required in versions.items():
             mandatory = self._mandatory_versions.get(name, SpecifierSet())
-            combined = mandatory & required
+            combined = _ordinary_specifiers(mandatory & required)
             known = self._mandatory_candidate_versions.get(name, ())
-            if any(
-                not combined.contains(version, prereleases=True) for version in known
-            ) or _has_pinned_version_conflict(mandatory, required):
+            self_conflict = name == dist.canonical_name and not _ordinary_specifiers(
+                required
+            ).contains(dist.version, prereleases=True)
+            if (
+                name in self._empty_link_domains
+                or self_conflict
+                or any(
+                    not combined.contains(version, prereleases=True)
+                    for version in known
+                )
+                or _has_pinned_version_conflict(mandatory, required)
+            ):
                 assert req.link is not None
                 self._static_dependency_rejections.add(req.link)
                 return True
