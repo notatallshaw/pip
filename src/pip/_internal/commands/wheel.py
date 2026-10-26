@@ -7,6 +7,7 @@ from pip._internal.cache import WheelCache
 from pip._internal.cli import cmdoptions
 from pip._internal.cli.req_command import RequirementCommand, with_cleanup
 from pip._internal.cli.status_codes import SUCCESS
+from pip._internal.distributions.sdist import SDIST_RESOLUTION_FIELDS
 from pip._internal.exceptions import CommandError
 from pip._internal.operations.build.build_tracker import get_build_tracker
 from pip._internal.req.req_install import (
@@ -127,6 +128,7 @@ class WheelCommand(RequirementCommand):
             use_user_site=False,
             verbosity=self.verbosity,
             allow_editables=False,
+            static_metadata_fields=SDIST_RESOLUTION_FIELDS,
         )
 
         resolver = self.make_resolver(
@@ -151,6 +153,7 @@ class WheelCommand(RequirementCommand):
                 reqs_to_build.append(req)
 
         # build wheels
+        preparer.prepare_build_requirements(reqs_to_build)
         build_successes, build_failures = build(
             reqs_to_build,
             wheel_cache=wheel_cache,

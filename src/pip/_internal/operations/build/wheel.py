@@ -13,14 +13,13 @@ logger = logging.getLogger(__name__)
 def build_wheel_pep517(
     name: str,
     backend: BuildBackendHookCaller,
-    metadata_directory: str,
+    metadata_directory: str | None,
     wheel_directory: str,
 ) -> str | None:
     """Build one InstallRequirement using the PEP 517 build process.
 
     Returns path to wheel if successfully built. Otherwise, returns None.
     """
-    assert metadata_directory is not None
     try:
         logger.debug("Destination directory: %s", wheel_directory)
 

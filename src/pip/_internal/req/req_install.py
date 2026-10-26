@@ -161,6 +161,10 @@ class InstallRequirement:
         self._distribution: BaseDistribution | None = None
         self.unresolved_metadata_fields: frozenset[str] = frozenset()
 
+        # Retain the sdist promises until the built wheel can be checked.
+        self.static_sdist_metadata: BaseDistribution | None = None
+        self.needs_build_preparation = False
+
         # The static build requirements (from pyproject.toml)
         self.pyproject_requires: list[str] | None = None
 
