@@ -788,7 +788,6 @@ class RequirementPreparer:
             and not req.is_wheel
             and not link.subdirectory_fragment
             and self.static_metadata_fields is not None
-            and not self.check_build_deps
             and not self.legacy_resolver
         ):
             assert req.source_dir is not None
@@ -803,6 +802,8 @@ class RequirementPreparer:
                 req.static_sdist_metadata = static_dist
                 req.needs_build_preparation = True
                 req.update_metadata_requirement()
+                if self.check_build_deps:
+                    self.prepare_build_requirements([req])
                 return static_dist
 
         dist = _get_prepared_distribution(
