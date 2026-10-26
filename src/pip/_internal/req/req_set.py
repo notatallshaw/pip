@@ -74,8 +74,11 @@ class RequirementSet:
         TODO remove this property together with the legacy resolver, since the new
              resolver only returns requirements that need to be installed.
         """
+        # Resolved anonymous requests are represented by the selected named entry.
+        requirements = [req for req in self.unnamed_requirements if req.name is None]
+        requirements.extend(dict.fromkeys(self.requirements.values()))
         return [
             install_req
-            for install_req in self.all_requirements
+            for install_req in requirements
             if not install_req.constraint and not install_req.satisfied_by
         ]
