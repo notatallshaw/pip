@@ -20,6 +20,7 @@ from itertools import chain
 
 from pip._vendor.packaging import specifiers
 from pip._vendor.packaging.requirements import Requirement
+from pip._vendor.packaging.version import Version
 
 from pip._internal.cache import WheelCache
 from pip._internal.exceptions import (
@@ -141,6 +142,9 @@ class Resolver(BaseResolver):
         self._py_version_info = py_version_info
 
         self.preparer = preparer
+        preparer.bind_metadata_python(
+            Version(".".join(map(str, self._py_version_info))), ignore_requires_python
+        )
         self.finder = finder
         self.wheel_cache = wheel_cache
 

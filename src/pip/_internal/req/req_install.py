@@ -159,6 +159,7 @@ class InstallRequirement:
         # The cached metadata distribution that this requirement represents.
         # See get_dist / set_dist.
         self._distribution: BaseDistribution | None = None
+        self.unresolved_metadata_fields: frozenset[str] = frozenset()
 
         # The static build requirements (from pyproject.toml)
         self.pyproject_requires: list[str] | None = None
@@ -544,6 +545,7 @@ class InstallRequirement:
                 details=details,
             )
 
+        self.set_dist(get_directory_distribution(self.metadata_directory))
         self.update_metadata_requirement()
 
     def update_metadata_requirement(self) -> None:
@@ -565,6 +567,8 @@ class InstallRequirement:
 
     def set_dist(self, distribution: BaseDistribution) -> None:
         self._distribution = distribution
+        self._metadata = distribution.metadata
+        self.unresolved_metadata_fields = frozenset()
 
     def get_dist(self) -> BaseDistribution:
         if self._distribution is not None:
