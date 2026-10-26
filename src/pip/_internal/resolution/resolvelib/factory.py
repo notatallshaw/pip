@@ -93,19 +93,9 @@ def _ordinary_specifiers(specifiers: SpecifierSet) -> SpecifierSet:
     return SpecifierSet(",".join(ordinary))
 
 
-def _has_pinned_version_conflict(left: SpecifierSet, right: SpecifierSet) -> bool:
-    """Prove an empty intersection when an ordinary equality fixes the version."""
-    combined = _ordinary_specifiers(left & right)
-    pins = {
-        Version(specifier.version)
-        for specifier in combined
-        if specifier.operator == "==" and not specifier.version.endswith(".*")
-    }
-    if not pins:
-        return False
-
-    # Include local pins from both sides: ==1 and ==1+local are compatible.
-    return not any(combined.contains(version, prereleases=True) for version in pins)
+def _has_version_conflict(left: SpecifierSet, right: SpecifierSet) -> bool:
+    """Prove an empty domain while allowing every prerelease candidate."""
+    return SpecifierSet((*left, *right), prereleases=True).is_unsatisfiable()
 
 
 def _has_conflicting_links(links: Iterable[Link]) -> bool:
@@ -824,7 +814,7 @@ class Factory:
                     not combined.contains(version, prereleases=True)
                     for version in known
                 )
-                or _has_pinned_version_conflict(mandatory, required)
+                or _has_version_conflict(mandatory, required)
             ):
                 assert req.link is not None
                 self._static_dependency_rejections.add(req.link)

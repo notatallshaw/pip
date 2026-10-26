@@ -18,7 +18,7 @@ from pip._internal.req.constructors import (
 from pip._internal.resolution.resolvelib.candidates import make_install_req_from_link
 from pip._internal.resolution.resolvelib.factory import (
     Factory,
-    _has_pinned_version_conflict,
+    _has_version_conflict,
 )
 from pip._internal.utils.deprecation import PipDeprecationWarning
 
@@ -39,16 +39,16 @@ from tests.lib.wheel import make_wheel
         ("<=1", "==1+local", False),
         ("!=2+local", "==2", False),
         ("!=2", "==2+local", True),
-        ("===1", "==2", False),
+        ("===1", "==2", True),
         ("===1,==1", "==2", True),
         ("===1,>=2", "==1", True),
-        ("===1", "==1+local", False),
-        ("==1.*", "==2.*", False),
+        ("===1", "==1+local", True),
+        ("==1.*", "==2.*", True),
         ("==1.*", "==2", True),
         ("==1", "==2.*", True),
         ("==1+local", ">=1", False),
         ("==1", "!=1.*", True),
-        (">=2", "<2", False),
+        (">=2", "<2", True),
         ("", "==1,==2", True),
         ("==1,==1+local", "==1.0", False),
         ("==1,!=1+local", "==1+local", True),
@@ -57,13 +57,22 @@ from tests.lib.wheel import make_wheel
         ("==1.0.dev1", "==1.0.dev1+local", False),
         ("==1!1.0", "==1.0", True),
         ("~=1.4", "==2", True),
+        (">2", "<=2", True),
+        (">=1,<=1", "!=1", True),
+        (">=1.0rc1", "<1.0", True),
+        (">1", "<=1.post1", True),
+        (">=1", "<=1", False),
+        (">=1a1", "<=1a2", False),
+        (">1", "<2", False),
+        ("===1,>=2", "<2", True),
+        ("===1", "==1.0", False),
+        ("===1.0", "==1", False),
+        ("===1", "===1.0", True),
+        ("===1a1", ">=0", False),
     ],
 )
-def test_pinned_version_conflicts(left: str, right: str, conflict: bool) -> None:
-    assert (
-        _has_pinned_version_conflict(SpecifierSet(left), SpecifierSet(right))
-        == conflict
-    )
+def test_version_conflicts(left: str, right: str, conflict: bool) -> None:
+    assert _has_version_conflict(SpecifierSet(left), SpecifierSet(right)) == conflict
 
 
 @pytest.mark.parametrize(
@@ -334,3 +343,12 @@ def test_eager_root_extras_require_exact_preparation_lineage(
     factory._set_mandatory_root_requirements([install_req_from_line("dependency==1")])
     assert not factory._root_extra_requests
     assert not factory.reject_static_dependencies(linked, dist)
+
+
+def test_version_conflict_proof_admits_prereleases_without_mutating_inputs() -> None:
+    left = SpecifierSet(">=1a1", prereleases=False)
+    right = SpecifierSet("<=1a2", prereleases=True)
+
+    assert not _has_version_conflict(left, right)
+    assert left.prereleases is False
+    assert right.prereleases is True

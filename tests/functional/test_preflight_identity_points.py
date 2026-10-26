@@ -89,7 +89,7 @@ def test_fixed_self_dependency_rejects_without_backend(
     result.did_create(Path("scratch/downloaded/point_demo-1.0.tar.gz"))
 
 
-def test_arbitrary_equality_does_not_compare_header_version_spelling(
+def test_arbitrary_equality_does_not_compare_header_version_text(
     script: PipTestEnvironment,
 ) -> None:
     make_wheel("mandatory", "1.0").save_to_dir(script.scratch_path)
