@@ -14,9 +14,9 @@ from typing import Any, TextIO
 
 from pip._vendor.packaging.version import parse
 from pip._vendor.pyproject_hooks import BuildBackendWarning
-from pip._vendor.rich.text import Text
 
 from pip import __version__ as current_version  # NOTE: tests patch this name.
+from pip._internal.cli.terminal import Text
 
 DEPRECATION_MSG_PREFIX = "DEPRECATION: "
 
@@ -68,7 +68,7 @@ def _showwarning(
             _build_backend_warning_level.get(),
             "%s",
             Text(formatted.rstrip()),
-            extra={"rich": True},
+            extra={"diagnostic": True},
         )
     else:
         _original_showwarning(message, category, filename, lineno, file, line)

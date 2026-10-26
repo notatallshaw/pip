@@ -11,8 +11,7 @@ import textwrap
 
 import pytest
 
-from pip._vendor import rich
-
+from pip._internal.cli.terminal import Terminal, Text
 from pip._internal.exceptions import DiagnosticPipError, ExternallyManagedEnvironment
 
 from tests.lib.output import render_to_text as rendered
@@ -70,10 +69,9 @@ class TestDiagnosticPipErrorCreation:
 
 def rendered_in_ascii(error: DiagnosticPipError, *, color: bool = False) -> str:
     with io.BytesIO() as stream:
-        console = rich.console.Console(
-            force_terminal=False,
+        console = Terminal(
             file=io.TextIOWrapper(stream, encoding="ascii", newline=""),
-            color_system="truecolor" if color else None,
+            color=color,
         )
         console.print(error)
         return stream.getvalue().decode("ascii")
@@ -609,3 +607,14 @@ class TestExternallyManagedEnvironment:
             exc = ExternallyManagedEnvironment.from_config(marker)
         assert not caplog.records
         assert str(exc.context) == "最後"
+
+
+def test_diagnostic_repr_includes_literal_context() -> None:
+    error = DiagnosticPipError(
+        reference="test-diagnostic",
+        message=Text("message [red]"),
+        context=Text("build output [blue]"),
+        hint_stmt=None,
+    )
+    assert "message [red]" in repr(error)
+    assert "build output [blue]" in repr(error)

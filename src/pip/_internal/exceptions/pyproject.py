@@ -1,8 +1,6 @@
 """pyproject.toml related pip exceptions."""
 
-from pip._vendor.rich.markup import escape
-from pip._vendor.rich.text import Text
-
+from pip._internal.cli.terminal import Text, escape
 from pip._internal.exceptions._base import DiagnosticPipError
 
 
