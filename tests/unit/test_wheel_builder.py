@@ -8,12 +8,14 @@ from typing import cast
 import pytest
 
 from pip._internal import wheel_builder
+from pip._internal.exceptions import UnsupportedWheel
 from pip._internal.models.link import Link
+from pip._internal.req.constructors import install_req_from_line
 from pip._internal.req.req_install import InstallRequirement
 from pip._internal.utils.urls import path_to_url
 from pip._internal.vcs.git import Git
 
-from tests.lib import create_test_package
+from tests.lib import create_test_package, make_wheel
 
 
 @pytest.mark.parametrize(
@@ -80,3 +82,179 @@ def test_should_not_cache_local_directory(tmpdir: Path, name: str) -> None:
     project_dir.mkdir()
     req = ReqMock(link=Link(path_to_url(str(project_dir))))
     assert not wheel_builder._should_cache(cast(InstallRequirement, req))
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("Name", "other"),
+        ("Version", "2.0"),
+        ("Requires-Python", ">=3.10"),
+        ("Requires-Dist", "dependency==1.0"),
+        ("Provides-Extra", "feature"),
+    ],
+)
+def test_built_wheel_preserves_static_sdist_metadata(field: str, value: str) -> None:
+    source_dist = make_wheel("package", "1.0").as_distribution("package")
+    wheel_dist = make_wheel(
+        "package", "1.0", metadata_updates={field: value}
+    ).as_distribution("package")
+
+    with pytest.raises(UnsupportedWheel, match=f"different {field}"):
+        wheel_builder._check_static_sdist_metadata(source_dist, wheel_dist)
+
+
+def test_built_wheel_can_fill_dynamic_fields() -> None:
+    source_dist = make_wheel(
+        "package",
+        "1.0",
+        metadata_updates={
+            "Dynamic": ["Requires-Dist", "Requires-Python", "Provides-Extra"]
+        },
+    ).as_distribution("package")
+    wheel_dist = make_wheel(
+        "package",
+        "1.0",
+        metadata_updates={
+            "Requires-Dist": "dependency==1.0",
+            "Requires-Python": ">=3.10",
+            "Provides-Extra": "feature",
+        },
+    ).as_distribution("package")
+
+    wheel_builder._check_static_sdist_metadata(source_dist, wheel_dist)
+
+
+def test_built_wheel_validates_newly_available_dynamic_dependencies() -> None:
+    source_dist = make_wheel(
+        "package", "1.0", metadata_updates={"Dynamic": "Requires-Dist"}
+    ).as_distribution("package")
+    wheel_dist = make_wheel(
+        "package", "1.0", metadata_updates={"Requires-Dist": "dependency>=broken"}
+    ).as_distribution("package")
+
+    with pytest.raises(UnsupportedWheel, match="Invalid Requires-Dist"):
+        wheel_builder._check_static_sdist_metadata(source_dist, wheel_dist)
+
+
+@pytest.mark.parametrize("field", ["Requires-Dist", "Provides-Extra"])
+@pytest.mark.parametrize("metadata_version", ["2.5", "2.6"])
+@pytest.mark.parametrize("retains_source_value", [False, True])
+def test_built_wheel_preserves_append_only_dynamic_fields(
+    field: str, metadata_version: str, retains_source_value: bool
+) -> None:
+    source_value = "dependency==1.0" if field == "Requires-Dist" else "feature"
+    added_value = "another==1.0" if field == "Requires-Dist" else "another"
+    source_dist = make_wheel(
+        "package",
+        "1.0",
+        metadata_updates={
+            "Metadata-Version": metadata_version,
+            "Dynamic": field,
+            field: source_value,
+        },
+    ).as_distribution("package")
+    values = [source_value, added_value] if retains_source_value else [added_value]
+    wheel_dist = make_wheel(
+        "package", "1.0", metadata_updates={field: values}
+    ).as_distribution("package")
+
+    if metadata_version == "2.6" and not retains_source_value:
+        with pytest.raises(UnsupportedWheel, match=f"dropped a fixed {field}"):
+            wheel_builder._check_static_sdist_metadata(source_dist, wheel_dist)
+    else:
+        wheel_builder._check_static_sdist_metadata(source_dist, wheel_dist)
+
+
+@pytest.mark.parametrize("verify", [True, False])
+def test_static_sdist_mismatch_removes_cached_wheel(
+    tmpdir: Path, monkeypatch: pytest.MonkeyPatch, verify: bool
+) -> None:
+    req = install_req_from_line("package==1.0")
+    req.static_sdist_metadata = make_wheel("package", "1.0").as_distribution("package")
+    wheel_path = make_wheel(
+        "package", "1.0", metadata_updates={"Requires-Dist": "dependency==1.0"}
+    ).save_to_dir(tmpdir)
+    monkeypatch.setattr(
+        wheel_builder, "_build_one_inside_env", lambda *args: wheel_path
+    )
+
+    assert wheel_builder._build_one(req, str(tmpdir), verify, False) is None
+    assert not Path(wheel_path).exists()
+
+
+def test_static_sdist_uses_built_wheel_metadata(
+    tmpdir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    req = install_req_from_line("package==1.0")
+    req.static_sdist_metadata = make_wheel(
+        "package", "1.0", metadata_updates={"Dynamic": "Summary"}
+    ).as_distribution("package")
+    req.set_dist(req.static_sdist_metadata)
+    assert req.metadata.get("Summary") is None
+    wheel_path = make_wheel(
+        "package", "1.0", metadata_updates={"Summary": "Built summary"}
+    ).save_to_dir(tmpdir)
+    monkeypatch.setattr(
+        wheel_builder, "_build_one_inside_env", lambda *args: wheel_path
+    )
+
+    assert wheel_builder._build_one(req, str(tmpdir), True, False) == wheel_path
+    assert req.get_dist().metadata["Summary"] == "Built summary"
+    assert req.metadata["Summary"] == "Built summary"
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        "",
+        "Metadata-Version: 2.2\nName: package\n\n",
+        "Metadata-Version: 2.2\nVersion: 1.0\n\n",
+        "Metadata-Version: 2.2\nName: package\nVersion: broken\n\n",
+        "Metadata-Version: 2.2\nName: invalid name\nVersion: 1.0\n\n",
+        "Metadata-Version: 2.2\nName: package\nVersion: 1.0\n"
+        "Requires-Python: >=broken\n\n",
+    ],
+)
+def test_static_sdist_rejects_malformed_built_metadata(
+    tmpdir: Path, monkeypatch: pytest.MonkeyPatch, metadata: str
+) -> None:
+    req = install_req_from_line("package==1.0")
+    req.static_sdist_metadata = make_wheel("package", "1.0").as_distribution("package")
+    wheel_path = make_wheel("package", "1.0", metadata=metadata).save_to_dir(tmpdir)
+    monkeypatch.setattr(
+        wheel_builder, "_build_one_inside_env", lambda *args: wheel_path
+    )
+
+    assert wheel_builder._build_one(req, str(tmpdir), False, False) is None
+    assert not Path(wheel_path).exists()
+
+
+def test_static_sdist_rejects_corrupt_built_archive(
+    tmpdir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    req = install_req_from_line("package==1.0")
+    req.static_sdist_metadata = make_wheel("package", "1.0").as_distribution("package")
+    wheel_path = tmpdir / "package-1.0-py3-none-any.whl"
+    wheel_path.write_bytes(b"not a zip file")
+    monkeypatch.setattr(
+        wheel_builder, "_build_one_inside_env", lambda *args: str(wheel_path)
+    )
+
+    assert wheel_builder._build_one(req, str(tmpdir), False, False) is None
+    assert not wheel_path.exists()
+
+
+def test_static_sdist_removes_wheel_with_inconsistent_filename(
+    tmpdir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    req = install_req_from_line("package==1.0")
+    req.static_sdist_metadata = make_wheel("package", "1.0").as_distribution("package")
+    wheel_path = tmpdir / "package-2.0-py2.py3-none-any.whl"
+    make_wheel("package", "1.0").save_to(wheel_path)
+    monkeypatch.setattr(
+        wheel_builder, "_build_one_inside_env", lambda *args: str(wheel_path)
+    )
+
+    assert wheel_builder._build_one(req, str(tmpdir), True, False) is None
+    assert not wheel_path.exists()

@@ -8,12 +8,26 @@ import re
 from collections.abc import Iterable
 from tempfile import TemporaryDirectory
 
-from pip._vendor.packaging.utils import canonicalize_name, canonicalize_version
+from pip._vendor.packaging.requirements import InvalidRequirement
+from pip._vendor.packaging.specifiers import InvalidSpecifier, SpecifierSet
+from pip._vendor.packaging.utils import (
+    InvalidName,
+    canonicalize_name,
+    canonicalize_version,
+)
 from pip._vendor.packaging.version import InvalidVersion, Version
 
 from pip._internal.cache import WheelCache
-from pip._internal.exceptions import InvalidWheelFilename, UnsupportedWheel
-from pip._internal.metadata import FilesystemWheel, get_wheel_distribution
+from pip._internal.exceptions import (
+    InvalidWheel,
+    InvalidWheelFilename,
+    UnsupportedWheel,
+)
+from pip._internal.metadata import (
+    BaseDistribution,
+    FilesystemWheel,
+    get_wheel_distribution,
+)
 from pip._internal.models.link import Link
 from pip._internal.models.wheel import Wheel
 from pip._internal.operations.build.wheel import build_wheel_pep517
@@ -21,6 +35,7 @@ from pip._internal.operations.build.wheel_editable import build_wheel_editable
 from pip._internal.req.req_install import InstallRequirement
 from pip._internal.utils.logging import indent_log
 from pip._internal.utils.misc import ensure_dir, hash_file
+from pip._internal.utils.packaging import get_requirement
 from pip._internal.utils.urls import path_to_url
 from pip._internal.vcs import vcs
 
@@ -118,6 +133,72 @@ def _verify_one(req: InstallRequirement, wheel_path: str) -> None:
         )
 
 
+def _check_static_sdist_metadata(
+    source_dist: BaseDistribution, wheel_dist: BaseDistribution
+) -> None:
+    """Check the metadata promises used to resolve an sdist before building it."""
+    dynamic = {field.lower() for field in source_dist.metadata.get_all("Dynamic", [])}
+    append_only = Version(source_dist.metadata_version or "0") >= Version("2.6")
+    # Directory-derived identity can conceal missing or invalid metadata headers.
+    names = wheel_dist.metadata.get_all("Name", [])
+    versions = wheel_dist.metadata.get_all("Version", [])
+    if len(names) != 1 or len(versions) != 1:
+        raise UnsupportedWheel("Built wheel must have one Name and Version")
+    try:
+        wheel_name = canonicalize_name(str(names[0]), validate=True)
+        wheel_version = Version(str(versions[0]))
+    except (InvalidName, InvalidVersion) as exc:
+        raise UnsupportedWheel(f"Built wheel has invalid identity: {exc}") from exc
+    comparisons: list[tuple[str, object, object]] = [
+        ("Name", source_dist.canonical_name, wheel_name),
+        ("Version", source_dist.version, wheel_version),
+    ]
+    if "requires-python" not in dynamic:
+        try:
+            wheel_python = SpecifierSet(
+                str(wheel_dist.metadata.get("Requires-Python", ""))
+            )
+        except InvalidSpecifier as exc:
+            raise UnsupportedWheel(f"Invalid Requires-Python: {exc}") from exc
+        comparisons.append(
+            ("Requires-Python", source_dist.requires_python, wheel_python)
+        )
+    # The built metadata is now available, even if resolution ignored dependencies.
+    try:
+        wheel_requires = frozenset(
+            get_requirement(raw.strip()) for raw in wheel_dist.iter_raw_dependencies()
+        )
+        if "requires-dist" not in dynamic or append_only:
+            source_requires = frozenset(
+                get_requirement(raw.strip())
+                for raw in source_dist.iter_raw_dependencies()
+            )
+            if "requires-dist" in dynamic:
+                if not source_requires <= wheel_requires:
+                    raise UnsupportedWheel(
+                        "Built wheel dropped a fixed Requires-Dist from the sdist"
+                    )
+            else:
+                comparisons.append(("Requires-Dist", source_requires, wheel_requires))
+    except InvalidRequirement as exc:
+        raise UnsupportedWheel(f"Invalid Requires-Dist: {exc}") from exc
+    if "provides-extra" not in dynamic or append_only:
+        source_extras = frozenset(source_dist.iter_provided_extras())
+        wheel_extras = frozenset(wheel_dist.iter_provided_extras())
+        if "provides-extra" in dynamic:
+            if not source_extras <= wheel_extras:
+                raise UnsupportedWheel(
+                    "Built wheel dropped a fixed Provides-Extra from the sdist"
+                )
+        else:
+            comparisons.append(("Provides-Extra", source_extras, wheel_extras))
+    for field, source_value, wheel_value in comparisons:
+        if source_value != wheel_value:
+            raise UnsupportedWheel(
+                f"Built wheel has different {field} from the sdist's static metadata"
+            )
+
+
 def _build_one(
     req: InstallRequirement,
     output_dir: str,
@@ -143,12 +224,28 @@ def _build_one(
     # Install build deps into temporary directory (PEP 518)
     with req.build_env:
         wheel_path = _build_one_inside_env(req, output_dir, editable)
+    wheel_dist = None
+    if wheel_path and req.static_sdist_metadata is not None:
+        try:
+            wheel_dist = get_wheel_distribution(
+                FilesystemWheel(wheel_path), canonicalize_name(req.name or "")
+            )
+            _check_static_sdist_metadata(req.static_sdist_metadata, wheel_dist)
+        except (InvalidWheel, UnsupportedWheel) as exc:
+            logger.warning("Built %s for %s is invalid: %s", artifact, req.name, exc)
+            # A rejected build must not become a reusable cached wheel.
+            os.unlink(wheel_path)
+            return None
     if wheel_path and verify:
         try:
             _verify_one(req, wheel_path)
         except (InvalidWheelFilename, UnsupportedWheel) as e:
             logger.warning("Built %s for %s is invalid: %s", artifact, req.name, e)
+            if req.static_sdist_metadata is not None:
+                os.unlink(wheel_path)
             return None
+    if wheel_dist is not None:
+        req.set_dist(wheel_dist)
     return wheel_path
 
 
@@ -159,9 +256,9 @@ def _build_one_inside_env(
 ) -> str | None:
     with TemporaryDirectory(dir=output_dir) as wheel_directory:
         assert req.name
-        assert req.metadata_directory
         assert req.pep517_backend
         if editable:
+            assert req.metadata_directory
             wheel_path = build_wheel_editable(
                 name=req.name,
                 backend=req.pep517_backend,

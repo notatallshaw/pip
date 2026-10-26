@@ -19,7 +19,7 @@ from pip._vendor.packaging.version import Version
 from pip._internal.build_env import BuildEnvironmentInstaller, BuildIsolationMode
 from pip._internal.distributions import make_distribution_for_install_requirement
 from pip._internal.distributions.installed import InstalledDistribution
-from pip._internal.distributions.sdist import read_sdist_metadata
+from pip._internal.distributions.sdist import SourceDistribution, read_sdist_metadata
 from pip._internal.exceptions import (
     DirectoryUrlHashUnsupported,
     HashMismatch,
@@ -671,6 +671,23 @@ class RequirementPreparer:
             parallel_builds=parallel_builds,
         )
 
+    def prepare_build_requirements(self, reqs: Iterable[InstallRequirement]) -> None:
+        """Prepare deferred source backends only for requirements being built."""
+        for req in reqs:
+            if not req.needs_build_preparation:
+                continue
+            dist = SourceDistribution(req)
+            tracker_id = dist.build_tracker_id
+            assert tracker_id is not None
+            with self.build_tracker.track(req, tracker_id):
+                dist.prepare_build_environment(
+                    self.build_env_installer,
+                    self.build_isolation,
+                    self.check_build_deps,
+                    self.allow_editables,
+                )
+            req.needs_build_preparation = False
+
     def _prepare_linked_requirement(
         self, req: InstallRequirement, parallel_builds: bool
     ) -> BaseDistribution:
@@ -776,6 +793,8 @@ class RequirementPreparer:
                     str(field).lower()
                     for field in static_dist.metadata.get_all("Dynamic", ())
                 )
+                req.static_sdist_metadata = static_dist
+                req.needs_build_preparation = True
                 req.update_metadata_requirement()
                 return static_dist
 

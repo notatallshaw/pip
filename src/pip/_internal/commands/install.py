@@ -461,13 +461,9 @@ class InstallCommand(RequirementCommand):
                 verbosity=self.verbosity,
                 allow_editables=True,
                 static_metadata_fields=(
-                    (
-                        frozenset({"*"})
-                        if options.json_report_file
-                        else SDIST_RESOLUTION_FIELDS
-                    )
-                    if options.dry_run
-                    else None
+                    frozenset({"*"})
+                    if options.json_report_file
+                    else SDIST_RESOLUTION_FIELDS
                 ),
             )
             resolver = self.make_resolver(
@@ -529,6 +525,8 @@ class InstallCommand(RequirementCommand):
             reqs_to_build = [
                 r for r in requirement_set.requirements_to_install if not r.is_wheel
             ]
+
+            preparer.prepare_build_requirements(reqs_to_build)
 
             _, build_failures = build(
                 reqs_to_build,
