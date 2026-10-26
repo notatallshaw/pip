@@ -18,6 +18,7 @@ from pip._vendor.packaging.utils import canonicalize_name
 from pip._internal.build_env import BuildEnvironmentInstaller, BuildIsolationMode
 from pip._internal.distributions import make_distribution_for_install_requirement
 from pip._internal.distributions.installed import InstalledDistribution
+from pip._internal.distributions.sdist import read_sdist_metadata
 from pip._internal.exceptions import (
     DirectoryUrlHashUnsupported,
     HashMismatch,
@@ -354,6 +355,7 @@ class RequirementPreparer:
 
         # Should check build dependencies?
         self.check_build_deps = check_build_deps
+        self.static_metadata_fields: frozenset[str] | None = None
 
         # Should hash-checking be required?
         self.require_hashes = require_hashes
@@ -753,6 +755,25 @@ class RequirementPreparer:
         if local_file:
             req.local_file_path = local_file.path
 
+        # Only an archive's root metadata has the sdist's static-field guarantee.
+        if (
+            local_file
+            and not req.is_wheel
+            and not link.subdirectory_fragment
+            and self.static_metadata_fields is not None
+            and not self.check_build_deps
+            and not self.legacy_resolver
+        ):
+            assert req.source_dir is not None
+            static_dist = read_sdist_metadata(
+                req.source_dir, link.filename, self.static_metadata_fields
+            )
+            if static_dist is not None:
+                req.load_pyproject_toml()
+                req.set_dist(static_dist)
+                req.update_metadata_requirement()
+                return static_dist
+
         dist = _get_prepared_distribution(
             req,
             self.build_tracker,
@@ -795,8 +816,7 @@ class RequirementPreparer:
 
         if link.is_existing_dir():
             logger.debug(
-                "Not copying link to destination directory "
-                "since it is a directory: %s",
+                "Not copying link to destination directory since it is a directory: %s",
                 link,
             )
             return
