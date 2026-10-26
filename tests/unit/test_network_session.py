@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from optparse import Values
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 from urllib.parse import urlparse
 from urllib.request import getproxies
 
@@ -34,6 +34,7 @@ from pip._internal.exceptions import (
 )
 from pip._internal.models.link import Link
 from pip._internal.network.session import (
+    CacheControlAdapter,
     HTTPAdapter,
     PipSession,
     user_agent,
@@ -344,20 +345,232 @@ class TestPipSession:
         assert "is not a trusted or secure host" in actual_message
 
 
-class TestSessionProxy:
-    @staticmethod
-    def _build_session(
-        monkeypatch: pytest.MonkeyPatch, args: list[str]
-    ) -> tuple[Values, PipSession]:
-        # Option parsing also reads PIP_* env vars; clear the proxy ones so an
-        # ambient (e.g. corporate) proxy config can't perturb these assertions.
-        monkeypatch.delenv("PIP_PROXY", raising=False)
-        monkeypatch.delenv("PIP_NO_PROXY_ENV", raising=False)
-        command = create_command("download")
-        options, _ = command.parse_args(args)
-        session = cast(SessionCommandMixin, command)._build_session(options)
-        return options, session
+def build_download_session(
+    monkeypatch: pytest.MonkeyPatch,
+    args: list[str],
+    *,
+    isolated: bool = False,
+) -> tuple[Values, PipSession]:
+    """Parse a download command and build its configured session."""
+    # Option parsing also reads PIP_* env vars; clear the proxy ones so an
+    # ambient (e.g. corporate) proxy config can't perturb these assertions.
+    monkeypatch.delenv("PIP_PROXY", raising=False)
+    monkeypatch.delenv("PIP_NO_PROXY_ENV", raising=False)
+    command = create_command("download", isolated=isolated)
+    assert isinstance(command, SessionCommandMixin)
+    options, _ = command.parse_args(args)
+    return options, command._build_session(options)
 
+
+class TestSessionCertificates:
+    @staticmethod
+    def _secure_adapter(session: PipSession) -> CacheControlAdapter | HTTPAdapter:
+        adapter = session.adapters["https://"]
+        assert isinstance(adapter, (CacheControlAdapter, HTTPAdapter))
+        return adapter
+
+    @pytest.mark.parametrize(
+        "environment,args,expected",
+        [
+            (
+                {
+                    "PIP_CERT": "pip.pem",
+                    "REQUESTS_CA_BUNDLE": "requests.pem",
+                    "CURL_CA_BUNDLE": "curl.pem",
+                },
+                ["example"],
+                "pip.pem",
+            ),
+            (
+                {"PIP_CERT": "pip.pem", "REQUESTS_CA_BUNDLE": "requests.pem"},
+                ["--cert", "cli.pem", "example"],
+                "cli.pem",
+            ),
+            (
+                {
+                    "REQUESTS_CA_BUNDLE": "requests.pem",
+                    "CURL_CA_BUNDLE": "curl.pem",
+                },
+                ["example"],
+                "requests.pem",
+            ),
+            ({"CURL_CA_BUNDLE": "curl.pem"}, ["example"], "curl.pem"),
+            (
+                {"REQUESTS_CA_BUNDLE": "requests.pem"},
+                ["--no-proxy-env", "example"],
+                "requests.pem",
+            ),
+        ],
+    )
+    def test_ca_source_precedence(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        environment: dict[str, str],
+        args: list[str],
+        expected: str,
+    ) -> None:
+        for name in ("PIP_CERT", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"):
+            monkeypatch.delenv(name, raising=False)
+        for name, value in environment.items():
+            monkeypatch.setenv(name, value)
+
+        def unexpected_context() -> None:
+            raise AssertionError("truststore context created for a custom CA")
+
+        monkeypatch.setattr(
+            "pip._internal.cli.index_command._create_truststore_ssl_context",
+            unexpected_context,
+        )
+
+        _, session = build_download_session(monkeypatch, args)
+
+        assert session.verify == expected
+        assert self._secure_adapter(session)._ssl_context is None
+        assert session.trust_env is ("--no-proxy-env" not in args)
+
+    def test_isolated_mode_ignores_ca_environment(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        for name in ("PIP_CERT", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"):
+            monkeypatch.setenv(name, f"{name.lower()}.pem")
+        for name in (
+            "ALL_PROXY",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "NO_PROXY",
+            "all_proxy",
+            "http_proxy",
+            "https_proxy",
+            "no_proxy",
+        ):
+            monkeypatch.delenv(name, raising=False)
+        proxy = "http://proxy.example:8080"
+        monkeypatch.setenv("HTTPS_PROXY", proxy)
+        ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        monkeypatch.setattr(
+            "pip._internal.cli.index_command._create_truststore_ssl_context",
+            lambda: ssl_context,
+        )
+
+        options, session = build_download_session(
+            monkeypatch,
+            ["--isolated", "example"],
+            isolated=True,
+        )
+
+        assert options.cert is None
+        assert session.verify is True
+        assert session.trust_env is True
+        assert self._secure_adapter(session)._ssl_context is ssl_context
+
+        settings = session.merge_environment_settings(
+            "https://example.com", {}, None, None, None
+        )
+        assert settings["verify"] is True
+        assert select_proxy("https://example.com", settings["proxies"]) == proxy
+        for verify in (False, "request.pem"):
+            settings = session.merge_environment_settings(
+                "https://example.com", {}, None, verify, None
+            )
+            assert settings["verify"] == verify
+
+    def test_empty_cert_uses_default_context(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        for name in ("PIP_CERT", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"):
+            monkeypatch.delenv(name, raising=False)
+        ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        monkeypatch.setattr(
+            "pip._internal.cli.index_command._create_truststore_ssl_context",
+            lambda: ssl_context,
+        )
+
+        _, session = build_download_session(
+            monkeypatch,
+            ["--cert", "", "example"],
+        )
+
+        assert session.verify is True
+        assert self._secure_adapter(session)._ssl_context is ssl_context
+
+    @pytest.mark.parametrize("directory", [False, True], ids=["file", "directory"])
+    def test_nondefault_verification_omits_supplied_context(
+        self,
+        tmp_path: Path,
+        directory: bool,
+    ) -> None:
+        ca_source = tmp_path / ("certs" if directory else "ca.pem")
+        if directory:
+            ca_source.mkdir()
+        else:
+            ca_source.touch()
+        ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        request = requests.Request("GET", "https://example.com/").prepare()
+        assert request.url is not None
+        adapter = HTTPAdapter(ssl_context=ssl_context)
+
+        _, pool_kwargs = adapter.build_connection_pool_key_attributes(
+            request,
+            verify=str(ca_source),
+        )
+
+        assert pool_kwargs["ssl_context"] is None
+        if directory:
+            assert pool_kwargs["ca_cert_dir"] == str(ca_source)
+            assert "ca_certs" not in pool_kwargs
+        else:
+            assert pool_kwargs["ca_certs"] == str(ca_source)
+            assert "ca_cert_dir" not in pool_kwargs
+
+    def test_disabled_verification_omits_supplied_context(self) -> None:
+        ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        request = requests.Request("GET", "https://example.com/").prepare()
+        assert request.url is not None
+        adapter = HTTPAdapter(ssl_context=ssl_context)
+
+        _, pool_kwargs = adapter.build_connection_pool_key_attributes(
+            request,
+            verify=False,
+        )
+
+        assert pool_kwargs["cert_reqs"] == "CERT_NONE"
+        assert pool_kwargs["ssl_context"] is None
+        assert "ca_certs" not in pool_kwargs
+        assert "ca_cert_dir" not in pool_kwargs
+
+    def test_selected_ca_beats_requests_environment(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("REQUESTS_CA_BUNDLE", "environment.pem")
+        monkeypatch.delenv("PIP_CERT", raising=False)
+        monkeypatch.delenv("CURL_CA_BUNDLE", raising=False)
+        _, session = build_download_session(
+            monkeypatch,
+            ["--cert", "selected.pem", "example"],
+        )
+        send_settings: dict[str, Any] = {}
+
+        def send(
+            request: requests.PreparedRequest,
+            **kwargs: Any,
+        ) -> requests.Response:
+            send_settings.update(kwargs)
+            response = requests.Response()
+            response.status_code = 200
+            response.request = request
+            return response
+
+        monkeypatch.setattr(session, "send", send)
+
+        with session:
+            response = session.get("https://example.com/")
+
+        assert response.status_code == 200
+        assert send_settings["verify"] == "selected.pem"
+
+
+class TestSessionProxy:
     @staticmethod
     def _resolved_proxy(session: PipSession, url: str) -> str | None:
         # Pick the proxy for a URL the way Session.request() does, no network.
@@ -398,7 +611,7 @@ class TestSessionProxy:
         monkeypatch.setenv("http_proxy", "http://127.0.0.1:9999")
         monkeypatch.setenv("https_proxy", "http://127.0.0.1:9999")
 
-        options, session = self._build_session(
+        options, session = build_download_session(
             monkeypatch, ["--no-proxy-env", "example"]
         )
 
@@ -415,7 +628,7 @@ class TestSessionProxy:
         monkeypatch.setenv("http_proxy", "http://127.0.0.1:9999")
         monkeypatch.setenv("https_proxy", "http://127.0.0.1:9999")
 
-        _, session = self._build_session(
+        _, session = build_download_session(
             monkeypatch,
             ["--proxy", "http://proxy.example:8080", "--no-proxy-env", "example"],
         )
@@ -428,7 +641,7 @@ class TestSessionProxy:
     def test_environment_trusted_without_no_proxy_env(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        options, session = self._build_session(monkeypatch, ["example"])
+        options, session = build_download_session(monkeypatch, ["example"])
 
         assert options.no_proxy_env is False
         assert session.trust_env is True
@@ -440,7 +653,9 @@ class TestSessionProxy:
         monkeypatch.setenv("http_proxy", "http://127.0.0.1:9999")
         monkeypatch.setenv("https_proxy", "http://127.0.0.1:9999")
 
-        options, session = self._build_session(monkeypatch, ["--proxy", "", "example"])
+        options, session = build_download_session(
+            monkeypatch, ["--proxy", "", "example"]
+        )
 
         assert options.proxy == ""
         assert session.trust_env is False
@@ -455,7 +670,7 @@ class TestSessionProxy:
         # Unset must stay distinct from --proxy "": the env proxy is still used.
         monkeypatch.setenv("http_proxy", "http://127.0.0.1:9999")
 
-        options, session = self._build_session(monkeypatch, ["example"])
+        options, session = build_download_session(monkeypatch, ["example"])
 
         assert options.proxy is None
         assert session.trust_env is True
