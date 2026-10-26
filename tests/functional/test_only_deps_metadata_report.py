@@ -179,7 +179,7 @@ def test_only_deps_report_handles_root_also_used_as_direct_dependency(
     )
     named_root = "shared==1.0"
     if not active_named_root:
-        named_root += '; python_version < "0"'
+        named_root += '; python_version == "0"'
 
     script.pip(
         "install",
