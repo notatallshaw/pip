@@ -682,7 +682,6 @@ class Factory:
             self._dependency_preflight_enabled
             and self.preparer.static_dependency_rejector is not None
             and self.preparer.static_metadata_fields is not None
-            and not self.preparer.check_build_deps
             and not self.preparer.legacy_resolver
         )
 
