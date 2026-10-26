@@ -7,6 +7,15 @@ from pip._internal.req.constructors import install_req_from_line
 from pip._internal.utils.packaging import get_requirement
 
 
+def test_legacy_resolver_keeps_ordinary_metadata_preparation() -> None:
+    command = DownloadCommand("download", "")
+    options, _ = command.parse_args(["--no-deps", "--ignore-requires-python"])
+    options.deprecated_features_enabled = ["legacy-resolver"]
+    req = install_req_from_line("https://example.invalid/snapshot.tar.gz")
+
+    assert command._single_archive_without_metadata([req], options) is None
+
+
 @pytest.mark.parametrize("options", [[], ["--no-deps"], ["--ignore-requires-python"]])
 def test_anonymous_download_needs_both_flags(options: list[str]) -> None:
     command = DownloadCommand("download", "")
@@ -43,3 +52,14 @@ def test_inactive_roots_do_not_require_metadata() -> None:
     ignored = install_req_from_line('ignored==1; python_version < "0"')
     selected = command._single_archive_without_metadata([req, ignored], options)
     assert selected is req
+
+
+@pytest.mark.parametrize(
+    "marker", ['"test" in dependency_groups', 'os_name ~= "not-a-version"']
+)
+def test_marker_errors_leave_validation_to_resolver(marker: str) -> None:
+    command = DownloadCommand("download", "")
+    options, _ = command.parse_args(["--no-deps", "--ignore-requires-python"])
+    req = install_req_from_line("https://example.invalid/snapshot.tar.gz")
+    uncertain = install_req_from_line(f"other==1; {marker}")
+    assert command._single_archive_without_metadata([req, uncertain], options) is None

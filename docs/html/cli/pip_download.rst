@@ -32,10 +32,11 @@ distributions into the directory provided (defaulting to the current
 directory). This directory can later be passed as the value to ``pip install
 --find-links`` to facilitate offline or locked down package installation.
 
-For source distributions with standardized ``name-version.tar.gz`` filenames,
-combining ``--no-deps`` and ``--ignore-requires-python`` uses the filename's name
-and version without preparing metadata. The archive's metadata is not checked in
-this mode. ``--check-build-dependencies`` still prepares the build backend.
+When project selection is still needed, the default resolver can use the name
+and version from standardized ``name-version.tar.gz`` source filenames without
+preparing metadata when both ``--no-deps`` and ``--ignore-requires-python`` are
+specified. The archive's metadata is not checked in this mode.
+``--check-build-dependencies`` still prepares the build backend.
 
 ``pip download`` with the ``--platform``, ``--python-version``,
 ``--implementation``, and ``--abi`` options provides the ability to fetch
@@ -62,11 +63,12 @@ and let pip download know where to find them using ``--find-links``.
 Downloading one source archive without metadata
 -----------------------------------------------
 
-Use ``--no-deps --ignore-requires-python`` to download a single unnamed source
-archive URL or path without requesting project metadata. This requires no other
-active requirements and no active runtime constraints. The downloaded file keeps
-the URI's filename. Hash verification, archive extraction and project declaration
-checks still apply. Explicit ``--check-build-dependencies`` can run build code.
+With the default resolver, use ``--no-deps --ignore-requires-python`` to download
+a single unnamed source archive URL or path without requesting project metadata.
+This requires no other active requirements and no active runtime constraints.
+The downloaded file keeps the URI's filename. Hash verification, archive
+extraction and project declaration checks still apply. Explicit
+``--check-build-dependencies`` can run build code.
 
 Options
 =======

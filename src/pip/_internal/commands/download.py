@@ -2,6 +2,8 @@ import logging
 import os
 from optparse import Values
 
+from pip._vendor.packaging.markers import UndefinedComparison, UndefinedEnvironmentName
+
 from pip._internal.cli import cmdoptions
 from pip._internal.cli.cmdoptions import make_target_python
 from pip._internal.cli.req_command import RequirementCommand, with_cleanup
@@ -88,9 +90,15 @@ class DownloadCommand(RequirementCommand):
         reqs: list[InstallRequirement], options: Values
     ) -> InstallRequirement | None:
         """Select an archive when no active root needs project metadata."""
+        if RequirementCommand.determine_resolver_variant(options) == "legacy":
+            return None
         if not options.ignore_dependencies or not options.ignore_requires_python:
             return None
-        active = [req for req in reqs if req.match_markers()]
+        try:
+            active = [req for req in reqs if req.match_markers()]
+        except (UndefinedComparison, UndefinedEnvironmentName):
+            # Let the resolver preserve its order of root validation and preparation.
+            return None
         if len(active) != 1:
             return None
         req = active[0]
@@ -104,26 +112,18 @@ class DownloadCommand(RequirementCommand):
         self,
         reqs: list[InstallRequirement],
         selected: InstallRequirement,
-        options: Values,
         preparer: RequirementPreparer,
     ) -> None:
         """Prepare one archive while preserving the order of ignored-root checks."""
-        legacy = self.determine_resolver_variant(options) == "legacy"
-        # The legacy resolver registers every root before preparing a source.
-        ordered = (
-            [req for req in reqs if req is not selected] + [selected]
-            if legacy
-            else reqs
-        )
-        for req in ordered:
+        for req in reqs:
             if req is selected:
                 preparer.prepare_download_without_metadata(selected)
                 continue
             if req.constraint:
                 problem = check_invalid_constraint_type(req)
-                if problem and not legacy:
+                if problem:
                     raise InstallationError(problem)
-            if not req.constraint or legacy:
+            if not req.constraint:
                 logger.info(
                     "Ignoring %s: markers '%s' don't match your environment",
                     req.name,
@@ -181,7 +181,7 @@ class DownloadCommand(RequirementCommand):
         archive = self._single_archive_without_metadata(reqs, options)
         if archive is not None:
             self.trace_basic_info(finder)
-            self._prepare_anonymous_download(reqs, archive, options, preparer)
+            self._prepare_anonymous_download(reqs, archive, preparer)
             preparer.save_linked_requirement(archive)
             assert archive.link is not None
             write_output("Successfully downloaded %s", archive.link.filename)

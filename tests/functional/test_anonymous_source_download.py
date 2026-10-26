@@ -284,13 +284,19 @@ def test_anonymous_archive_inactive_roots_and_constraints(
         requirements,
         "--constraint",
         constraint,
+        *(["--no-build-isolation"] if resolver == "legacy" else []),
+        expect_error=resolver == "legacy",
     )
     assert "Ignoring ignored" in result.stdout
-    assert ("Ignoring project" in result.stdout) is (resolver == "legacy")
-    assert (
-        result.stdout.index("Ignoring ignored") < result.stdout.index("Processing")
-    ) is (resolver == "legacy")
-    result.did_create(Path("scratch/downloaded/snapshot.tar.gz"))
+    if resolver == "legacy":
+        assert "Unexpected backend execution" in result.stderr
+        result.did_not_create(Path("scratch/downloaded/snapshot.tar.gz"))
+    else:
+        assert "Ignoring project" not in result.stdout
+        assert result.stdout.index("Processing") < result.stdout.index(
+            "Ignoring ignored"
+        )
+        result.did_create(Path("scratch/downloaded/snapshot.tar.gz"))
 
 
 @pytest.mark.parametrize("isolated", [False, True])
@@ -378,10 +384,56 @@ def test_anonymous_download_preserves_inactive_constraint_validation(
         "--dest",
         "downloaded",
         anonymous_archive,
-        expect_error=(resolver != "legacy"),
+        *(["--no-build-isolation"] if resolver == "legacy" else []),
+        expect_error=True,
         allow_stderr_warning=True,
     )
     if resolver == "legacy":
-        result.did_create(Path("scratch/downloaded/snapshot.tar.gz"))
+        assert "Unexpected backend execution" in result.stderr
+        result.did_not_create(Path("scratch/downloaded/snapshot.tar.gz"))
     else:
         assert "Unnamed requirements are not allowed as constraints" in result.stderr
+
+
+@pytest.mark.parametrize("raw_download", [False, True])
+@pytest.mark.parametrize("invalid", ["project", "constraint"])
+def test_marker_error_preserves_root_validation_order(
+    script: PipTestEnvironment, raw_download: bool, invalid: str
+) -> None:
+    script.environ["_PIP_TEST_ENV"] = ""
+    archive = create_basic_sdist_for_package(
+        script,
+        "project",
+        "1.0",
+        extra_files={
+            "pyproject.toml": '[build-system]\nrequires = "invalid"\n',
+        },
+    ).rename(script.scratch_path / "snapshot.tar.gz")
+    options = ["--ignore-requires-python"] if raw_download else []
+    if invalid == "constraint":
+        constraint = script.temporary_file(
+            "constraint.txt", f'{archive.as_uri()} ; "test" in dependency_groups\n'
+        )
+        options.extend(["--constraint", str(constraint)])
+        roots = [archive.as_uri()]
+    else:
+        roots = [
+            archive.as_uri(),
+            'other==1; "test" in dependency_groups',
+        ]
+    result = script.pip(
+        "download",
+        "--no-index",
+        "--no-deps",
+        "--no-build-isolation",
+        *options,
+        *roots,
+        expect_error=True,
+    )
+    expected = (
+        "Unnamed requirements are not allowed as constraints"
+        if invalid == "constraint"
+        else "build-system.requires"
+    )
+    assert expected in result.stderr
+    assert "UndefinedEnvironmentName" not in result.stderr
