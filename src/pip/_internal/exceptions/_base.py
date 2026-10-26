@@ -40,6 +40,13 @@ class InstallationError(PipError):
     """General exception during installation"""
 
 
+class BlockedImportError(PipError):
+    """An import blocked after wheel installation started.
+
+    ImportError would be swallowed by codec lookup and cache the codec as missing.
+    """
+
+
 class DiagnosticPipError(PipError):
     """An error, that presents diagnostic information to the user.
 

@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from pip._internal.cache import SimpleWheelCache
-from pip._internal.cli.status_codes import ERROR, SUCCESS
+from pip._internal.cli.status_codes import ERROR, SUCCESS, UNKNOWN_ERROR
 from pip._internal.models.direct_url import DirectUrl
 from pip._internal.models.index import PyPI, TestPyPI
 from pip._internal.models.link import Link
@@ -411,53 +411,199 @@ def test_pip_second_command_line_interface_works(
     result.did_create(initools_folder)
 
 
-def test_install_warns_on_unexpected_post_install_import(
+@pytest.mark.parametrize("use_target", [False, True])
+@pytest.mark.parametrize("interrupt", [False, True])
+def test_install_blocked_import_preserves_uninstall(
     script: PipTestEnvironment,
+    use_target: bool,
+    interrupt: bool,
 ) -> None:
-    """
-    Verify that pip warns when an unexpected import happens after the
-    install audit hook has been registered. The hook is installed before
-    ``install_given_reqs`` runs, so imports issued from code running after
-    that point must trigger the deprecation warning.
-    """
+    """Imports stay blocked through cleanup, including for interrupted wheels."""
+    wheel_path = create_basic_wheel_for_package(script, "mypackage", "1.0")
+    script.scratch_path.joinpath("after_install.py").write_text("value = 42\n")
+    script.scratch_path.joinpath("at_shutdown.py").write_text("value = 43\n")
+    runner = script.scratch_path / "run_install.py"
+    shutil.copyfile(
+        Path(__file__).parents[1] / "lib" / "install_with_blocked_import.py", runner
+    )
+
+    args = ["python", str(runner), str(wheel_path), str(interrupt)]
+    destination = script.site_packages
+    if use_target:
+        destination = script.scratch / "target"
+        args.extend(["--target", str(script.scratch_path / "target")])
+
+    result = script.run(*args, expect_stderr=True)
+    assert result.returncode == SUCCESS
+    assert "Traceback" not in result.stderr
+    if interrupt:
+        assert "WARNING: Installation of 'mypackage' was interrupted" in result.stderr
+        assert "Blocked import of 'wave' after pip install started" in result.stderr
+        assert "the package may be corrupt" in result.stderr
+        assert "pip uninstall mypackage" in result.stderr
+    else:
+        assert "Successfully installed mypackage-1.0" in result.stdout
+
+    stages = ["version_check", "command_cleanup", "logging_shutdown"]
+    if not interrupt:
+        stages.insert(0, "summary")
+    for stage in stages:
+        assert f"Blocked import during {stage}" in result.stdout
+        assert f"Unsafe import of 'late_import_{stage}'" not in result.stderr
+
+    assert (
+        "Unsafe import of 'after_install' after pip install completed" in result.stderr
+    )
+    assert "Unsafe import of 'at_shutdown' after pip install completed" in result.stderr
+    assert "all required modules before running pip install" in result.stderr
+    assert "Shutdown import succeeded" in result.stdout
+    assert "Weakref finalizer ran" in result.stdout
+    assert "Unsafe import of 'gc'" not in result.stderr
+
+    result.did_create(destination / "mypackage" / "__init__.py")
+    result.did_create(destination / "mypackage-1.0.dist-info" / "RECORD")
+    if not use_target:
+        result = script.pip("uninstall", "mypackage", "-y")
+        assert "Successfully uninstalled mypackage-1.0" in result.stdout
+        assert not (script.site_packages_path / "mypackage").exists()
+        assert not (script.site_packages_path / "mypackage-1.0.dist-info").exists()
+
+
+@pytest.mark.parametrize(
+    "code, expected",
+    [
+        ('raise RuntimeError("reporting failed")', "RuntimeError: reporting failed"),
+        ("missing_name", "NameError: name 'missing_name' is not defined"),
+        (
+            'compile("improt os", "<reporting>", "exec")',  # codespell:ignore improt
+            "SyntaxError: invalid syntax",
+        ),
+    ],
+)
+def test_install_preloads_traceback_dependencies(
+    script: PipTestEnvironment, code: str, expected: str
+) -> None:
+    """Preserve the original exception when reporting errors under the import guard."""
     wheel_path = create_basic_wheel_for_package(script, "mypackage", "1.0")
     runner = script.scratch_path / "run_install.py"
-    runner.write_text(textwrap.dedent("""\
-            import sys
-            import pip._internal.commands.install as _install_mod
-            _orig_get_environment = _install_mod.get_environment
+    shutil.copyfile(
+        Path(__file__).parents[1] / "lib" / "install_with_traceback.py", runner
+    )
 
-            def _patched_get_environment(lib_locations):
-                try:
-                    import pip_unexpected_module_xyz
-                except ModuleNotFoundError:
-                    pass
-                return _orig_get_environment(lib_locations)
+    result = script.run("python", str(runner), str(wheel_path), code, expect_error=True)
+    assert result.returncode == UNKNOWN_ERROR
+    assert expected in result.stderr
+    assert "Blocked import" not in result.stderr
 
-            _install_mod.get_environment = _patched_get_environment
 
-            from pip._internal.cli.main import main
-            wheels_dir = sys.argv[1]
-            sys.exit(main([
-                "install",
-                "--no-index",
-                "--find-links",
-                wheels_dir,
-                "mypackage"
-                ])
-            )
-        """))
+def test_debug_install_preloads_python_lexer(
+    script: PipTestEnvironment, pip_src: Path
+) -> None:
+    if script.zipapp:
+        pytest.skip("Zipapp loads the lexer from the archive")
+    # Use an installed copy so the wheel replaces the lexer pip will load.
+    shutil.copytree(pip_src / "src" / "pip", script.site_packages_path / "pip")
+    wheel_path = create_basic_wheel_for_package(
+        script,
+        "mypackage",
+        "1.0",
+        extra_files={
+            "pip/_vendor/pygments/lexers/python.py": (
+                'raise AssertionError("Replacement lexer executed")\n'
+            ),
+            "mypackage-1.0.data/purelib/bonus-NaN.dist-info/METADATA": (
+                "Metadata-Version: 2.1\nName: bonus\nVersion: 1.0\n"
+            ),
+        },
+    )
 
-    # Make sure PipDeprecationWarnings don't turn into errors
-    script.environ["_PIP_TEST_ENV"] = ""
+    result = script.pip(
+        "--debug",
+        "install",
+        "--no-index",
+        "--no-compile",
+        wheel_path,
+        expect_error=True,
+    )
+
+    assert "InvalidVersion: Invalid version: 'NaN'" in result.stderr
+    assert "version = 'NaN'" in result.stderr
+    assert "Replacement lexer executed" not in result.stderr
+    assert "Error in sys.excepthook" not in result.stderr
+
+
+@pytest.mark.parametrize(
+    "entrypoint, stream",
+    [
+        ("cli", "normal"),
+        ("cli", "none"),
+        ("cli", "broken"),
+        ("main", "normal"),
+        ("pip.main", "normal"),
+    ],
+)
+def test_install_exception_reporting_lifetime(
+    script: PipTestEnvironment, entrypoint: str, stream: str
+) -> None:
+    wheel_path = create_basic_wheel_for_package(script, "mypackage", "1.0")
+    script.scratch_path.joinpath("after_install.py").write_text("value = 42\n")
+    runner = script.scratch_path / "run_install.py"
+    shutil.copyfile(
+        Path(__file__).parents[1] / "lib" / "install_with_exception_reporting.py",
+        runner,
+    )
+
     result = script.run(
-        "python", str(runner), str(wheel_path.parent), expect_stderr=True
+        "python",
+        str(runner),
+        str(wheel_path),
+        entrypoint,
+        stream,
+        expect_stderr=True,
     )
-    assert (
-        "Unexpected import of 'pip_unexpected_module_xyz' "
-        "after pip install started" in result.stderr
+
+    assert "Import allowed after pip finished" in result.stdout
+    if entrypoint == "cli":
+        if stream != "none":
+            assert "Import blocked during exception reporting" in result.stdout
+        if stream == "normal":
+            assert "ReportingError: installation failed" in result.stderr
+    else:
+        assert "Original exception propagated" in result.stdout
+        assert "Import blocked during exception reporting" not in result.stdout
+
+
+def test_install_preloads_registered_import_before_replacing_module(
+    script: PipTestEnvironment,
+) -> None:
+    """A post-install lazy reference must use the module loaded before replacement."""
+    dependency = "pip_reify_dependency.py"
+    script.site_packages_path.joinpath(dependency).write_text(
+        "import pip._internal.commands.install as install\n"
+        "assert not install._ACTIVE_INSTALLATIONS\n"
+        'value = "before installation"\n'
     )
-    assert "run_install.py:7)" in result.stderr
+    script.site_packages_path.joinpath("pip_eager_owner.py").write_text(
+        '__lazy_modules__ = ["pip_reify_dependency"]\n'
+        "import pip_reify_dependency as dependency\n"
+    )
+    wheel_path = create_basic_wheel_for_package(
+        script,
+        "mypackage",
+        "1.0",
+        extra_files={dependency: 'raise AssertionError("New module executed")\n'},
+    )
+    runner = script.scratch_path / "run_install.py"
+    shutil.copyfile(
+        Path(__file__).parents[1] / "lib" / "install_with_registered_import.py", runner
+    )
+
+    result = script.run("python", str(runner), str(wheel_path))
+
+    assert result.returncode == SUCCESS
+    result.assert_installed("mypackage", editable=False)
+    result.did_update(script.site_packages / dependency)
+    result.did_create(script.site_packages / "mypackage-1.0.dist-info" / "RECORD")
 
 
 def test_install_exit_status_code_when_no_requirements(

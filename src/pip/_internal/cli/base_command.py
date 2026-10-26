@@ -14,6 +14,7 @@ from optparse import Values
 
 from pip._vendor.rich import reconfigure
 from pip._vendor.rich import traceback as rich_traceback
+from pip._vendor.rich.console import Console
 
 from pip._internal.cli import cmdoptions
 from pip._internal.cli.command_context import CommandContextMixIn
@@ -45,6 +46,25 @@ __all__ = ["Command"]
 logger = logging.getLogger(__name__)
 
 
+def _print_exception(error: Exception, *, debug: bool) -> None:
+    """Report a command failure without letting a broken renderer escape."""
+    stream = sys.stderr
+    if stream is None:
+        return
+    exc_info = type(error), error, error.__traceback__
+    if debug:
+        try:
+            Console(file=stream).print(
+                rich_traceback.Traceback.from_exception(*exc_info, show_locals=True)
+            )
+            return
+        except Exception:
+            pass
+
+    with contextlib.suppress(Exception):
+        traceback.print_exception(*exc_info, file=stream)
+
+
 class Command(CommandContextMixIn):
     usage: str = ""
     ignore_require_venv: bool = False
@@ -52,6 +72,8 @@ class Command(CommandContextMixIn):
     def __init__(self, name: str, summary: str, isolated: bool = False) -> None:
         super().__init__()
 
+        self._cli = False
+        self._debug_mode = False
         self.name = name
         self.summary = summary
         self.parser = ConfigOptionParser(
@@ -102,7 +124,8 @@ class Command(CommandContextMixIn):
                 return self.run(options, args)
 
         if options.debug_mode:
-            rich_traceback.install(show_locals=True)
+            if not self._cli:
+                rich_traceback.install(show_locals=True)
             return _inner_run()
 
         try:
@@ -171,11 +194,18 @@ class Command(CommandContextMixIn):
         return self.parser.parse_args(args)
 
     def main(self, args: list[str]) -> int:
+        self._debug_mode = False
         try:
-            with self.main_context():
-                return self._main(args)
-        finally:
-            logging.shutdown()
+            try:
+                with self.main_context():
+                    return self._main(args)
+            finally:
+                logging.shutdown()
+        except Exception as error:
+            if not self._cli:
+                raise
+            _print_exception(error, debug=self._debug_mode)
+            return ERROR
 
     def _main(self, args: list[str]) -> int:
         # We must initialize this before the tempdir manager, otherwise the
@@ -187,6 +217,7 @@ class Command(CommandContextMixIn):
         self.enter_context(global_tempdir_manager())
 
         options, args = self.parse_args(args)
+        self._debug_mode = options.debug_mode
 
         # Set verbosity so that it can be used elsewhere.
         self.verbosity = options.verbose - options.quiet

@@ -8,15 +8,18 @@ import os
 import shutil
 import site
 import sys
-from collections.abc import Iterator
+import types
+from collections.abc import Iterable, Iterator
 from optparse import SUPPRESS_HELP, Values
 from pathlib import Path
 from typing import Any
 
+from pip._vendor import pygments, rich
 from pip._vendor.packaging.requirements import InvalidRequirement, Requirement
 from pip._vendor.packaging.utils import canonicalize_name
 from pip._vendor.requests.exceptions import InvalidProxyURL
-from pip._vendor.rich import print_json
+
+import pip
 
 # Eagerly import self_outdated_check to avoid crashes. Otherwise,
 # this module would be imported *after* pip was replaced, resulting
@@ -24,7 +27,7 @@ from pip._vendor.rich import print_json
 # with the rest of pip that's already imported, or allowing a
 # wheel to execute arbitrary code on install by replacing
 # self_outdated_check.
-import pip._internal.self_outdated_check  # noqa: F401
+import pip._internal.self_outdated_check
 from pip._internal.cache import WheelCache
 from pip._internal.cli import cmdoptions
 from pip._internal.cli.cmdoptions import make_target_python
@@ -34,6 +37,7 @@ from pip._internal.cli.req_command import (
 )
 from pip._internal.cli.status_codes import ERROR, SUCCESS
 from pip._internal.exceptions import (
+    BlockedImportError,
     CommandError,
     InstallationError,
     InstallWheelBuildError,
@@ -48,7 +52,6 @@ from pip._internal.req.req_install import (
     InstallRequirement,
 )
 from pip._internal.utils.compat import WINDOWS
-from pip._internal.utils.deprecation import deprecated
 from pip._internal.utils.filesystem import test_writable_dir
 from pip._internal.utils.logging import getLogger
 from pip._internal.utils.misc import (
@@ -70,66 +73,139 @@ logger = getLogger(__name__)
 
 
 _IMPORT_AUDIT_HOOK_INSTALLED = False
-_MISSING_MODULES: set[str] = set()
+_ACTIVE_INSTALLATIONS: set[object] = set()
+_WARNED_IMPORTS: set[str] = set()
+_IMPORT_ERRORS: dict[str, ImportError] = {}
 
-# Non-stdlib modules pip (or its vendored dependencies) may import lazily
-# after installation has started. Importing them eagerly keeps the audit
-# hook from misattributing them to a freshly installed distribution.
-_EAGER_IMPORTS: tuple[str, ...] = (
+# Import dependencies directly where possible; otherwise list them here.
+_INTERNAL_EAGER_IMPORTS: tuple[str, ...] = (
     "pip._internal.operations.install.wheel",
-    # Used by rich when emitting output to a legacy Windows console.
-    "pip._vendor.rich._windows_renderer",
+    # Rich loads the Python lexer when rendering debug tracebacks.
+    f"{pygments.__name__}.lexers.python",
+    # Python 3.13+ colored tracebacks import helpers while reporting errors.
+    # Preload them so a blocked import does not hide the original exception.
+    "traceback",
+    "_colorize",
+    "_suggestions",
+    "ast",
+    "difflib",
+    "unicodedata",
+    # weakref.finalize imports gc when running shutdown callbacks.
+    "gc",
+    # Use Rich's actual namespace when pip has been de-vendored.
+    # The renderer is used for output to a legacy Windows console.
+    f"{rich.__name__}._windows_renderer",
+    # Rich can load the emoji table while formatting installation output.
+    f"{rich.__name__}._emoji_codes",
+    # zipfile may import these backends when reading compressed wheel contents.
+    "_bz2",
+    "_lzma",
+    "_zstd",
 )
 
 
-# Imports of standard library modules are always safe: they cannot be
-# shadowed by a distribution pip has just installed.
-_STDLIB_MODULE_NAMES: frozenset[str] = frozenset(sys.stdlib_module_names) | frozenset(
-    sys.builtin_module_names
-)
+def _warn_unsafe_import(module: str) -> None:
+    """Warn once per module without letting logging block the import."""
+    if module in _WARNED_IMPORTS:
+        return
+    # Mark before logging: a handler may itself import this module.
+    _WARNED_IMPORTS.add(module)
+    try:
+        logger.warning(
+            "Unsafe import of %r after pip install completed: packages may have "
+            "changed. Callers should import all required modules before running "
+            "pip install, or run pip in a subprocess. "
+            "See https://pip.pypa.io/en/stable/user_guide/"
+            "#using-pip-from-your-program",
+            module,
+        )
+    except Exception:
+        # The caller's logging handlers must not turn warnings into import errors.
+        pass
 
 
 def _prevent_import_hook(name: str, args: tuple[Any, ...]) -> None:
     if name != "import":
         return
     module = args[0]
-    if module in _MISSING_MODULES:
-        raise ImportError(f"No module named {module!r}")
-    if module.partition(".")[0] in _STDLIB_MODULE_NAMES:
+    if not _ACTIVE_INSTALLATIONS:
+        _warn_unsafe_import(module)
         return
-    deprecated(
-        reason=f"Unexpected import of {module!r} after pip install started.",
-        replacement=None,
-        gone_in="26.3",
-        issue=13842,
-        include_source=True,
-        stacklevel=3,
+    if module in _IMPORT_ERRORS:
+        raise _IMPORT_ERRORS[module].with_traceback(None)
+    raise BlockedImportError(
+        f"Blocked import of {module!r} after pip install started. Hook authors"
+        " must import required modules before installation starts."
     )
 
 
-def _eagerly_import_modules() -> None:
-    """Import modules pip uses lazily so the audit hook ignores them later."""
-    for module in _EAGER_IMPORTS:
+def _eagerly_import_modules(module_names: Iterable[str]) -> None:
+    """Import selected dependencies before installation starts."""
+    _IMPORT_ERRORS.clear()
+    for module in dict.fromkeys(module_names):
         try:
             __import__(module)
-        except ImportError:
-            # Record the module as missing so the hook can raise ImportError
-            # instead of trying to import it again.
-            _MISSING_MODULES.add(module)
+        except ImportError as error:
+            _IMPORT_ERRORS[module] = error.with_traceback(None)
 
 
-def _prevent_further_imports() -> None:
-    """Install an audit hook that warns on unexpected imports after pip install starts.
-
-    Eagerly pre-imports the known lazy imports first so the hook only fires
-    on genuinely unexpected modules.
-    """
-    global _IMPORT_AUDIT_HOOK_INSTALLED
-    if _IMPORT_AUDIT_HOOK_INSTALLED:
+def _reify_lazy_imports(module_names: Iterable[str]) -> None:
+    """Resolve lazy bindings in installation dependencies before imports are blocked."""
+    if sys.version_info < (3, 15):
         return
 
-    _IMPORT_AUDIT_HOOK_INSTALLED = True
-    sys.addaudithook(_prevent_import_hook)
+    modules = {
+        name: module
+        for name in module_names
+        if isinstance(module := sys.modules.get(name), types.ModuleType)
+    }
+    attempted: set[object] = set()
+
+    # Resolving a binding can add lazy imports to modules already scanned.
+    while pending := [
+        (module, name, value)
+        for module in modules.values()
+        for name, value in tuple(vars(module).items())
+        if isinstance(value, types.LazyImportType) and value not in attempted
+    ]:
+        for module, name, value in pending:
+            attempted.add(value)
+            before = set(sys.modules)
+
+            try:
+                resolved = getattr(module, name)
+
+                # The binding may resolve to an already-loaded module.
+                if isinstance(resolved, types.ModuleType):
+                    modules[resolved.__name__] = resolved
+            except ImportError as error:
+                if error.name is not None:
+                    _IMPORT_ERRORS[error.name] = error.with_traceback(None)
+            except Exception:
+                # Optional lazy imports need not succeed for installation to proceed.
+                pass
+
+            # Include dependencies loaded indirectly, even by a failed import.
+            for dependency in sys.modules.keys() - before:
+                imported = sys.modules[dependency]
+                if isinstance(imported, types.ModuleType):
+                    modules[dependency] = imported
+
+
+@contextlib.contextmanager
+def _prevent_further_imports() -> Iterator[None]:
+    """Block installation imports, then leave unsafe-import warnings enabled."""
+    global _IMPORT_AUDIT_HOOK_INSTALLED
+    if not _IMPORT_AUDIT_HOOK_INSTALLED:
+        sys.addaudithook(_prevent_import_hook)
+        _IMPORT_AUDIT_HOOK_INSTALLED = True
+
+    token = object()
+    _ACTIVE_INSTALLATIONS.add(token)
+    try:
+        yield
+    finally:
+        _ACTIVE_INSTALLATIONS.discard(token)
 
 
 def _arg_refers_to_pip(arg: str) -> bool:
@@ -159,6 +235,11 @@ class InstallCommand(RequirementCommand):
       %prog [options] [-e] <vcs project url> ...
       %prog [options] [-e] <local project path> ...
       %prog [options] <archive url/path> ..."""
+
+    def main(self, args: list[str]) -> int:
+        # Keep imports blocked through command cleanup and logging shutdown.
+        with contextlib.ExitStack() as self._import_guard:
+            return super().main(args)
 
     def add_options(self) -> None:
         self.cmd_opts.add_option(cmdoptions.requirements())
@@ -482,7 +563,7 @@ class InstallCommand(RequirementCommand):
             if options.json_report_file:
                 report = InstallationReport(requirement_set.requirements_to_install)
                 if options.json_report_file == "-":
-                    print_json(data=report.to_dict())
+                    rich.print_json(data=report.to_dict())
                 else:
                     with open(options.json_report_file, "w", encoding="utf-8") as f:
                         json.dump(report.to_dict(), f, indent=2, ensure_ascii=False)
@@ -546,13 +627,12 @@ class InstallCommand(RequirementCommand):
             if options.target_dir or options.prefix_path:
                 warn_script_location = False
 
-            # Warn on late imports so we don't silently pick up a module
+            # Block late imports so we don't silently pick up a module
             # from a distribution pip is about to install.
-            try:
-                _eagerly_import_modules()
-            finally:
-                _prevent_further_imports()
-
+            module_names = (*_INTERNAL_EAGER_IMPORTS, *pip._EAGER_IMPORTS)
+            _eagerly_import_modules(module_names)
+            _reify_lazy_imports(module_names)
+            self._import_guard.enter_context(_prevent_further_imports())
             installed = install_given_reqs(
                 to_install,
                 root=options.root_path,
@@ -580,6 +660,8 @@ class InstallCommand(RequirementCommand):
                 )
             if summary := installed_packages_summary(installed, env):
                 write_output(summary)
+        except BlockedImportError as error:
+            logger.warning("%s", error)
         except OSError as error:
             show_traceback = self.verbosity >= 1
 
