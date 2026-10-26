@@ -16,6 +16,7 @@ def create_prefix_sdist(
     *,
     metadata_version: str = "2.6",
     dynamic: bool = True,
+    dynamic_python: bool = False,
 ) -> Path:
     return create_basic_sdist_for_package(
         script,
@@ -27,6 +28,7 @@ def create_prefix_sdist(
                 f"Version: {version}\nRequires-Python: >=3.10\n"
                 f"Requires-Dist: {dependency}\nProvides-Extra: speed\n"
                 + ("Dynamic: Requires-Dist\n" if dynamic else "")
+                + ("Dynamic: Requires-Python\n" if dynamic_python else "")
                 + "\n"
             ),
             "pyproject.toml": (
@@ -42,7 +44,16 @@ def create_prefix_sdist(
 
 @pytest.mark.parametrize("command", ["download", "lock", "install", "report"])
 @pytest.mark.parametrize(
-    "domain", ["root", "constraint", "eager-root", "extra-root", "invalid-prefix"]
+    "domain",
+    [
+        "root",
+        "constraint",
+        "eager-root",
+        "extra-root",
+        "invalid-prefix",
+        "static-dependency",
+        "range-root",
+    ],
 )
 def test_static_dependency_prefix_rejects_without_backend(
     script: PipTestEnvironment, command: str, domain: str
@@ -53,7 +64,14 @@ def test_static_dependency_prefix_rejects_without_backend(
         dependency += '; extra == "speed"'
     elif domain == "invalid-prefix":
         dependency = "dependency>=broken"
-    newer = create_prefix_sdist(script, "2.0", dependency)
+    newer = create_prefix_sdist(
+        script,
+        "2.0",
+        dependency,
+        metadata_version="2.2" if domain == "static-dependency" else "2.6",
+        dynamic=domain != "static-dependency",
+        dynamic_python=domain == "static-dependency",
+    )
     for version in ("1.0", "2.0"):
         make_wheel("dependency", version).save_to_dir(script.scratch_path)
     args: list[str | Path] = ["install" if command == "report" else command]
@@ -74,7 +92,7 @@ def test_static_dependency_prefix_rejects_without_backend(
             ]
         )
     else:
-        args.append("dependency==1.0")
+        args.append("dependency<2" if domain == "range-root" else "dependency==1.0")
 
     result = script.pip(
         *args,
@@ -161,3 +179,33 @@ def test_no_deps_report_still_requires_complete_metadata(
 
     assert "unneeded dependency backend executed" in result.stderr
     result.did_not_create(Path("scratch/report.json"))
+
+
+@pytest.mark.parametrize("named", [False, True])
+@pytest.mark.parametrize("wheel_first", [False, True])
+def test_url_root_uses_actual_wheel_metadata_version(
+    script: PipTestEnvironment, named: bool, wheel_first: bool
+) -> None:
+    create_prefix_sdist(script, "2.0", "dependency==2.0")
+    wheel = Path(
+        make_wheel(
+            "dependency", "1.0", metadata_updates={"Version": "2.0"}
+        ).save_to_dir(script.scratch_path)
+    )
+    wheel_requirement = f"dependency @ {wheel.as_uri()}" if named else wheel.as_uri()
+    roots = (
+        [wheel_requirement, "prefix-demo"]
+        if wheel_first
+        else ["prefix-demo", wheel_requirement]
+    )
+
+    result = script.pip(
+        "download",
+        "--no-index",
+        "--find-links",
+        script.scratch_path,
+        *roots,
+        expect_error=True,
+    )
+
+    assert "unneeded dependency backend executed" in result.stderr

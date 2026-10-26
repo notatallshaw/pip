@@ -16,6 +16,8 @@ from pip._internal.resolution.resolvelib.factory import (
     _has_pinned_version_conflict,
 )
 
+from tests.lib.wheel import make_wheel
+
 
 @pytest.mark.parametrize(
     "left, right, conflict",
@@ -91,6 +93,54 @@ def test_only_mandatory_applicable_dependency_conflicts(
             "Provides-Extra: speed\nDynamic: Requires-Dist\n"
             f"Requires-Dist: {dependency}\n"
         ).encode(),
+        "source-1.tar.gz",
+        "source",
+    )
+    linked = install_req_from_line("source @ https://example.invalid/source-1.tar.gz")
+
+    assert factory.reject_static_dependencies(linked, dist) == conflict
+
+
+def test_cached_link_name_does_not_make_unrelated_extras_mandatory(
+    factory: Factory, tmp_path: Path
+) -> None:
+    wheel = Path(make_wheel("cached_name", "1.0").save_to_dir(tmp_path))
+    template = install_req_from_line(f"cached-name @ {wheel.as_uri()}")
+    assert template.link is not None
+    factory._make_base_candidate_from_link(
+        template.link, template, canonicalize_name("cached-name"), None
+    )
+    renamed = install_req_from_line(f"other-name[speed] @ {wheel.as_uri()}")
+    collected = factory.collect_root_requirements(
+        [renamed, install_req_from_line("dependency==1")]
+    )
+    assert "cached-name[speed]" in {
+        requirement.name for requirement in collected.requirements
+    }
+    dist = get_metadata_distribution(
+        b"Metadata-Version: 2.6\nName: other-name\nVersion: 1\n"
+        b"Provides-Extra: speed\nRequires-Dist: dependency==2; extra == 'speed'\n",
+        "other_name-1.tar.gz",
+        "other-name",
+    )
+    linked = install_req_from_line(
+        "other-name @ https://example.invalid/other_name-1.tar.gz"
+    )
+
+    assert not factory.reject_static_dependencies(linked, dist)
+
+
+@pytest.mark.parametrize("constraint, conflict", [(False, False), (True, True)])
+def test_linked_root_filename_version_is_not_an_enforced_specifier(
+    factory: Factory, constraint: bool, conflict: bool
+) -> None:
+    requirement = install_req_from_line(
+        "https://example.invalid/dependency-1-py3-none-any.whl", constraint=constraint
+    )
+    factory._set_mandatory_root_requirements([requirement])
+    dist = get_metadata_distribution(
+        b"Metadata-Version: 2.6\nName: source\nVersion: 1\n"
+        b"Requires-Dist: dependency==2\n",
         "source-1.tar.gz",
         "source",
     )
