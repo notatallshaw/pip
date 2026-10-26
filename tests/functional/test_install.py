@@ -496,6 +496,39 @@ def test_install_preloads_traceback_dependencies(
     assert "Blocked import" not in result.stderr
 
 
+def test_debug_install_preloads_python_lexer(
+    script: PipTestEnvironment, pip_src: Path
+) -> None:
+    # Use an installed copy so the wheel replaces the lexer pip will load.
+    shutil.copytree(pip_src / "src" / "pip", script.site_packages_path / "pip")
+    wheel_path = create_basic_wheel_for_package(
+        script,
+        "mypackage",
+        "1.0",
+        extra_files={
+            "pip/_vendor/pygments/lexers/python.py": (
+                'raise AssertionError("Replacement lexer executed")\n'
+            ),
+            "mypackage-1.0.data/purelib/bonus-NaN.dist-info/METADATA": (
+                "Metadata-Version: 2.1\nName: bonus\nVersion: 1.0\n"
+            ),
+        },
+    )
+
+    result = script.pip(
+        "--debug",
+        "install",
+        "--no-index",
+        "--no-compile",
+        wheel_path,
+        expect_error=True,
+    )
+
+    assert "InvalidVersion: Invalid version: 'NaN'" in result.stderr
+    assert "Replacement lexer executed" not in result.stderr
+    assert "Error in sys.excepthook" not in result.stderr
+
+
 def test_install_preloads_registered_import_before_replacing_module(
     script: PipTestEnvironment,
 ) -> None:

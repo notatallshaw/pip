@@ -14,7 +14,7 @@ from optparse import SUPPRESS_HELP, Values
 from pathlib import Path
 from typing import Any
 
-from pip._vendor import rich
+from pip._vendor import pygments, rich
 from pip._vendor.packaging.requirements import InvalidRequirement, Requirement
 from pip._vendor.packaging.utils import canonicalize_name
 from pip._vendor.requests.exceptions import InvalidProxyURL
@@ -80,6 +80,8 @@ _IMPORT_ERRORS: dict[str, ImportError] = {}
 # Import dependencies directly where possible; otherwise list them here.
 _INTERNAL_EAGER_IMPORTS: tuple[str, ...] = (
     "pip._internal.operations.install.wheel",
+    # Rich loads the Python lexer when rendering debug tracebacks.
+    f"{pygments.__name__}.lexers.python",
     # Python 3.13+ colored tracebacks import helpers while reporting errors.
     # Preload them so a blocked import does not hide the original exception.
     "traceback",
