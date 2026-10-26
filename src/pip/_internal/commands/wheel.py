@@ -144,7 +144,7 @@ class WheelCommand(RequirementCommand):
         preparer.prepare_linked_requirements_more(requirement_set.requirements.values())
 
         reqs_to_build: list[InstallRequirement] = []
-        for req in requirement_set.requirements.values():
+        for req in requirement_set.requirements_to_install:
             if req.is_wheel:
                 preparer.save_linked_requirement(req)
             else:
