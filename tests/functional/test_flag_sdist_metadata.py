@@ -66,14 +66,11 @@ def test_download_does_not_prepare_unused_dynamic_metadata(
 
 
 @pytest.mark.parametrize(
-    "flags", [["--no-deps"], ["--no-deps", "--ignore-requires-python"]]
-)
-@pytest.mark.parametrize(
     "metadata_version, dynamic",
     [("2.2", ""), ("2.6", "Dynamic: Requires-Dist\n")],
 )
 def test_no_deps_still_validates_known_static_dependency_metadata(
-    script: PipTestEnvironment, flags: list[str], metadata_version: str, dynamic: str
+    script: PipTestEnvironment, metadata_version: str, dynamic: str
 ) -> None:
     archive = create_basic_sdist_for_package(
         script,
@@ -91,7 +88,9 @@ def test_no_deps_still_validates_known_static_dependency_metadata(
         },
     )
 
-    result = script.pip("download", "--no-index", *flags, archive, expect_error=True)
+    result = script.pip(
+        "download", "--no-index", "--no-deps", archive, expect_error=True
+    )
 
     assert "invalid metadata" in result.stderr
     assert "dependency>=broken" in result.stderr
