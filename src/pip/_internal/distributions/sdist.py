@@ -5,6 +5,7 @@ import re
 from collections.abc import Iterable
 from contextlib import nullcontext
 from email.parser import BytesParser
+from email.policy import compat32
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -112,7 +113,12 @@ def read_sdist_metadata(
             del message[field]
     if "description" in dynamic:
         message.set_payload("")
-    static_contents = message.as_bytes() if dynamic else contents
+    # Folding a static requirement URL would change the requirement when reparsed.
+    static_contents = (
+        message.as_bytes(policy=compat32.clone(max_line_length=0))
+        if dynamic
+        else contents
+    )
     return get_metadata_distribution(static_contents, filename, name)
 
 

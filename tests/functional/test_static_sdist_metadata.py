@@ -196,3 +196,39 @@ def test_static_sdist_validates_build_system(script: PipTestEnvironment) -> None
     )
     result = script.pip("download", "--no-index", archive, expect_error=True)
     assert "invalid `build-system.requires` key" in result.stderr
+
+
+def test_static_sdist_preserves_direct_dependency_url(
+    script: PipTestEnvironment,
+) -> None:
+    files = {
+        "pyproject.toml": (
+            '[build-system]\nrequires = []\nbuild-backend = "backend"\n'
+            'backend-path = ["."]\n'
+        ),
+        "backend.py": 'raise AssertionError("backend must not execute")\n',
+    }
+    dependency = create_basic_sdist_for_package(
+        script,
+        "dependency",
+        "1.0",
+        extra_files={
+            **files,
+            "PKG-INFO": "Metadata-Version: 2.2\nName: dependency\nVersion: 1.0\n",
+        },
+    )
+    archive = create_basic_sdist_for_package(
+        script,
+        "demo",
+        "1.0",
+        extra_files={
+            **files,
+            "PKG-INFO": (
+                "Metadata-Version: 2.2\nName: demo\nVersion: 1.0\n"
+                f"Requires-Dist: dependency @ {dependency.as_uri()}\n"
+                "Dynamic: Summary\nSummary: provisional\n"
+            ),
+        },
+    )
+    result = script.pip("download", "--no-index", "--dest", "download", archive)
+    result.did_create(Path("scratch") / "download" / dependency.name)

@@ -171,3 +171,20 @@ def test_dynamic_resolution_prefixes(tmp_path: Path, metadata_version: str) -> N
         assert list(dist.iter_raw_dependencies()) == []
         assert list(dist.iter_provided_extras()) == []
     assert "Requires-Python" not in dist.metadata
+
+
+def test_dynamic_metadata_preserves_static_headers(tmp_path: Path) -> None:
+    url = "file:///" + "long-path/" * 20 + "dependency-1.0.tar.gz"
+    (tmp_path / "PKG-INFO").write_text(
+        "Metadata-Version: 2.2\nName: demo\nVersion: 1.0\n"
+        f"Requires-Dist: dependency @ {url}\n"
+        "Summary: café\nDynamic: Description\n\n中文",
+        encoding="utf-8",
+    )
+    dist = read_sdist_metadata(
+        str(tmp_path), "demo-1.0.tar.gz", SDIST_RESOLUTION_FIELDS
+    )
+    assert dist is not None
+    assert next(iter(dist.iter_dependencies())).url == url
+    assert str(dist.metadata["Summary"]) == "café"
+    assert dist.metadata.get_payload() == ""
