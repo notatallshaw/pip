@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 from pip._vendor.packaging.requirements import InvalidRequirement, Requirement
 from pip._vendor.packaging.utils import canonicalize_name
+from pip._vendor.packaging.version import Version
 
 from pip._internal.build_env import BuildEnvironmentInstaller, BuildIsolationMode
 from pip._internal.distributions import make_distribution_for_install_requirement
@@ -355,6 +356,8 @@ class RequirementPreparer:
 
         # Should check build dependencies?
         self.check_build_deps = check_build_deps
+        self.ignore_requires_python = False
+        self.metadata_python_version: Version | None = None
         self.static_metadata_fields: frozenset[str] | None = None
 
         # Should hash-checking be required?
@@ -765,12 +768,14 @@ class RequirementPreparer:
             and not self.legacy_resolver
         ):
             assert req.source_dir is not None
-            static_dist = read_sdist_metadata(
-                req.source_dir, link.filename, self.static_metadata_fields
-            )
+            static_dist = self._get_static_sdist_metadata(req)
             if static_dist is not None:
                 req.load_pyproject_toml()
                 req.set_dist(static_dist)
+                req.unresolved_metadata_fields = frozenset(
+                    str(field).lower()
+                    for field in static_dist.metadata.get_all("Dynamic", ())
+                )
                 req.update_metadata_requirement()
                 return static_dist
 
@@ -804,6 +809,45 @@ class RequirementPreparer:
             _check_sidecar_matches_wheel(req, req._distribution, dist)
 
         return dist
+
+    def _get_static_sdist_metadata(
+        self, req: InstallRequirement
+    ) -> BaseDistribution | None:
+        """Read needed fields, or enough to reject an incompatible Python."""
+        assert req.source_dir is not None
+        assert req.link is not None
+        assert self.static_metadata_fields is not None
+        required_fields = self.static_metadata_fields
+        if self.metadata_python_version is not None and "*" not in required_fields:
+            if self.ignore_requires_python:
+                required_fields -= {"requires-python"}
+            else:
+                required_fields |= {"requires-python"}
+        dist = read_sdist_metadata(req.source_dir, req.link.filename, required_fields)
+        if (
+            dist is not None
+            or self.ignore_requires_python
+            or self.metadata_python_version is None
+        ):
+            return dist
+
+        python_dist = read_sdist_metadata(
+            req.source_dir, req.link.filename, frozenset({"requires-python"})
+        )
+        if python_dist is None or python_dist.requires_python.contains(
+            self.metadata_python_version, prereleases=True
+        ):
+            return None
+
+        # The resolver can reject this candidate without its dynamic dependencies.
+        return python_dist
+
+    def bind_metadata_python(
+        self, version: Version, ignore_requires_python: bool
+    ) -> None:
+        """Use the consuming resolver's Python point and metadata policy."""
+        self.metadata_python_version = version
+        self.ignore_requires_python = ignore_requires_python
 
     def save_linked_requirement(self, req: InstallRequirement) -> None:
         assert self.download_dir is not None

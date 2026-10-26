@@ -104,6 +104,9 @@ class Factory:
         self.preparer = preparer
         self._wheel_cache = wheel_cache
         self._python_candidate = RequiresPythonCandidate(py_version_info)
+        preparer.bind_metadata_python(
+            self._python_candidate.version, ignore_requires_python
+        )
         self._make_install_req_from_spec = make_install_req
         self._use_user_site = use_user_site
         self._force_reinstall = force_reinstall
