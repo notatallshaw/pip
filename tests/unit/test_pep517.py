@@ -20,11 +20,12 @@ from pip._internal.utils.misc import ConfiguredBuildBackendHookCaller
     "spec", [("./foo",), ("git+https://example.com/pkg@dev#egg=myproj",)]
 )
 def test_pep517_parsing_checks_requirements(tmpdir: Path, spec: tuple[str]) -> None:
-    tmpdir.joinpath("pyproject.toml").write_text(dedent(f"""
+    pyproject = dedent(f"""
             [build-system]
             requires = [{spec[0]!r}]
             build-backend = "foo"
-            """))
+            """)
+    tmpdir.joinpath("pyproject.toml").write_text(pyproject)
     req = InstallRequirement(None, None)
     req.source_dir = os.fspath(tmpdir)  # make req believe it has been unpacked
 
@@ -33,12 +34,12 @@ def test_pep517_parsing_checks_requirements(tmpdir: Path, spec: tuple[str]) -> N
 
     error = e.value
 
-    assert str(req) in error.message
+    assert str(req) in str(error.message)
     assert error.context
-    assert "build-system.requires" in error.context
-    assert "contains an invalid requirement" in error.context
+    assert "build-system.requires" in str(error.context)
+    assert "contains an invalid requirement" in str(error.context)
     assert error.hint_stmt
-    assert "PEP 518" in error.hint_stmt
+    assert "PEP 518" in str(error.hint_stmt)
 
 
 @pytest.mark.parametrize(
