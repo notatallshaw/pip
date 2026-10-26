@@ -98,6 +98,38 @@ def test_legacy_archive_resolves_modern_metadata_without_backend(
         result.did_create(Path("scratch/downloaded") / filename)
 
 
+def test_legacy_setup_py_archive_uses_modern_metadata(
+    script: PipTestEnvironment,
+) -> None:
+    create_basic_wheel_for_package(script, "dependency", "1.0")
+    archive = create_basic_sdist_for_package(
+        script,
+        "demo-package",
+        "1.0",
+        fails_build=True,
+        extra_files={
+            "PKG-INFO": (
+                "Metadata-Version: 2.2\nName: demo-package\nVersion: 1.0\n"
+                "Requires-Dist: dependency==1.0\n"
+            ),
+        },
+    )
+    archive = repack_sdist(archive, ".zip", "zip")
+
+    result = script.pip(
+        "download",
+        "--no-index",
+        "--find-links",
+        script.scratch_path,
+        "--dest",
+        "downloaded",
+        archive,
+    )
+
+    result.did_create(Path("scratch/downloaded") / archive.name)
+    result.did_create(Path("scratch/downloaded/dependency-1.0-py2.py3-none-any.whl"))
+
+
 @pytest.mark.parametrize(
     "filename, metadata, flags",
     [
