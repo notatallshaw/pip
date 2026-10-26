@@ -20,6 +20,7 @@ from pip._internal.resolution.resolvelib.factory import (
     Factory,
     _has_pinned_version_conflict,
 )
+from pip._internal.utils.deprecation import PipDeprecationWarning
 
 from tests.lib.wheel import make_wheel
 
@@ -284,8 +285,9 @@ def test_marker_errors_preserve_constraint_validation_and_reset_preflight(
     )
     uncertain = install_req_from_line(f"other==1; {marker}")
 
-    with pytest.raises(InstallationError, match="Unnamed requirements"):
-        factory.collect_root_requirements([invalid_constraint, uncertain])
+    with pytest.warns(PipDeprecationWarning):
+        with pytest.raises(InstallationError, match="Unnamed requirements"):
+            factory.collect_root_requirements([invalid_constraint, uncertain])
 
     assert not factory._mandatory_versions
     assert not factory._mandatory_extras

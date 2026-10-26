@@ -68,6 +68,8 @@ def test_fresh_linked_root_extra_conflict_skips_backend(
     request_kind: str,
 ) -> None:
     archive = create_extra_sdist(script, dynamic_provided=dynamic_provided)
+    for version in ("1", "2"):
+        make_wheel("dependency", version).save_to_dir(script.scratch_path)
     event = script.scratch_path / "backend-ran"
     script.environ["PIP_TEST_EXTRA_BACKEND"] = str(event)
     source = (
@@ -80,7 +82,13 @@ def test_fresh_linked_root_extra_conflict_skips_backend(
         roots.reverse()
 
     result = script.pip(
-        "download", "--no-index", "--ignore-requires-python", *roots, expect_error=True
+        "download",
+        "--no-index",
+        "--find-links",
+        script.scratch_path,
+        "--ignore-requires-python",
+        *roots,
+        expect_error=True,
     )
 
     assert not event.exists()
