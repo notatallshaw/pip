@@ -141,7 +141,7 @@ def test_complete_static_metadata_preserves_unicode(tmp_path: Path) -> None:
     dist = read_sdist_metadata(str(tmp_path), "demo-1.0.tar.gz", frozenset({"*"}))
     assert dist is not None
     assert str(dist.metadata["Summary"]) == "café"
-    assert dist.metadata.get_payload() == "中文"
+    assert dist.metadata_dict["description"] == "中文"
 
 
 def test_complete_metadata_rejects_duplicate_fields(tmp_path: Path) -> None:
