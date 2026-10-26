@@ -11,14 +11,17 @@ from tests.lib import PipTestEnvironment, create_basic_sdist_for_package, make_w
 
 
 @pytest.mark.parametrize(
-    "metadata_kind, cross_target, incompatible_python",
+    "metadata_kind, cross_target, incompatible_python, wheel_policy",
     [
-        ("static", False, False),
-        ("static", True, False),
-        ("static", False, True),
-        ("missing", False, False),
-        ("dynamic", False, False),
-        ("dynamic", True, False),
+        ("static", False, False, None),
+        ("static", True, False, None),
+        ("static", False, True, None),
+        ("missing", False, False, None),
+        ("dynamic", False, False, None),
+        ("dynamic", True, False, None),
+        ("dynamic", True, False, "host"),
+        ("dynamic", True, False, "foreign"),
+        ("dynamic", True, False, "no-binary"),
     ],
 )
 def test_inprocess_build_dependencies_use_required_static_metadata(
@@ -26,6 +29,7 @@ def test_inprocess_build_dependencies_use_required_static_metadata(
     metadata_kind: str,
     cross_target: bool,
     incompatible_python: bool,
+    wheel_policy: str | None,
 ) -> None:
     events = script.scratch_path / "build-events"
     script.environ["PIP_TEST_INPROCESS_EVENTS"] = str(events)
@@ -71,6 +75,19 @@ def test_inprocess_build_dependencies_use_required_static_metadata(
         metadata=metadata,
         extra_files={"root_backend.py": backend_module},
     )
+    if wheel_policy is not None:
+        python_tag = (
+            "cp39"
+            if wheel_policy == "foreign"
+            else f"cp{sys.version_info.major}{sys.version_info.minor}"
+        )
+        make_wheel(
+            "root_backend",
+            "1.0",
+            metadata=metadata,
+            wheel_metadata_updates={"Tag": f"{python_tag}-none-any"},
+            extra_files={"root_backend.py": backend_module},
+        ).save_to(script.scratch_path / f"root_backend-1.0-{python_tag}-none-any.whl")
     files = {
         "pyproject.toml": textwrap.dedent("""\
             [build-system]
@@ -120,7 +137,11 @@ def test_inprocess_build_dependencies_use_required_static_metadata(
         build-backend = "root_backend"
         """))
     target_options = ["--python-version", "3.9"] if cross_target else []
-    failure = metadata_kind != "static" or incompatible_python
+    if wheel_policy == "no-binary":
+        target_options.append("--no-binary=root-backend")
+    failure = (
+        metadata_kind != "static" and wheel_policy != "host"
+    ) or incompatible_python
 
     result = script.pip(
         "install",
@@ -149,11 +170,9 @@ def test_inprocess_build_dependencies_use_required_static_metadata(
             "dependency metadata",
         ]
     else:
-        assert events.read_text().splitlines() == [
-            "dependency requirements",
-            "dependency wheel",
-            "root requirements",
-            "root metadata",
-        ]
+        expected = ["root requirements", "root metadata"]
+        if wheel_policy != "host":
+            expected[:0] = ["dependency requirements", "dependency wheel"]
+        assert events.read_text().splitlines() == expected
         report = json.loads(script.scratch_path.joinpath("report.json").read_text())
         assert [item["metadata"]["name"] for item in report["install"]] == ["project"]
