@@ -116,6 +116,12 @@ def _has_conflicting_links(links: Iterable[Link]) -> bool:
     )
 
 
+class RootExtraRequest(NamedTuple):
+    link: Link
+    name: NormalizedName | None
+    extras: frozenset[NormalizedName]
+
+
 class CollectedRootRequirements(NamedTuple):
     requirements: list[Requirement]
     constraints: dict[str, Constraint]
@@ -167,6 +173,9 @@ class Factory:
         self._static_dependency_rejections: set[Link] = set()
         self._empty_link_domains: frozenset[NormalizedName] = frozenset()
         self._dependency_preflight_enabled = True
+        self._root_extra_requests: Mapping[InstallRequirement, RootExtraRequest] = (
+            MappingProxyType({})
+        )
 
         if not ignore_installed:
             env = get_default_environment()
@@ -610,6 +619,7 @@ class Factory:
         self, root_ireqs: list[InstallRequirement]
     ) -> None:
         self._dependency_preflight_enabled = True
+        self._root_extra_requests = MappingProxyType({})
         # Rejected partial metadata is only valid for the previous root domains.
         for link in self._static_dependency_rejections:
             self._link_candidate_cache.pop(link, None)
@@ -621,8 +631,17 @@ class Factory:
         versions: dict[NormalizedName, SpecifierSet] = {}
         extras: dict[NormalizedName, frozenset[NormalizedName]] = {}
         constraint_links: dict[NormalizedName, list[Link]] = {}
+        root_extra_requests: dict[InstallRequirement, RootExtraRequest] = {}
         for ireq in root_ireqs:
-            if ireq.req is None or not ireq.match_markers():
+            if not ireq.match_markers():
+                continue
+            if not ireq.constraint and ireq.link is not None and ireq.extras:
+                root_extra_requests[ireq] = RootExtraRequest(
+                    ireq.link,
+                    canonicalize_name(ireq.req.name) if ireq.req is not None else None,
+                    frozenset(canonicalize_name(extra) for extra in ireq.extras),
+                )
+            if ireq.req is None:
                 continue
             name = canonicalize_name(ireq.req.name)
             # Explicit URL roots use their candidate's version, not filename hints.
@@ -637,6 +656,7 @@ class Factory:
         # Build the complete snapshot before collecting eager URL requirements.
         self._mandatory_versions = MappingProxyType(versions)
         self._mandatory_extras = MappingProxyType(extras)
+        self._root_extra_requests = MappingProxyType(root_extra_requests)
         self._empty_link_domains = frozenset(
             name
             for name, links in constraint_links.items()
@@ -701,6 +721,7 @@ class Factory:
             self._mandatory_extras = MappingProxyType({})
             self._mandatory_candidate_versions = MappingProxyType({})
             self._empty_link_domains = frozenset()
+            self._root_extra_requests = MappingProxyType({})
             self._dependency_preflight_enabled = False
         collected = CollectedRootRequirements([], {}, {})
         for i, ireq in enumerate(root_ireqs):
@@ -767,6 +788,15 @@ class Factory:
             return True
 
         requested_extras = self._mandatory_extras.get(dist.canonical_name, frozenset())
+        if isinstance(req.comes_from, InstallRequirement):
+            request = self._root_extra_requests.get(req.comes_from)
+            if (
+                request is not None
+                and req.link == request.link
+                and (request.name is None or request.name == dist.canonical_name)
+            ):
+                # Dropping root extras preserves this direct parent for fresh prep.
+                requested_extras |= request.extras
         known_extras = requested_extras.intersection(dist.iter_provided_extras())
         try:
             dependencies = set(dist.iter_dependencies())

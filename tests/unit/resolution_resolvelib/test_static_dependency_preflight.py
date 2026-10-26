@@ -11,7 +11,11 @@ from pip._vendor.packaging.version import Version
 from pip._internal.distributions.sdist import SDIST_RESOLUTION_FIELDS
 from pip._internal.exceptions import InstallationError
 from pip._internal.metadata import get_metadata_distribution
-from pip._internal.req.constructors import install_req_from_line
+from pip._internal.req.constructors import (
+    install_req_drop_extras,
+    install_req_from_line,
+)
+from pip._internal.resolution.resolvelib.candidates import make_install_req_from_link
 from pip._internal.resolution.resolvelib.factory import (
     Factory,
     _has_pinned_version_conflict,
@@ -287,9 +291,44 @@ def test_marker_errors_preserve_constraint_validation_and_reset_preflight(
     assert not factory._mandatory_extras
     assert not factory._mandatory_candidate_versions
     assert not factory._empty_link_domains
+    assert not factory._root_extra_requests
     assert not factory._uses_dependency_preflight()
     assert not factory._static_dependency_rejections
     assert not factory.reject_static_dependencies(linked, dist)
 
     factory.collect_root_requirements(roots)
     assert factory.reject_static_dependencies(linked, dist)
+
+
+@pytest.mark.parametrize("lineage", ["direct", "copy", "ancestor", "other-link"])
+def test_eager_root_extras_require_exact_preparation_lineage(
+    factory: Factory, lineage: str
+) -> None:
+    root = install_req_from_line(
+        "source[speed] @ https://example.invalid/source-1.tar.gz"
+    )
+    factory._set_mandatory_root_requirements(
+        [root, install_req_from_line("dependency==1")]
+    )
+    assert root.link is not None
+    linked = make_install_req_from_link(root.link, install_req_drop_extras(root))
+    if lineage == "copy":
+        linked.comes_from = install_req_from_line(str(root.req))
+    elif lineage == "ancestor":
+        linked.comes_from = install_req_drop_extras(root)
+    elif lineage == "other-link":
+        other = install_req_from_line("source @ https://example.invalid/other.tar.gz")
+        linked.link = other.link
+    dist = get_metadata_distribution(
+        b"Metadata-Version: 2.6\nName: source\nVersion: 1\n"
+        b"Provides-Extra: speed\nDynamic: Requires-Dist\n"
+        b"Requires-Dist: dependency==2; extra == 'speed'\n",
+        "source-1.tar.gz",
+        "source",
+    )
+
+    assert factory.reject_static_dependencies(linked, dist) == (lineage == "direct")
+    assert not factory._mandatory_extras.get(canonicalize_name("source"))
+    factory._set_mandatory_root_requirements([install_req_from_line("dependency==1")])
+    assert not factory._root_extra_requests
+    assert not factory.reject_static_dependencies(linked, dist)
