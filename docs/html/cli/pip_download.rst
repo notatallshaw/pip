@@ -70,6 +70,11 @@ The downloaded file keeps the URI's filename. Hash verification, archive
 extraction and project declaration checks still apply. Explicit
 ``--check-build-dependencies`` can run build code.
 
+With the same flags and default resolver, metadata preparation is also skipped
+for one unnamed local source directory. No archive is created or copied; pip
+reports the existing directory path. Named directories, editable sources and VCS
+inputs retain their usual metadata handling.
+
 Options
 =======
 
