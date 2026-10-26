@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import contextlib
 import importlib
 import logging
 import os
+import sys
 import time
 from collections.abc import Callable, Iterator
 from optparse import Values
@@ -130,6 +132,76 @@ def test_pip_version_check_called(mock_version_check: Mock) -> None:
     cmd = FakeCommand()
     cmd.main([])
     mock_version_check.assert_called_once()
+
+
+@pytest.mark.parametrize("error", [SystemExit(7), KeyboardInterrupt()])
+def test_cli_preserves_exit_status(
+    monkeypatch: pytest.MonkeyPatch, error: BaseException
+) -> None:
+    hook = Mock()
+    monkeypatch.setattr(sys, "excepthook", hook)
+    command = FakeCommand()
+    command._cli = True
+
+    def fail(args: list[str]) -> int:
+        raise error
+
+    monkeypatch.setattr(command, "_main", fail)
+    with pytest.raises(type(error)) as caught:
+        command.main([])
+    assert caught.value is error
+    hook.assert_not_called()
+
+
+@pytest.mark.parametrize("stage", ["cleanup", "logging_shutdown"])
+def test_cli_reports_cleanup_failure(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], stage: str
+) -> None:
+    error = RuntimeError("cleanup failed")
+    command = FakeCommand()
+    hook = Mock()
+    monkeypatch.setattr(sys, "excepthook", hook)
+    command._cli = True
+
+    def fail() -> None:
+        raise error
+
+    def run(args: list[str]) -> int:
+        if stage == "cleanup":
+            command.enter_context(contextlib.ExitStack()).callback(fail)
+        return SUCCESS
+
+    monkeypatch.setattr(command, "_main", run)
+    if stage == "logging_shutdown":
+        monkeypatch.setattr(logging, "shutdown", fail)
+
+    assert command.main([]) == 1
+    hook.assert_not_called()
+    assert "RuntimeError: cleanup failed" in capsys.readouterr().err
+
+
+def test_cli_falls_back_when_rich_reporting_fails(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    error = RuntimeError("original failure")
+    command = FakeCommand()
+    command._cli = True
+    command._debug_mode = True
+
+    def fail(args: list[str]) -> int:
+        raise error
+
+    monkeypatch.setattr(command, "_main", fail)
+    monkeypatch.setattr(
+        base_command.rich_traceback.Traceback,
+        "from_exception",
+        Mock(side_effect=ValueError("renderer failed")),
+    )
+
+    assert command.main([]) == 1
+    stderr = capsys.readouterr().err
+    assert "RuntimeError: original failure" in stderr
+    assert "renderer failed" not in stderr
 
 
 def test_debug_enables_verbose_logs() -> None:

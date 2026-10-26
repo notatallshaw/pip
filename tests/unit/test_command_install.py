@@ -242,8 +242,11 @@ def test_import_guard_restores_warning_mode_after_error(
     assert "Unsafe import" in caplog.text
 
 
+@pytest.mark.parametrize("handle_exception", [False, True])
 def test_import_guard_lasts_through_failed_command_shutdown(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    handle_exception: bool,
 ) -> None:
     monkeypatch.setattr(install, "_IMPORT_AUDIT_HOOK_INSTALLED", False)
     monkeypatch.setattr(install, "_ACTIVE_INSTALLATIONS", set())
@@ -258,13 +261,25 @@ def test_import_guard_lasts_through_failed_command_shutdown(
         with pytest.raises(install.BlockedImportError):
             install._prevent_import_hook("import", ("during_shutdown",))
 
+    def report(error: Exception, *, debug: bool) -> None:
+        assert isinstance(error, RuntimeError)
+        assert str(error) == "installation failed"
+        logging_shutdown.assert_called_once()
+        with pytest.raises(install.BlockedImportError):
+            install._prevent_import_hook("import", ("during_exception_reporting",))
+
+    command._cli = handle_exception
+    monkeypatch.setattr("pip._internal.cli.base_command._print_exception", report)
     monkeypatch.setattr(command, "_main", fail)
     with (
         mock.patch.object(sys, "addaudithook"),
         mock.patch("logging.shutdown", side_effect=shutdown) as logging_shutdown,
-        pytest.raises(RuntimeError, match="installation failed"),
     ):
-        command.main([])
+        if handle_exception:
+            assert command.main([]) == 1
+        else:
+            with pytest.raises(RuntimeError, match="installation failed"):
+                command.main([])
 
     logging_shutdown.assert_called_once()
     assert not install._ACTIVE_INSTALLATIONS

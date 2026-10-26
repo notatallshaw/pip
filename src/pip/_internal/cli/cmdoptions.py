@@ -206,8 +206,7 @@ debug_mode: Callable[..., Option] = partial(
     action="store_true",
     default=False,
     help=(
-        "Let unhandled exceptions propagate outside the main subroutine, "
-        "instead of logging them to stderr."
+        "Show tracebacks with local variables instead of abbreviated error messages."
     ),
 )
 

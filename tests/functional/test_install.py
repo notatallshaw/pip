@@ -499,6 +499,8 @@ def test_install_preloads_traceback_dependencies(
 def test_debug_install_preloads_python_lexer(
     script: PipTestEnvironment, pip_src: Path
 ) -> None:
+    if script.zipapp:
+        pytest.skip("Zipapp loads the lexer from the archive")
     # Use an installed copy so the wheel replaces the lexer pip will load.
     shutil.copytree(pip_src / "src" / "pip", script.site_packages_path / "pip")
     wheel_path = create_basic_wheel_for_package(
@@ -525,8 +527,50 @@ def test_debug_install_preloads_python_lexer(
     )
 
     assert "InvalidVersion: Invalid version: 'NaN'" in result.stderr
+    assert "version = 'NaN'" in result.stderr
     assert "Replacement lexer executed" not in result.stderr
     assert "Error in sys.excepthook" not in result.stderr
+
+
+@pytest.mark.parametrize(
+    "entrypoint, stream",
+    [
+        ("cli", "normal"),
+        ("cli", "none"),
+        ("cli", "broken"),
+        ("main", "normal"),
+        ("pip.main", "normal"),
+    ],
+)
+def test_install_exception_reporting_lifetime(
+    script: PipTestEnvironment, entrypoint: str, stream: str
+) -> None:
+    wheel_path = create_basic_wheel_for_package(script, "mypackage", "1.0")
+    script.scratch_path.joinpath("after_install.py").write_text("value = 42\n")
+    runner = script.scratch_path / "run_install.py"
+    shutil.copyfile(
+        Path(__file__).parents[1] / "lib" / "install_with_exception_reporting.py",
+        runner,
+    )
+
+    result = script.run(
+        "python",
+        str(runner),
+        str(wheel_path),
+        entrypoint,
+        stream,
+        expect_stderr=True,
+    )
+
+    assert "Import allowed after pip finished" in result.stdout
+    if entrypoint == "cli":
+        if stream != "none":
+            assert "Import blocked during exception reporting" in result.stdout
+        if stream == "normal":
+            assert "ReportingError: installation failed" in result.stderr
+    else:
+        assert "Original exception propagated" in result.stdout
+        assert "Import blocked during exception reporting" not in result.stdout
 
 
 def test_install_preloads_registered_import_before_replacing_module(

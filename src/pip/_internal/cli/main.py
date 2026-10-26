@@ -38,7 +38,16 @@ logger = logging.getLogger(__name__)
 # main, this should not be an issue in practice.
 
 
+def cli(args: list[str] | None = None) -> int:
+    """Run the CLI with exception reporting owned by the command."""
+    return _main(args, cli=True)
+
+
 def main(args: list[str] | None = None) -> int:
+    return _main(args, cli=False)
+
+
+def _main(args: list[str] | None, *, cli: bool) -> int:
     # NOTE: Lazy imports to speed up import of this module,
     # which is imported from the pip console script. This doesn't
     # speed up normal pip execution, but might be important in the future
@@ -83,4 +92,5 @@ def main(args: list[str] | None = None) -> int:
         logger.debug("Ignoring error %s when setting locale", e)
     command = create_command(cmd_name, isolated=("--isolated" in cmd_args))
 
+    command._cli = cli
     return command.main(cmd_args)
