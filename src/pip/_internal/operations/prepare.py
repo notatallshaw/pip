@@ -219,6 +219,9 @@ def _check_download_dir(
         try:
             hashes.check_against_path(download_path)
         except HashMismatch:
+            # A local input is not a disposable download-cache entry.
+            if link.is_file and os.path.samefile(download_path, link.file_path):
+                raise
             if warn_on_hash_mismatch:
                 logger.warning(
                     "Previously-downloaded file %s has bad hash. Re-downloading.",
