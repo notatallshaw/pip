@@ -369,6 +369,9 @@ class RequirementPreparer:
         self.source_build_is_required: Callable[[InstallRequirement], bool] | None = (
             None
         )
+        self.static_dependency_rejector: (
+            Callable[[InstallRequirement, BaseDistribution], bool] | None
+        ) = None
 
         # Should hash-checking be required?
         self.require_hashes = require_hashes
@@ -918,23 +921,27 @@ class RequirementPreparer:
             else:
                 required_fields |= {"requires-python"}
         dist = read_sdist_metadata(req.source_dir, req.link.filename, required_fields)
-        if (
-            dist is not None
-            or self.ignore_requires_python
-            or self.metadata_python_version is None
-        ):
+        if dist is not None:
             return dist
 
-        python_dist = read_sdist_metadata(
-            req.source_dir, req.link.filename, frozenset({"requires-python"})
-        )
-        if python_dist is None or python_dist.requires_python.contains(
-            self.metadata_python_version, prereleases=True
-        ):
-            return None
+        if not self.ignore_requires_python and self.metadata_python_version is not None:
+            python_dist = read_sdist_metadata(
+                req.source_dir, req.link.filename, frozenset({"requires-python"})
+            )
+            if python_dist is not None and not python_dist.requires_python.contains(
+                self.metadata_python_version, prereleases=True
+            ):
+                return python_dist
 
-        # The resolver can reject this candidate without its dynamic dependencies.
-        return python_dist
+        if self.static_dependency_rejector is not None:
+            partial_dist = read_sdist_metadata(
+                req.source_dir, req.link.filename, frozenset({"name", "version"})
+            )
+            if partial_dist is not None and self.static_dependency_rejector(
+                req, partial_dist
+            ):
+                return partial_dist
+        return None
 
     def bind_metadata_python(
         self, version: Version, ignore_requires_python: bool

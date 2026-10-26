@@ -5,6 +5,7 @@ import copy
 import functools
 import logging
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from types import MappingProxyType
 from typing import (
     TYPE_CHECKING,
     NamedTuple,
@@ -81,6 +82,24 @@ C = TypeVar("C")
 Cache = dict[Link, C]
 
 
+def _has_pinned_version_conflict(left: SpecifierSet, right: SpecifierSet) -> bool:
+    """Prove an empty intersection when an ordinary equality fixes the version."""
+    specifiers = tuple(left) + tuple(right)
+    if any(specifier.operator == "===" for specifier in specifiers):
+        return False
+    pins = {
+        Version(specifier.version)
+        for specifier in specifiers
+        if specifier.operator == "==" and not specifier.version.endswith(".*")
+    }
+    if not pins:
+        return False
+
+    # Include local pins from both sides: ==1 and ==1+local are compatible.
+    combined = left & right
+    return not any(combined.contains(version, prereleases=True) for version in pins)
+
+
 class CollectedRootRequirements(NamedTuple):
     requirements: list[Requirement]
     constraints: dict[str, Constraint]
@@ -120,6 +139,13 @@ class Factory:
             tuple[int, frozenset[NormalizedName]], ExtrasCandidate
         ] = {}
         self._supported_tags_cache = get_supported()
+        self._mandatory_versions: Mapping[NormalizedName, SpecifierSet] = (
+            MappingProxyType({})
+        )
+        self._mandatory_extras: Mapping[NormalizedName, frozenset[NormalizedName]] = (
+            MappingProxyType({})
+        )
+        self._static_dependency_rejections: set[Link] = set()
 
         if not ignore_installed:
             env = get_default_environment()
@@ -557,9 +583,35 @@ class Factory:
                         self._make_extras_candidate(cand, frozenset(ireq.extras))
                     )
 
+    def _set_mandatory_root_requirements(
+        self, root_ireqs: list[InstallRequirement]
+    ) -> None:
+        # Rejected partial metadata is only valid for the previous root domains.
+        for link in self._static_dependency_rejections:
+            self._link_candidate_cache.pop(link, None)
+        if self._static_dependency_rejections:
+            self._extras_candidate_cache.clear()
+            self._static_dependency_rejections.clear()
+
+        versions: dict[NormalizedName, SpecifierSet] = {}
+        extras: dict[NormalizedName, frozenset[NormalizedName]] = {}
+        for ireq in root_ireqs:
+            if ireq.req is None or not ireq.match_markers():
+                continue
+            name = canonicalize_name(ireq.req.name)
+            versions[name] = versions.get(name, SpecifierSet()) & ireq.req.specifier
+            if not ireq.constraint:
+                extras[name] = extras.get(name, frozenset()) | frozenset(
+                    canonicalize_name(extra) for extra in ireq.extras
+                )
+        # Build the complete snapshot before collecting eager URL requirements.
+        self._mandatory_versions = MappingProxyType(versions)
+        self._mandatory_extras = MappingProxyType(extras)
+
     def collect_root_requirements(
         self, root_ireqs: list[InstallRequirement]
     ) -> CollectedRootRequirements:
+        self._set_mandatory_root_requirements(root_ireqs)
         collected = CollectedRootRequirements([], {}, {})
         for i, ireq in enumerate(root_ireqs):
             if ireq.constraint:
@@ -598,6 +650,33 @@ class Factory:
         # the same key.
         collected.requirements.sort(key=lambda r: r.name != r.project_name)
         return collected
+
+    def reject_static_dependencies(
+        self, req: InstallRequirement, dist: BaseDistribution
+    ) -> bool:
+        """Reject fixed dependencies that cannot meet mandatory root domains."""
+        requested_extras = self._mandatory_extras.get(dist.canonical_name, frozenset())
+        known_extras = requested_extras.intersection(dist.iter_provided_extras())
+        try:
+            dependencies = set(dist.iter_dependencies())
+            if known_extras:
+                dependencies.update(dist.iter_dependencies(known_extras))
+        except InvalidRequirement as error:
+            raise MetadataInvalid(req, str(error)) from error
+
+        versions: dict[NormalizedName, SpecifierSet] = {}
+        for dependency in dependencies:
+            if dependency.url is not None:
+                continue
+            name = canonicalize_name(dependency.name)
+            versions[name] = versions.get(name, SpecifierSet()) & dependency.specifier
+        for name, required in versions.items():
+            mandatory = self._mandatory_versions.get(name, SpecifierSet())
+            if _has_pinned_version_conflict(mandatory, required):
+                assert req.link is not None
+                self._static_dependency_rejections.add(req.link)
+                return True
+        return False
 
     def make_requirement_from_candidate(
         self, candidate: Candidate

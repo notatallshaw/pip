@@ -84,6 +84,11 @@ class Resolver(BaseResolver):
     def resolve(
         self, root_reqs: list[InstallRequirement], check_supported_wheels: bool
     ) -> RequirementSet:
+        self.factory.preparer.static_dependency_rejector = (
+            None
+            if self.ignore_dependencies
+            else self.factory.reject_static_dependencies
+        )
         collected = self.factory.collect_root_requirements(root_reqs)
         provider = PipProvider(
             factory=self.factory,
