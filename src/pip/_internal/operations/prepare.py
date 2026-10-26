@@ -359,6 +359,7 @@ class RequirementPreparer:
         self.ignore_requires_python = False
         self.metadata_python_version: Version | None = None
         self.static_metadata_fields: frozenset[str] | None = None
+        self.user_supplied_metadata_fields: frozenset[str] | None = None
 
         # Should hash-checking be required?
         self.require_hashes = require_hashes
@@ -837,6 +838,8 @@ class RequirementPreparer:
         assert req.link is not None
         assert self.static_metadata_fields is not None
         required_fields = self.static_metadata_fields
+        if req.user_supplied and self.user_supplied_metadata_fields is not None:
+            required_fields = self.user_supplied_metadata_fields
         if self.metadata_python_version is not None and "*" not in required_fields:
             if self.ignore_requires_python:
                 required_fields -= {"requires-python"}
