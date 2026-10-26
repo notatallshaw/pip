@@ -149,6 +149,26 @@ def test_linked_root_filename_version_is_not_an_enforced_specifier(
     assert factory.reject_static_dependencies(linked, dist) == conflict
 
 
+def test_linked_root_extras_need_actual_candidate_provenance(factory: Factory) -> None:
+    factory._set_mandatory_root_requirements(
+        [
+            install_req_from_line(
+                "source[speed] @ https://example.invalid/source-1.tar.gz"
+            ),
+            install_req_from_line("dependency==1"),
+        ]
+    )
+    dist = get_metadata_distribution(
+        b"Metadata-Version: 2.6\nName: source\nVersion: 1\nProvides-Extra: speed\n"
+        b"Requires-Dist: dependency==2; extra == 'speed'\n",
+        "source-1.tar.gz",
+        "source",
+    )
+    linked = install_req_from_line("source @ https://example.invalid/source-1.tar.gz")
+
+    assert not factory.reject_static_dependencies(linked, dist)
+
+
 def test_reusing_factory_does_not_reuse_root_dependent_partial_metadata(
     factory: Factory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

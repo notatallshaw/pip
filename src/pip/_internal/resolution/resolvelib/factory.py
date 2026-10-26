@@ -602,14 +602,7 @@ class Factory:
             # Explicit URL roots use their candidate's version, not filename hints.
             if ireq.link is None or ireq.constraint:
                 versions[name] = versions.get(name, SpecifierSet()) & ireq.req.specifier
-            if not ireq.constraint:
-                cached: BaseCandidate | None = None
-                if ireq.link is not None:
-                    cached = self._link_candidate_cache.get(
-                        ireq.link
-                    ) or self._editable_candidate_cache.get(ireq.link)
-                if cached is not None and cached.project_name != name:
-                    continue
+            if not ireq.constraint and ireq.link is None:
                 extras[name] = extras.get(name, frozenset()) | frozenset(
                     canonicalize_name(extra) for extra in ireq.extras
                 )
