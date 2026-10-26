@@ -465,9 +465,7 @@ class InstallCommand(RequirementCommand):
                     if options.json_report_file
                     else SDIST_RESOLUTION_FIELDS
                 ),
-                build_wheel_for_metadata=(
-                    not options.dry_run and not options.json_report_file
-                ),
+                build_wheel_for_metadata=not options.dry_run,
             )
             resolver = self.make_resolver(
                 preparer=preparer,
