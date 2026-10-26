@@ -169,6 +169,7 @@ class RequirementCommand(IndexGroupCommand):
         download_dir: str | None = None,
         verbosity: int = 0,
         static_metadata_fields: frozenset[str] | None = None,
+        build_wheel_for_metadata: bool = False,
     ) -> RequirementPreparer:
         """
         Create a RequirementPreparer instance for the given parameters.
@@ -265,6 +266,11 @@ class RequirementCommand(IndexGroupCommand):
                 root_fields -= {"requires-python"}
             preparer.user_supplied_metadata_fields = root_fields
         preparer.ignore_requires_python = options.ignore_requires_python
+        preparer.build_wheel_for_metadata = (
+            build_wheel_for_metadata
+            and options.ignore_dependencies
+            and options.ignore_requires_python
+        )
         return preparer
 
     @classmethod

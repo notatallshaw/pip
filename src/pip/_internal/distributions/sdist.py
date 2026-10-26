@@ -167,7 +167,10 @@ class SourceDistribution(AbstractDistribution):
         self.prepare_build_environment(
             build_env_installer, build_isolation, check_build_deps, allow_editables
         )
-        self.req.prepare_metadata(allow_editables)
+        if self.req.build_wheel_for_metadata:
+            self.req.prepare_wheel_metadata(allow_editables)
+        else:
+            self.req.prepare_metadata(allow_editables)
 
     def prepare_build_environment(
         self,

@@ -7,7 +7,7 @@ from __future__ import annotations
 import mimetypes
 import os
 import shutil
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -360,6 +360,10 @@ class RequirementPreparer:
         self.metadata_python_version: Version | None = None
         self.static_metadata_fields: frozenset[str] | None = None
         self.user_supplied_metadata_fields: frozenset[str] | None = None
+        self.build_wheel_for_metadata = False
+        self.source_build_is_required: Callable[[InstallRequirement], bool] | None = (
+            None
+        )
 
         # Should hash-checking be required?
         self.require_hashes = require_hashes
@@ -776,6 +780,8 @@ class RequirementPreparer:
         if local_file:
             req.local_file_path = local_file.path
 
+        req.build_wheel_for_metadata = self._should_build_wheel_for_metadata(req)
+
         # Only an archive's root metadata has the sdist's static-field guarantee.
         if (
             local_file
@@ -916,6 +922,7 @@ class RequirementPreparer:
             req.update_editable()
             assert req.source_dir
             req.download_info = direct_url_for_editable(req.unpacked_source_directory)
+            req.build_wheel_for_metadata = self._should_build_wheel_for_metadata(req)
 
             dist = _get_prepared_distribution(
                 req,
@@ -929,6 +936,14 @@ class RequirementPreparer:
             req.check_if_exists(self.use_user_site)
 
         return dist
+
+    def _should_build_wheel_for_metadata(self, req: InstallRequirement) -> bool:
+        return (
+            self.build_wheel_for_metadata
+            and not self.legacy_resolver
+            and self.source_build_is_required is not None
+            and self.source_build_is_required(req)
+        )
 
     def prepare_installed_requirement(
         self,
