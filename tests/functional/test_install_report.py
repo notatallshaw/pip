@@ -65,8 +65,9 @@ def test_install_report_dep(
     assert _install_dict(report)["simple"]["requested"] is False
 
 
+@pytest.mark.parametrize("dry_run", [True, False])
 def test_yanked_version(
-    script: PipTestEnvironment, data: TestData, tmp_path: Path
+    script: PipTestEnvironment, data: TestData, tmp_path: Path, dry_run: bool
 ) -> None:
     """
     Test is_yanked is True when explicitly requesting a yanked package.
@@ -80,7 +81,7 @@ def test_yanked_version(
         "simple==3.0",
         "--index-url",
         data.index_url("yanked"),
-        "--dry-run",
+        *(["--dry-run"] if dry_run else []),
         "--report",
         str(report_path),
         allow_stderr_warning=True,

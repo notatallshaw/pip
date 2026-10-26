@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 
 from pip._vendor.packaging.requirements import InvalidRequirement, Requirement
 from pip._vendor.packaging.utils import canonicalize_name
-from pip._vendor.packaging.version import Version
+from pip._vendor.packaging.version import InvalidVersion, Version
 
 from pip._internal.build_env import BuildEnvironmentInstaller, BuildIsolationMode
 from pip._internal.distributions import make_distribution_for_install_requirement
@@ -30,6 +30,7 @@ from pip._internal.exceptions import (
     MetadataInvalid,
     NetworkConnectionError,
     SidecarMetadataInconsistent,
+    UnsupportedWheel,
     VcsHashUnsupported,
 )
 from pip._internal.index.package_finder import PackageFinder
@@ -44,6 +45,7 @@ from pip._internal.network.lazy_wheel import (
 )
 from pip._internal.network.session import PipSession
 from pip._internal.operations.build.build_tracker import BuildTracker
+from pip._internal.operations.build.metadata import check_static_sdist_metadata
 from pip._internal.req.req_install import InstallRequirement
 from pip._internal.utils._log import getLogger
 from pip._internal.utils.direct_url_helpers import (
@@ -363,7 +365,6 @@ class RequirementPreparer:
         self.ignore_requires_python = False
         self.metadata_python_version: Version | None = None
         self.static_metadata_fields: frozenset[str] | None = None
-        self.user_supplied_metadata_fields: frozenset[str] | None = None
         self.build_wheel_for_metadata = False
         self.source_build_is_required: Callable[[InstallRequirement], bool] | None = (
             None
@@ -723,6 +724,32 @@ class RequirementPreparer:
             else:
                 req.configure_backend(req.build_env.python_executable)
 
+    def complete_report_metadata(self, reqs: Iterable[InstallRequirement]) -> None:
+        """Complete only selected source metadata needed by an installation report."""
+        for req in reqs:
+            snapshot = req.static_sdist_metadata
+            # A replaced distribution already has backend or built wheel metadata.
+            if snapshot is None or req.get_dist() is not snapshot:
+                continue
+            assert req.source_dir is not None
+            assert req.link is not None
+            complete = read_sdist_metadata(
+                req.source_dir, req.link.filename, frozenset({"*"})
+            )
+            if complete is None:
+                self.prepare_build_requirements([req])
+            try:
+                if complete is None:
+                    tracker_id = SourceDistribution(req).build_tracker_id
+                    assert tracker_id is not None
+                    with self.build_tracker.track(req, tracker_id):
+                        req.prepare_metadata(self.allow_editables)
+                    complete = req.get_dist()
+                check_static_sdist_metadata(snapshot, complete)
+                req.set_dist(complete)
+            except (UnsupportedWheel, InvalidVersion, UnicodeDecodeError) as exc:
+                raise MetadataInvalid(req, str(exc)) from exc
+
     def _prepare_linked_requirement_files(
         self, req: InstallRequirement, parallel_builds: bool
     ) -> File | None:
@@ -885,8 +912,6 @@ class RequirementPreparer:
         assert req.link is not None
         assert self.static_metadata_fields is not None
         required_fields = self.static_metadata_fields
-        if req.user_supplied and self.user_supplied_metadata_fields is not None:
-            required_fields = self.user_supplied_metadata_fields
         if self.metadata_python_version is not None and "*" not in required_fields:
             if self.ignore_requires_python:
                 required_fields -= {"requires-python"}

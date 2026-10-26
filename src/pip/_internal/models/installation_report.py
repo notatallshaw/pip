@@ -9,10 +9,16 @@ from pip._internal.req.req_install import InstallRequirement
 
 class InstallationReport:
     def __init__(self, install_requirements: Sequence[InstallRequirement]):
-        self._install_requirements = install_requirements
+        # Freeze source provenance while completed metadata remains live.
+        self._install_requirements = [
+            (ireq, ireq.link.is_yanked if ireq.link else False)
+            for ireq in install_requirements
+        ]
 
     @classmethod
-    def _install_req_to_dict(cls, ireq: InstallRequirement) -> dict[str, Any]:
+    def _install_req_to_dict(
+        cls, ireq: InstallRequirement, is_yanked: bool
+    ) -> dict[str, Any]:
         assert ireq.download_info, f"No download_info for {ireq}"
         res = {
             # PEP 610 json for the download URL. download_info.archive_info.hashes may
@@ -26,7 +32,7 @@ class InstallationReport:
             "is_direct": ireq.is_direct,
             # is_yanked is true if the requirement was yanked from the index, but
             # was still selected by pip to conform to PEP 592.
-            "is_yanked": ireq.link.is_yanked if ireq.link else False,
+            "is_yanked": is_yanked,
             # requested is true if the requirement was specified by the user (aka
             # top level requirement), and false if it was installed as a dependency of a
             # requirement. https://peps.python.org/pep-0376/#requested
@@ -45,7 +51,8 @@ class InstallationReport:
             "version": "1",
             "pip_version": __version__,
             "install": [
-                self._install_req_to_dict(ireq) for ireq in self._install_requirements
+                self._install_req_to_dict(ireq, is_yanked)
+                for ireq, is_yanked in self._install_requirements
             ],
             # https://peps.python.org/pep-0508/#environment-markers
             # TODO: currently, the resolver uses the default environment to evaluate

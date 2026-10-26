@@ -10,6 +10,10 @@
 The `--report` option of the pip install command produces a detailed JSON report of what
 it did install (or what it would have installed, if used with the `--dry-run` option).
 
+For actual installations with the default resolver, the report is written after required
+wheels have built and before packages are installed. A failed wheel build does not
+produce a new report.
+
 ```{note}
 When considering use cases, please bear in mind that
 

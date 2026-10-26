@@ -10,6 +10,7 @@ import pytest
 from pip._internal import wheel_builder
 from pip._internal.exceptions import UnsupportedWheel
 from pip._internal.models.link import Link
+from pip._internal.operations.build.metadata import check_static_sdist_metadata
 from pip._internal.req.constructors import install_req_from_line
 from pip._internal.req.req_install import InstallRequirement
 from pip._internal.utils.urls import path_to_url
@@ -106,7 +107,7 @@ def test_built_wheel_preserves_static_sdist_metadata(field: str, value: str) -> 
     )
 
     with pytest.raises(UnsupportedWheel, match=f"different {field}"):
-        wheel_builder._check_static_sdist_metadata(source_dist, wheel_dist)
+        check_static_sdist_metadata(source_dist, wheel_dist)
 
 
 def test_built_wheel_can_fill_dynamic_fields() -> None:
@@ -127,7 +128,17 @@ def test_built_wheel_can_fill_dynamic_fields() -> None:
         },
     ).as_distribution("package")
 
-    wheel_builder._check_static_sdist_metadata(source_dist, wheel_dist)
+    check_static_sdist_metadata(source_dist, wheel_dist)
+
+
+def test_prepared_metadata_must_supply_its_own_identity() -> None:
+    source_dist = make_wheel("package", "1.0").as_distribution("package")
+    prepared = make_wheel(
+        "package", "1.0", metadata="Metadata-Version: 2.2\nVersion: 1.0\n"
+    ).as_distribution("package")
+
+    with pytest.raises(UnsupportedWheel, match="one Name and Version"):
+        check_static_sdist_metadata(source_dist, prepared)
 
 
 def test_built_wheel_validates_newly_available_dynamic_dependencies() -> None:
@@ -139,7 +150,7 @@ def test_built_wheel_validates_newly_available_dynamic_dependencies() -> None:
     ).as_distribution("package")
 
     with pytest.raises(UnsupportedWheel, match="Invalid Requires-Dist"):
-        wheel_builder._check_static_sdist_metadata(source_dist, wheel_dist)
+        check_static_sdist_metadata(source_dist, wheel_dist)
 
 
 @pytest.mark.parametrize("field", ["Requires-Dist", "Provides-Extra"])
@@ -166,9 +177,9 @@ def test_built_wheel_preserves_append_only_dynamic_fields(
 
     if metadata_version == "2.6" and not retains_source_value:
         with pytest.raises(UnsupportedWheel, match=f"dropped a fixed {field}"):
-            wheel_builder._check_static_sdist_metadata(source_dist, wheel_dist)
+            check_static_sdist_metadata(source_dist, wheel_dist)
     else:
-        wheel_builder._check_static_sdist_metadata(source_dist, wheel_dist)
+        check_static_sdist_metadata(source_dist, wheel_dist)
 
 
 @pytest.mark.parametrize("verify", [True, False])

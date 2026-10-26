@@ -59,7 +59,7 @@ def test_only_deps_report_prepares_metadata_only_for_reported_packages(
                 def build_wheel(
                     wheel_directory, config_settings=None, metadata_directory=None
                 ):
-                    assert metadata_directory is not None
+                    assert metadata_directory is None
                     filename = "dependency-1.0-py2.py3-none-any.whl"
                     wheel_bytes = base64.b64decode(Path("wheel-data").read_bytes())
                     (Path(wheel_directory) / filename).write_bytes(wheel_bytes)
