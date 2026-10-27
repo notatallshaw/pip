@@ -2,6 +2,7 @@
 Test specific for the --no-color option
 """
 
+import json
 import os
 import shlex
 import shutil
@@ -10,6 +11,40 @@ import sys
 import pytest
 
 from tests.lib import PipTestEnvironment
+
+
+@pytest.mark.parametrize(
+    "environment",
+    [
+        {"TERM": "xterm", "FORCE_COLOR": ""},
+        {"TERM": "xterm", "FORCE_COLOR": "1", "TTY_COMPATIBLE": "0"},
+        {"TERM": "DUMB", "FORCE_COLOR": "1"},
+    ],
+)
+@pytest.mark.parametrize("command", ["inspect", "report"])
+def test_plain_json_controls(
+    script: PipTestEnvironment, environment: dict[str, str], command: str
+) -> None:
+    for name in ("NO_COLOR", "PIP_NO_COLOR", "FORCE_COLOR", "TTY_COMPATIBLE"):
+        script.environ.pop(name, None)
+    script.environ.update(environment)
+
+    if command == "inspect":
+        result = script.pip("inspect", "--path", str(script.scratch_path / "empty"))
+    else:
+        result = script.pip(
+            "install",
+            "pip",
+            "--dry-run",
+            "--no-index",
+            "--no-deps",
+            "-q",
+            "--report",
+            "-",
+        )
+
+    assert "\x1b[" not in result.stdout
+    assert json.loads(result.stdout)["version"] == "1"
 
 
 @pytest.mark.skipif(shutil.which("script") is None, reason="no 'script' executable")

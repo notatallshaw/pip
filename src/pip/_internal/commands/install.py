@@ -16,7 +16,6 @@ from typing import Any
 from pip._vendor.packaging.requirements import InvalidRequirement, Requirement
 from pip._vendor.packaging.utils import canonicalize_name
 from pip._vendor.requests.exceptions import InvalidProxyURL
-from pip._vendor.rich import print_json
 
 # Eagerly import self_outdated_check to avoid crashes. Otherwise,
 # this module would be imported *after* pip was replaced, resulting
@@ -33,6 +32,7 @@ from pip._internal.cli.req_command import (
     with_cleanup,
 )
 from pip._internal.cli.status_codes import ERROR, SUCCESS
+from pip._internal.cli.terminal import print_json
 from pip._internal.exceptions import (
     CommandError,
     InstallationError,
@@ -50,7 +50,7 @@ from pip._internal.req.req_install import (
 from pip._internal.utils.compat import WINDOWS
 from pip._internal.utils.deprecation import deprecated
 from pip._internal.utils.filesystem import test_writable_dir
-from pip._internal.utils.logging import getLogger
+from pip._internal.utils.logging import get_console, getLogger
 from pip._internal.utils.misc import (
     check_externally_managed,
     ensure_dir,
@@ -75,11 +75,7 @@ _MISSING_MODULES: set[str] = set()
 # Non-stdlib modules pip (or its vendored dependencies) may import lazily
 # after installation has started. Importing them eagerly keeps the audit
 # hook from misattributing them to a freshly installed distribution.
-_EAGER_IMPORTS: tuple[str, ...] = (
-    "pip._internal.operations.install.wheel",
-    # Used by rich when emitting output to a legacy Windows console.
-    "pip._vendor.rich._windows_renderer",
-)
+_EAGER_IMPORTS: tuple[str, ...] = ("pip._internal.operations.install.wheel",)
 
 
 # Imports of standard library modules are always safe: they cannot be
@@ -415,8 +411,8 @@ class InstallCommand(RequirementCommand):
             options.target_dir = os.path.abspath(options.target_dir)
             if (
                 # fmt: off
-                os.path.exists(options.target_dir) and
-                not os.path.isdir(options.target_dir)
+                os.path.exists(options.target_dir)
+                and not os.path.isdir(options.target_dir)
                 # fmt: on
             ):
                 raise CommandError(
@@ -482,7 +478,7 @@ class InstallCommand(RequirementCommand):
             if options.json_report_file:
                 report = InstallationReport(requirement_set.requirements_to_install)
                 if options.json_report_file == "-":
-                    print_json(data=report.to_dict())
+                    print_json(report.to_dict(), get_console())
                 else:
                     with open(options.json_report_file, "w", encoding="utf-8") as f:
                         json.dump(report.to_dict(), f, indent=2, ensure_ascii=False)
@@ -830,8 +826,7 @@ def decide_user_install(
         return False
 
     logger.info(
-        "Defaulting to user installation because normal site-packages "
-        "is not writeable"
+        "Defaulting to user installation because normal site-packages is not writeable"
     )
     return True
 

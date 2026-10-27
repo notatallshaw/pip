@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from pip._vendor.rich.text import Text
-
+from pip._internal.cli.terminal import Text
 from pip._internal.exceptions._base import DiagnosticPipError
 
 if TYPE_CHECKING:
