@@ -13,8 +13,31 @@ import pytest
 
 from pip._internal.cli.terminal import Terminal, Text
 from pip._internal.exceptions import DiagnosticPipError, ExternallyManagedEnvironment
+from pip._internal.exceptions.build import BackendUnavailableError
+from pip._internal.exceptions.network import IncompleteDownloadError
+from pip._internal.models.link import Link
+from pip._internal.network.download import _FileDownload
 
 from tests.lib.output import render_to_text as rendered
+
+
+def test_backend_traceback_is_literal() -> None:
+    traceback = r"\\server\share\[red]\backend.py"
+    error = BackendUnavailableError(
+        hook_name="get_requires_for_build_wheel",
+        backend_name="backend",
+        backend_error=traceback,
+    )
+
+    assert traceback in error.format(Terminal(color=False))
+
+
+def test_incomplete_download_url_is_literal() -> None:
+    link = Link("https://example.test/[red]/wheel.whl#ignored=\\\\")
+    download = _FileDownload(link, io.BytesIO(), size=100)
+    error = IncompleteDownloadError(download)
+
+    assert link.redacted_url in error.format(Terminal(color=False))
 
 
 class TestDiagnosticPipErrorCreation:

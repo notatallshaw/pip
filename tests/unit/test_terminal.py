@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 import io
 import json
 import os
@@ -28,19 +29,50 @@ class TtyStream(io.StringIO):
 
 @pytest.fixture(autouse=True)
 def terminal_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in ("NO_COLOR", "FORCE_COLOR", "TERM"):
+    for name in (
+        "NO_COLOR",
+        "FORCE_COLOR",
+        "TERM",
+        "TTY_COMPATIBLE",
+        "TTY_INTERACTIVE",
+    ):
         monkeypatch.delenv(name, raising=False)
     # The in-memory stream has no Windows console handle.
     monkeypatch.setattr(terminal, "_enable_windows_vt", lambda file: True)
 
 
 @pytest.mark.parametrize(
-    "value", ["[red]literal[/]", r"C:\[build-system]", "open[", r"\\[red]", "[]"]
+    "value",
+    [
+        "[red]literal[/]",
+        r"C:\[build-system]",
+        "open[",
+        r"\\[red]",
+        "[]",
+        "C:\\",
+        r"\\server\share",
+    ],
 )
 def test_literal_text(value: str) -> None:
     output = Terminal(color=True)
     assert output.format(Text(value)) == value
     assert output.format(escape(value)) == value
+
+
+@pytest.mark.parametrize("color", [False, True])
+@pytest.mark.parametrize(
+    "closing, suffix",
+    [("[/]", " next"), ("[reset]", " next"), ("", ""), ("", " ordinary text")],
+)
+@pytest.mark.parametrize("backslashes", [1, 2, 3])
+def test_escaped_trailing_backslashes(
+    color: bool, closing: str, suffix: str, backslashes: int
+) -> None:
+    value = "failed at path" + "\\" * backslashes
+    rendered = Terminal(color=color).format(
+        "[green]" + escape(value) + closing + suffix
+    )
+    assert re.sub(r"\x1b\[[0-9;]*m", "", rendered) == value + suffix
 
 
 def test_nested_style() -> None:
@@ -55,9 +87,14 @@ def test_nested_style() -> None:
         (False, {}, False, False, False),
         (True, {}, False, True, True),
         (False, {"FORCE_COLOR": "1"}, False, True, False),
+        (False, {"FORCE_COLOR": ""}, False, False, False),
+        (True, {"FORCE_COLOR": ""}, False, False, True),
+        (True, {"TTY_COMPATIBLE": "0", "FORCE_COLOR": "1"}, False, False, False),
+        (True, {"TTY_INTERACTIVE": "0"}, False, True, False),
         (True, {"NO_COLOR": "1"}, False, False, True),
         (True, {"FORCE_COLOR": "1"}, True, False, True),
         (True, {"TERM": "dumb"}, False, False, False),
+        (True, {"TERM": "DUMB", "FORCE_COLOR": "1"}, False, False, False),
     ],
 )
 def test_color_and_animation(
@@ -134,7 +171,7 @@ def test_ascii_output_preserves_unicode_data() -> None:
 
 @pytest.mark.parametrize("color", [False, True])
 def test_json_roundtrip(color: bool) -> None:
-    data = {"[red]": [True, None, -2.5, 'a"b', "你好"]}
+    data = {"[red]": [True, None, -2.5, 'a"b', "你好", '\\\\"\\u1234 true -42']}
     stream = io.StringIO()
     print_json(data, Terminal(stream, color=color))
     text = stream.getvalue()
@@ -220,6 +257,74 @@ def test_debug_traceback_preserves_exception_when_local_repr_fails(
     except ValueError as exc:
         debug_traceback(type(exc), exc, exc.__traceback__)
     assert "ValueError: original failure" in capsys.readouterr().err
+
+
+def test_debug_traceback_abbreviates_locals(capsys: pytest.CaptureFixture[str]) -> None:
+    def crash() -> None:
+        description = "x" * 100_000
+        dependencies = ["example>=1"] * 10_000
+        assert description
+        assert dependencies
+        raise ValueError("original failure")
+
+    try:
+        crash()
+    except ValueError as exc:
+        debug_traceback(type(exc), exc, exc.__traceback__)
+
+    text = capsys.readouterr().err
+    assert "ValueError: original failure" in text
+    assert "description = " in text
+    assert "dependencies = " in text
+    assert "x" * 100 not in text
+    assert text.count("'example>=1'") < 20
+
+
+@pytest.mark.parametrize("explicit_cause", [False, True])
+def test_debug_traceback_chain_locals(
+    explicit_cause: bool, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def crash() -> None:
+        inner_local = "inner-visible"
+        raise ValueError(inner_local)
+
+    try:
+        try:
+            crash()
+        except ValueError as cause:
+            if explicit_cause:
+                raise RuntimeError("outer failure") from cause
+            raise RuntimeError("outer failure")
+    except RuntimeError as exc:
+        debug_traceback(type(exc), exc, exc.__traceback__)
+
+    text = capsys.readouterr().err
+    assert "inner_local = 'inner-visible'" in text
+    assert "ValueError: inner-visible" in text
+    assert "RuntimeError: outer failure" in text
+
+
+def test_debug_traceback_group_locals(capsys: pytest.CaptureFixture[str]) -> None:
+    if sys.version_info < (3, 11):
+        pytest.skip("exception groups require Python 3.11")
+
+    def child_exception() -> ValueError:
+        child_local = "child-visible"
+        try:
+            raise ValueError(child_local)
+        except ValueError as exc:
+            return exc
+
+    child = child_exception()
+    try:
+        raise builtins.ExceptionGroup("group failure", [child])
+    except builtins.ExceptionGroup as exc:
+        debug_traceback(type(exc), exc, exc.__traceback__)
+
+    text = capsys.readouterr().err
+    assert "ExceptionGroup: group failure" in text
+    assert "child_local = 'child-visible'" in text
+    assert "ValueError: child-visible" in text
 
 
 def test_print_strips_text_controls_but_keeps_newlines() -> None:

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import builtins
 import json
 import os
 import re
+import reprlib
 import shutil
 import sys
 import threading
@@ -39,6 +41,8 @@ if sys.platform == "win32":
         kernel.SetConsoleMode.argtypes = [wintypes.HANDLE, wintypes.DWORD]
         kernel.SetConsoleMode.restype = wintypes.BOOL
         mode = wintypes.DWORD()
+        # Preserve existing flags while enabling ENABLE_VIRTUAL_TERMINAL_PROCESSING.
+        # https://learn.microsoft.com/en-us/windows/console/setconsolemode
         return bool(
             kernel.GetConsoleMode(handle, ctypes.byref(mode))
             and kernel.SetConsoleMode(handle, mode.value | 0x0004)
@@ -51,6 +55,8 @@ else:
 
 
 _SGR_FOREGROUND = 30
+# Use the basic SGR palette rather than terminal-specific RGB color support.
+# https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#text-formatting
 _STYLES = {
     "bold": "1",
     "dim": "2",
@@ -67,16 +73,16 @@ _STYLES = {
     "optparse.metavar": "33",
 }
 _JSON_TOKEN = re.compile(
-    r'("(?:[^"\\]|\\.)*")(\s*:)?|(?<!\w)'
-    r"(true|false|null|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\b"
+    r'"|(?<!\w)(true|false|null|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\b'
 )
-_TAG = re.compile(r"(\\*)\[(?:([^\[\]\n]*)\])?")
+_TAG = re.compile(r"\\([\\\[])|\[([^\[\]\n]*)\]")
 _STRIP_CONTROL = str.maketrans("", "", "\a\b\v\f\r")
 
 
 def escape(text: str) -> str:
     """Quote brackets in text inserted into a styled message."""
-    return re.sub(r"(\\*)\[", r"\1\1\\[", text)
+    # Literal bracket escaping: https://rich.readthedocs.io/en/stable/markup.html#escaping
+    return text.replace("\\", "\\\\").replace("[", r"\[")
 
 
 class Text:
@@ -87,22 +93,18 @@ class Text:
 
     @classmethod
     def from_markup(cls, text: str) -> Text:
+        """Parse pip's finite style vocabulary, keeping unknown brackets literal."""
         result = cls()
         styles: list[str] = []
         start = 0
+
         for match in _TAG.finditer(text):
-            slashes, tag = match.groups()
-            result.parts.append(
-                (
-                    text[start : match.start()] + ("\\" * (len(slashes) // 2)),
-                    " ".join(styles),
-                )
-            )
+            escaped, tag = match.groups()
+            result.parts.append((text[start : match.start()], " ".join(styles)))
             start = match.end()
-            if tag is None:
-                result.parts.append(("[", " ".join(styles)))
-            elif len(slashes) % 2:
-                result.parts.append((f"[{tag}]", " ".join(styles)))
+            # Quote backslashes and brackets independently of surrounding markup.
+            if escaped is not None:
+                result.parts.append((escaped, " ".join(styles)))
             elif tag == "reset":
                 styles.clear()
             elif tag == "/":
@@ -111,13 +113,15 @@ class Text:
             elif tag and all(word in _STYLES for word in tag.split()):
                 styles.append(tag)
             else:
-                result.parts.append((match[0][len(slashes) :], " ".join(styles)))
+                result.parts.append((match[0], " ".join(styles)))
+
         result.parts.append((text[start:], " ".join(styles)))
         return result
 
     @classmethod
     def assemble(cls, *parts: str | Text | tuple[str, str]) -> Text:
         result = cls()
+
         for part in parts:
             if isinstance(part, tuple):
                 result.parts.append(part)
@@ -125,6 +129,7 @@ class Text:
                 result.parts.extend(part.parts)
             else:
                 result.parts.append((part, ""))
+
         return result
 
     def append(self, text: str) -> None:
@@ -206,26 +211,34 @@ class Terminal:
     ) -> None:
         self.file = file if file is not None else sys.stdout
         tty = self.file.isatty()
-        capable = os.environ.get("TERM", "") not in {"dumb", "unknown"}
+
+        # Styling and cursor animation have independent opt-outs.
+        capable = os.environ.get("TERM", "").lower() not in {"dumb", "unknown"}
+        capable = capable and os.environ.get("TTY_COMPATIBLE") != "0"
         if os.name == "nt" and tty:
             capable = capable and _enable_windows_vt(self.file)
+        # An empty FORCE_COLOR explicitly disables automatic styling.
+        forced = os.environ.get("FORCE_COLOR")
         self.styled = (
             color
             if color is not None
-            else (tty or "FORCE_COLOR" in os.environ) and capable
+            else (tty if forced is None else bool(forced)) and capable
         )
         self.color = self.styled and not no_color and "NO_COLOR" not in os.environ
-        self.interactive = tty and capable
+        self.interactive = tty and capable and os.environ.get("TTY_INTERACTIVE") != "0"
+
         self.ascii_only = False
         try:
             "\N{MULTIPLICATION SIGN}│╰─>".encode(self.file.encoding or "utf-8")
         except UnicodeEncodeError:
             self.ascii_only = True
+
         self.display = Display()
 
     def style(self, text: str, style: str) -> str:
         if not text or not style or not self.styled:
             return text
+
         codes: set[int] = set()
         foreground = None
         for word in style.split():
@@ -234,16 +247,19 @@ class Terminal:
                     foreground = code
                 else:
                     codes.add(code)
+
         # A nested foreground replaces the enclosing color.
         if self.color and foreground is not None:
             codes.add(foreground)
         if not codes:
             return text
+
         return f"\x1b[{';'.join(map(str, sorted(codes)))}m{text}\x1b[0m"
 
     def format(self, value: str | Renderable) -> str:
         if isinstance(value, str):
             value = Text.from_markup(value)
+
         return value.format(self)
 
     def share_display(self, other: Terminal) -> None:
@@ -262,6 +278,9 @@ class Terminal:
         text = self.format(value).translate(_STRIP_CONTROL)
         if indent:
             text = "\n".join(" " * indent + line for line in text.split("\n"))
+
+        # Clear, write and repaint as one operation across shared streams.
+        # Prior art: https://tqdm.github.io/docs/tqdm/#external_write_mode
         with self.display.lock:
             self.display.clear()
             _write(self.file, text + "\n")
@@ -298,6 +317,8 @@ class LiveLine:
 
 def fit_line(text: str, width: int) -> str:
     """Keep a progress line inside the terminal without embedded controls."""
+    # Approximate terminal cells using Unicode combining and width properties.
+    # https://docs.python.org/3/library/unicodedata.html#unicodedata.east_asian_width
     result = []
     for char in text:
         if not char.isprintable():
@@ -311,6 +332,7 @@ def fit_line(text: str, width: int) -> str:
             break
         result.append(char)
         width -= cells
+
     return "".join(result)
 
 
@@ -322,30 +344,80 @@ def print_json(data: object, terminal: Terminal) -> None:
         text.encode(terminal.file.encoding or "utf-8")
     except UnicodeEncodeError:
         text = json.dumps(data, indent=2, ensure_ascii=True)
+
     if not terminal.styled:
         terminal.print(Text(text))
         return
+
+    decoder = json.JSONDecoder()
     parts: list[str | tuple[str, str]] = []
     start = 0
-    for match in _JSON_TOKEN.finditer(text):
+    while match := _JSON_TOKEN.search(text, start):
         parts.append(text[start : match.start()])
-        if match[1] is not None:
-            style = "bold blue" if match[2] is not None else "green"
-            parts.extend([(match[1], style), match[2] or ""])
+        if match[0] == '"':
+            # The decoder skips escaped strings without regex backtracking state.
+            # https://docs.python.org/3/library/json.html#json.JSONDecoder.raw_decode
+            end = decoder.raw_decode(text, match.start())[1]
+            style = "bold blue" if text[end : end + 1] == ":" else "green"
         else:
-            parts.append((match[0], "cyan"))
-        start = match.end()
+            end = match.end()
+            style = "cyan"
+        parts.append((text[match.start() : end], style))
+        start = end
+
     parts.append(text[start:])
     terminal.print(Text.assemble(*parts))
+
+
+def _traceback_locals(
+    rendered: traceback.TracebackException,
+    exc: BaseException,
+    tb: TracebackType | None,
+) -> None:
+    """Attach abbreviated locals to the native exception chain and group summaries."""
+    # Retain native exception formatting while replacing only captured locals.
+    # https://docs.python.org/3/library/traceback.html#traceback.FrameSummary
+    pending = [(rendered, exc, tb)]
+    while pending:
+        summary, original, original_tb = pending.pop()
+        for frame_summary, (frame, _) in zip(
+            summary.stack, traceback.walk_tb(original_tb), strict=False
+        ):
+            # Abbreviate builtin strings and containers before taking their repr.
+            # https://docs.python.org/3/library/reprlib.html#reprlib.repr
+            frame_summary.locals = {
+                name: reprlib.repr(value) for name, value in frame.f_locals.items()
+            }
+
+        if summary.__cause__ is not None and original.__cause__ is not None:
+            cause = original.__cause__
+            pending.append((summary.__cause__, cause, cause.__traceback__))
+        if summary.__context__ is not None and original.__context__ is not None:
+            context = original.__context__
+            pending.append((summary.__context__, context, context.__traceback__))
+
+        if (
+            sys.version_info >= (3, 11)
+            and isinstance(original, builtins.BaseExceptionGroup)
+            and summary.exceptions is not None
+        ):
+            pending.extend(
+                (child_summary, child, child.__traceback__)
+                for child_summary, child in zip(
+                    summary.exceptions, original.exceptions, strict=True
+                )
+            )
 
 
 def debug_traceback(
     exc_type: type[BaseException], exc: BaseException, tb: TracebackType | None
 ) -> None:
-    """Show exception chains and local variables in debug mode."""
+    """Show exception chains and abbreviated local variables in debug mode."""
+    rendered = traceback.TracebackException(exc_type, exc, tb, capture_locals=False)
     try:
-        rendered = traceback.TracebackException(exc_type, exc, tb, capture_locals=True)
+        _traceback_locals(rendered, exc, tb)
     except Exception:
-        # A local's repr() can raise any exception on older Python versions.
+        # Unusual local representations must not hide the original exception.
         rendered = traceback.TracebackException(exc_type, exc, tb, capture_locals=False)
+
     sys.stderr.write("".join(rendered.format()))
