@@ -100,4 +100,4 @@ def test_backend_unavailable_is_converted_by_public_hook_adapters(
         call_hook(backend)
     error = exc_info.value
     assert error.command_description == f"Calling build backend hook {hook_name}"
-    assert error.context == "ModuleNotFoundError: No module named 'setuptools'"
+    assert str(error.context) == "ModuleNotFoundError: No module named 'setuptools'"
