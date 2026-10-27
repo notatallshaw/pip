@@ -79,6 +79,7 @@ class DiagnosticPipError(PipError):
         )
 
     def format(self, terminal: Terminal) -> str:
+        """Render the diagnostic with plain ASCII or tree prefixes."""
         colour = "red" if self.kind == "error" else "yellow"
         lines = [
             terminal.style(self.kind, colour + " bold")
@@ -86,6 +87,7 @@ class DiagnosticPipError(PipError):
             + terminal.style(self.reference, "bold"),
             "",
         ]
+
         message = terminal.format(self.message)
         context = terminal.format(self.context) if self.context is not None else None
         if terminal.ascii_only:
@@ -111,6 +113,7 @@ class DiagnosticPipError(PipError):
                         indent=terminal.style("   ", colour) + " ",
                     )
                 )
+
         if self.note_stmt is not None or self.hint_stmt is not None:
             lines.append("")
         for label, style, statement in (
@@ -125,6 +128,8 @@ class DiagnosticPipError(PipError):
                         indent="      ",
                     )
                 )
+
         if self.link is not None:
             lines.extend(["", f"Link: {self.link}"])
+
         return "\n".join(lines)

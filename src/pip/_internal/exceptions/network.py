@@ -183,7 +183,7 @@ class IncompleteDownloadError(DiagnosticPipError):
 
         super().__init__(
             message=message,
-            context=f"URL: {download.link.redacted_url}",
+            context=Text(f"URL: {download.link.redacted_url}"),
             hint_stmt=hint,
             note_stmt="This is an issue with network connectivity, not pip.",
         )

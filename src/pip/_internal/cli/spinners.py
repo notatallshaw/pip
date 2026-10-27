@@ -142,6 +142,7 @@ def open_auto_spinner(label: str, console: Terminal | None = None) -> Generator[
 
     if console is None:
         console = get_console()
+
     prefix = " " * get_indentation() + label + " ... "
     stopped = threading.Event()
     status = "done"
@@ -165,6 +166,7 @@ def open_auto_spinner(label: str, console: Terminal | None = None) -> Generator[
                     target=repaint, name="pip-spinner", daemon=True
                 )
                 thread.start()
+
             try:
                 yield
             except KeyboardInterrupt:
@@ -174,6 +176,7 @@ def open_auto_spinner(label: str, console: Terminal | None = None) -> Generator[
                 status = "error"
                 raise
             finally:
+                # Stop the worker before releasing its live line.
                 stopped.set()
                 if thread is not None:
                     thread.join()

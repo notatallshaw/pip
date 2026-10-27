@@ -184,6 +184,7 @@ class PipStreamHandler(logging.Handler):
                 assert isinstance(record.args, tuple)
                 (diagnostic,) = record.args
                 assert isinstance(diagnostic, (str, Renderable))
+
                 self.console.print(diagnostic, indent=get_indentation())
             else:
                 message = self.format(record)
@@ -193,11 +194,14 @@ class PipStreamHandler(logging.Handler):
                     if level >= logging.ERROR
                     else ("yellow" if level >= logging.WARNING else "")
                 )
+
+                # Only explicitly marked messages interpret diagnostic markup.
                 text = (
                     Text.from_markup(message)
                     if record.__dict__.get("markup", False)
                     else Text(message, style)
                 )
+
                 self.console.print(text)
         except Exception:
             self.handleError(record)
@@ -209,6 +213,7 @@ class PipStreamHandler(logging.Handler):
         exc_class, exc = sys.exc_info()[:2]
         if isinstance(exc, BrokenStdoutLoggingError):
             raise exc
+
         # If a broken pipe occurred while calling write() or flush() on the
         # stdout stream in logging's Handler.emit(), then raise our special
         # exception so we can handle it in main() instead of logging the

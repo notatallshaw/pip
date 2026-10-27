@@ -20,12 +20,14 @@ BarType = Literal["on", "off", "raw"]
 
 
 def _bar(completed: int, total: int) -> str:
+    """Render a compact bar for known totals."""
     width = 20
     filled = min(width, int(width * completed / total)) if total > 0 else 0
     return "[" + "=" * filled + " " * (width - filled) + "]"
 
 
 def _elapsed(seconds: float) -> str:
+    """Format a duration in hours, minutes and seconds."""
     minutes, seconds = divmod(int(seconds), 60)
     hours, minutes = divmod(minutes, 60)
     return f"{hours}:{minutes:02}:{seconds:02}"
@@ -44,9 +46,11 @@ def _download_progress_bar(
     indent = " " * (get_indentation() + 2)
 
     def description(*, finished: bool = False) -> str:
+        """Report current bytes and throughput from this download attempt."""
         elapsed = max(time.monotonic() - start, 0)
         speed = (current - initial) / elapsed if elapsed else 0
         rate = f"{format_size(speed)}/s" if speed else "?"
+
         if size is not None and size > 0:
             amount = f"{format_size(current)}/{format_size(size)} {_bar(current, size)}"
             remaining = (
@@ -58,15 +62,18 @@ def _download_progress_bar(
         else:
             amount = format_size(current)
             timing = _elapsed(elapsed)
+
         return f"{indent}{amount} {rate} {timing}"
 
     with LiveLine(console) as line:
         for chunk in iterable:
             yield chunk
+            # Count a chunk only after the consumer has accepted it.
             current += len(chunk)
             if console.interactive and limiter.ready():
                 line.update(description())
                 limiter.reset()
+
     console.print(Text(description(finished=True)))
 
 
@@ -77,6 +84,7 @@ def _install_progress_bar(
     current = 0
     limiter = RateLimiter(1 / 6)
     indent = " " * get_indentation()
+
     with LiveLine(console) as line:
         for req in iterable:
             if console.interactive and limiter.ready():
