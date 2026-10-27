@@ -1,14 +1,16 @@
 """Stuff that differs in different Python versions and platform
 distributions."""
 
+import importlib
 import importlib.resources
 import locale
 import logging
 import os
 import sys
+from types import ModuleType
 from typing import IO
 
-__all__ = ["get_locale_encoding", "get_path_uid", "tomllib", "WINDOWS"]
+__all__ = ["get_locale_encoding", "get_path_uid", "import_module", "tomllib", "WINDOWS"]
 
 
 logger = logging.getLogger(__name__)
@@ -67,18 +69,27 @@ def get_path_uid(path: str) -> int:
     return file_uid
 
 
+def import_module(name: str) -> ModuleType:
+    """Import an absolute module name while preserving audit events."""
+    # CPython omitted importlib audit events before Python 3.15.
+    # https://github.com/python/cpython/issues/138310
+    # Remove this fallback when pip drops Python 3.14 support.
+    if sys.version_info < (3, 15):
+        return __import__(name, fromlist=["__name__"])
+    return importlib.import_module(name)
+
+
 # The importlib.resources.open_text function was deprecated in 3.11 with suggested
 # replacement we use below.
-if sys.version_info < (3, 11):
-    open_text_resource = importlib.resources.open_text
-else:
-
-    def open_text_resource(
-        package: str, resource: str, encoding: str = "utf-8", errors: str = "strict"
-    ) -> IO[str]:
-        return (importlib.resources.files(package) / resource).open(
-            "r", encoding=encoding, errors=errors
-        )
+def open_text_resource(
+    package: str, resource: str, encoding: str = "utf-8", errors: str = "strict"
+) -> IO[str]:
+    module = import_module(package)
+    if sys.version_info < (3, 11):
+        return importlib.resources.open_text(module, resource, encoding, errors)
+    return (importlib.resources.files(module) / resource).open(
+        "r", encoding=encoding, errors=errors
+    )
 
 
 if sys.version_info >= (3, 11):

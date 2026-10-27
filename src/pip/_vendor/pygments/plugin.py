@@ -33,6 +33,7 @@
     :license: BSD, see LICENSE for details.
 """
 import functools
+import sys
 
 LEXER_ENTRY_POINT = 'pygments.lexers'
 FORMATTER_ENTRY_POINT = 'pygments.formatters'
@@ -55,21 +56,30 @@ def iter_entry_points(group_name):
         return groups.get(group_name, [])
 
 
+def _load_entry_point(entrypoint):
+    # EntryPoint.load() misses import audit events before Python 3.15.
+    # https://github.com/python/cpython/issues/138310
+    # Remove this preflight when pip drops Python 3.14 support.
+    if sys.version_info < (3, 15):
+        __import__(entrypoint.module)
+    return entrypoint.load()
+
+
 def find_plugin_lexers():
     for entrypoint in iter_entry_points(LEXER_ENTRY_POINT):
-        yield entrypoint.load()
+        yield _load_entry_point(entrypoint)
 
 
 def find_plugin_formatters():
     for entrypoint in iter_entry_points(FORMATTER_ENTRY_POINT):
-        yield entrypoint.name, entrypoint.load()
+        yield entrypoint.name, _load_entry_point(entrypoint)
 
 
 def find_plugin_styles():
     for entrypoint in iter_entry_points(STYLE_ENTRY_POINT):
-        yield entrypoint.name, entrypoint.load()
+        yield entrypoint.name, _load_entry_point(entrypoint)
 
 
 def find_plugin_filters():
     for entrypoint in iter_entry_points(FILTER_ENTRY_POINT):
-        yield entrypoint.name, entrypoint.load()
+        yield entrypoint.name, _load_entry_point(entrypoint)

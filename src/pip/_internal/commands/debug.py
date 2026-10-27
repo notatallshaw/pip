@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib
 import logging
 import os
 import sys
@@ -18,7 +17,11 @@ from pip._internal.cli.cmdoptions import make_target_python
 from pip._internal.cli.status_codes import SUCCESS
 from pip._internal.configuration import Configuration
 from pip._internal.metadata import get_environment
-from pip._internal.utils.compat import get_locale_encoding, open_text_resource
+from pip._internal.utils.compat import (
+    get_locale_encoding,
+    import_module,
+    open_text_resource,
+)
 from pip._internal.utils.logging import indent_log
 from pip._internal.utils.misc import get_pip_version
 
@@ -55,7 +58,7 @@ def get_module_from_module_name(module_name: str) -> ModuleType:
     if module_name == "setuptools":
         module_name = "pkg_resources"
 
-    return importlib.import_module(f"pip._vendor.{module_name}")
+    return import_module(f"pip._vendor.{module_name}")
 
 
 def get_vendor_version_from_module(module_name: str) -> str | None:

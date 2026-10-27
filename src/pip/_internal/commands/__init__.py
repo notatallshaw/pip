@@ -4,7 +4,6 @@ Package containing all pip commands
 
 from __future__ import annotations
 
-import importlib
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 if TYPE_CHECKING:
@@ -122,8 +121,11 @@ def create_command(name: str, **kwargs: Any) -> Command:
     """
     Create an instance of the Command class with the given name.
     """
+    # Defer platform and resource imports until a command is created.
+    from pip._internal.utils.compat import import_module
+
     module_path, class_name, summary = commands_dict[name]
-    module = importlib.import_module(module_path)
+    module = import_module(module_path)
 
     # Registry entries identify Command subclasses by module and class name.
     command_class: type[Command] = getattr(module, class_name)

@@ -93,6 +93,7 @@ such as OS packages.
 Modifications
 =============
 
+* ``pygments`` imports plugin modules through Python's audited importer.
 * ``setuptools`` is completely stripped to only keep ``pkg_resources``.
 * ``pkg_resources`` has been modified to import its dependencies from
   ``pip._vendor``, and to use the vendored copy of ``platformdirs``

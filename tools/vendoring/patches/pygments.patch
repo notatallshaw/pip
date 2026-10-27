@@ -1,6 +1,10 @@
 This patch mainly handles tweaking imports into a form that can be transformed
 to import from the vendored namespace.
 
+The plugin-loading fallback preserves import audit events before Python 3.15.
+See https://github.com/python/cpython/issues/138310. Remove this fallback when
+pip drops Python 3.14 support.
+
 diff --git a/src/pip/_vendor/pygments/__main__.py b/src/pip/_vendor/pygments/__main__.py
 index 5eb2c747..04997f49 100644
 --- a/src/pip/_vendor/pygments/__main__.py
@@ -54,3 +58,49 @@ index f935688f..e2986361 100644
              extensions = lexer_cls.filenames + lexer_cls.alias_filenames
  
              table.append({
+
+--- a/src/pip/_vendor/pygments/plugin.py
++++ b/src/pip/_vendor/pygments/plugin.py
+@@ -33,6 +33,7 @@
+     :license: BSD, see LICENSE for details.
+ """
+ import functools
++import sys
+ 
+ LEXER_ENTRY_POINT = 'pygments.lexers'
+ FORMATTER_ENTRY_POINT = 'pygments.formatters'
+@@ -55,21 +56,30 @@
+         return groups.get(group_name, [])
+ 
+ 
++def _load_entry_point(entrypoint):
++    # EntryPoint.load() misses import audit events before Python 3.15.
++    # https://github.com/python/cpython/issues/138310
++    # Remove this preflight when pip drops Python 3.14 support.
++    if sys.version_info < (3, 15):
++        __import__(entrypoint.module)
++    return entrypoint.load()
++
++
+ def find_plugin_lexers():
+     for entrypoint in iter_entry_points(LEXER_ENTRY_POINT):
+-        yield entrypoint.load()
++        yield _load_entry_point(entrypoint)
+ 
+ 
+ def find_plugin_formatters():
+     for entrypoint in iter_entry_points(FORMATTER_ENTRY_POINT):
+-        yield entrypoint.name, entrypoint.load()
++        yield entrypoint.name, _load_entry_point(entrypoint)
+ 
+ 
+ def find_plugin_styles():
+     for entrypoint in iter_entry_points(STYLE_ENTRY_POINT):
+-        yield entrypoint.name, entrypoint.load()
++        yield entrypoint.name, _load_entry_point(entrypoint)
+ 
+ 
+ def find_plugin_filters():
+     for entrypoint in iter_entry_points(FILTER_ENTRY_POINT):
+-        yield entrypoint.name, entrypoint.load()
++        yield entrypoint.name, _load_entry_point(entrypoint)
