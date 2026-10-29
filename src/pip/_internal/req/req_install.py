@@ -544,6 +544,10 @@ class InstallRequirement:
                 details=details,
             )
 
+        self.update_metadata_requirement()
+
+    def update_metadata_requirement(self) -> None:
+        """Apply the prepared metadata's project name and version."""
         # Act on the newly generated metadata, based on the name and version.
         if not self.name:
             self._set_requirement()

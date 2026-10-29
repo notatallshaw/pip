@@ -33,6 +33,7 @@ from pip._internal.cli.req_command import (
     with_cleanup,
 )
 from pip._internal.cli.status_codes import ERROR, SUCCESS
+from pip._internal.distributions.sdist import SDIST_RESOLUTION_FIELDS
 from pip._internal.exceptions import (
     CommandError,
     InstallationError,
@@ -459,6 +460,15 @@ class InstallCommand(RequirementCommand):
                 use_user_site=options.use_user_site,
                 verbosity=self.verbosity,
                 allow_editables=True,
+                static_metadata_fields=(
+                    (
+                        frozenset({"*"})
+                        if options.json_report_file
+                        else SDIST_RESOLUTION_FIELDS
+                    )
+                    if options.dry_run
+                    else None
+                ),
             )
             resolver = self.make_resolver(
                 preparer=preparer,

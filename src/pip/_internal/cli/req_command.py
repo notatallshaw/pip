@@ -167,6 +167,7 @@ class RequirementCommand(IndexGroupCommand):
         use_user_site: bool,
         download_dir: str | None = None,
         verbosity: int = 0,
+        static_metadata_fields: frozenset[str] | None = None,
     ) -> RequirementPreparer:
         """
         Create a RequirementPreparer instance for the given parameters.
@@ -228,7 +229,7 @@ class RequirementCommand(IndexGroupCommand):
         else:
             build_isolation = "virtual"
 
-        return RequirementPreparer(
+        preparer = RequirementPreparer(
             build_dir=temp_build_dir_path,
             src_dir=options.src_dir,
             download_dir=download_dir,
@@ -246,6 +247,8 @@ class RequirementCommand(IndexGroupCommand):
             legacy_resolver=legacy_resolver,
             allow_editables=allow_editables,
         )
+        preparer.static_metadata_fields = static_metadata_fields
+        return preparer
 
     @classmethod
     def make_resolver(
