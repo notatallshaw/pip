@@ -5,6 +5,7 @@ import copy
 import functools
 import logging
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from types import MappingProxyType
 from typing import (
     TYPE_CHECKING,
     NamedTuple,
@@ -13,6 +14,7 @@ from typing import (
     cast,
 )
 
+from pip._vendor.packaging.markers import UndefinedComparison, UndefinedEnvironmentName
 from pip._vendor.packaging.requirements import InvalidRequirement
 from pip._vendor.packaging.specifiers import SpecifierSet
 from pip._vendor.packaging.utils import NormalizedName, canonicalize_name
@@ -32,7 +34,7 @@ from pip._internal.exceptions import (
 )
 from pip._internal.index.package_finder import PackageFinder
 from pip._internal.metadata import BaseDistribution, get_default_environment
-from pip._internal.models.link import Link
+from pip._internal.models.link import Link, links_equivalent
 from pip._internal.models.wheel import Wheel
 from pip._internal.operations.prepare import RequirementPreparer
 from pip._internal.req.constructors import (
@@ -81,6 +83,35 @@ C = TypeVar("C")
 Cache = dict[Link, C]
 
 
+def _ordinary_specifiers(specifiers: SpecifierSet) -> SpecifierSet:
+    """Weaken a rejection proof by dropping arbitrary string equalities."""
+    if not any(specifier.operator == "===" for specifier in specifiers):
+        return specifiers
+    ordinary = (
+        str(specifier) for specifier in specifiers if specifier.operator != "==="
+    )
+    return SpecifierSet(",".join(ordinary))
+
+
+def _has_version_conflict(left: SpecifierSet, right: SpecifierSet) -> bool:
+    """Prove an empty domain while allowing every prerelease candidate."""
+    return SpecifierSet((*left, *right), prereleases=True).is_unsatisfiable()
+
+
+def _has_conflicting_links(links: Iterable[Link]) -> bool:
+    iterator = iter(links)
+    first = next(iterator, None)
+    return first is not None and any(
+        not links_equivalent(first, link) for link in iterator
+    )
+
+
+class RootExtraRequest(NamedTuple):
+    link: Link
+    name: NormalizedName | None
+    extras: frozenset[NormalizedName]
+
+
 class CollectedRootRequirements(NamedTuple):
     requirements: list[Requirement]
     constraints: dict[str, Constraint]
@@ -120,6 +151,21 @@ class Factory:
             tuple[int, frozenset[NormalizedName]], ExtrasCandidate
         ] = {}
         self._supported_tags_cache = get_supported()
+        self._mandatory_versions: Mapping[NormalizedName, SpecifierSet] = (
+            MappingProxyType({})
+        )
+        self._mandatory_extras: Mapping[NormalizedName, frozenset[NormalizedName]] = (
+            MappingProxyType({})
+        )
+        self._mandatory_candidate_versions: Mapping[
+            NormalizedName, tuple[Version, ...]
+        ] = MappingProxyType({})
+        self._static_dependency_rejections: set[Link] = set()
+        self._empty_link_domains: frozenset[NormalizedName] = frozenset()
+        self._dependency_preflight_enabled = True
+        self._root_extra_requests: Mapping[InstallRequirement, RootExtraRequest] = (
+            MappingProxyType({})
+        )
 
         if not ignore_installed:
             env = get_default_environment()
@@ -436,6 +482,8 @@ class Factory:
         prefers_installed: bool,
         is_satisfied_by: Callable[[Requirement, Candidate], bool],
     ) -> Iterable[Candidate]:
+        if _has_conflicting_links(constraint.links):
+            return ()
         # Collect basic lookup information from the requirements.
         explicit_candidates: set[Candidate] = set()
         ireqs: list[InstallRequirement] = []
@@ -557,9 +605,113 @@ class Factory:
                         self._make_extras_candidate(cand, frozenset(ireq.extras))
                     )
 
+    def _set_mandatory_root_requirements(
+        self, root_ireqs: list[InstallRequirement]
+    ) -> None:
+        self._dependency_preflight_enabled = True
+        self._root_extra_requests = MappingProxyType({})
+        # Rejected partial metadata is only valid for the previous root domains.
+        for link in self._static_dependency_rejections:
+            self._link_candidate_cache.pop(link, None)
+        if self._static_dependency_rejections:
+            self._extras_candidate_cache.clear()
+            self._static_dependency_rejections.clear()
+        self._mandatory_candidate_versions = MappingProxyType({})
+
+        versions: dict[NormalizedName, SpecifierSet] = {}
+        extras: dict[NormalizedName, frozenset[NormalizedName]] = {}
+        constraint_links: dict[NormalizedName, list[Link]] = {}
+        root_extra_requests: dict[InstallRequirement, RootExtraRequest] = {}
+        for ireq in root_ireqs:
+            if not ireq.match_markers():
+                continue
+            if not ireq.constraint and ireq.link is not None and ireq.extras:
+                root_extra_requests[ireq] = RootExtraRequest(
+                    ireq.link,
+                    canonicalize_name(ireq.req.name) if ireq.req is not None else None,
+                    frozenset(canonicalize_name(extra) for extra in ireq.extras),
+                )
+            if ireq.req is None:
+                continue
+            name = canonicalize_name(ireq.req.name)
+            # Explicit URL roots use their candidate's version, not filename hints.
+            if ireq.link is None or ireq.constraint:
+                versions[name] = versions.get(name, SpecifierSet()) & ireq.req.specifier
+            if ireq.constraint and ireq.link is not None:
+                constraint_links.setdefault(name, []).append(ireq.link)
+            if not ireq.constraint and ireq.link is None:
+                extras[name] = extras.get(name, frozenset()) | frozenset(
+                    canonicalize_name(extra) for extra in ireq.extras
+                )
+        # Build the complete snapshot before collecting eager URL requirements.
+        self._mandatory_versions = MappingProxyType(versions)
+        self._mandatory_extras = MappingProxyType(extras)
+        self._root_extra_requests = MappingProxyType(root_extra_requests)
+        self._empty_link_domains = frozenset(
+            name
+            for name, links in constraint_links.items()
+            if _has_conflicting_links(links)
+        )
+
+        if self._uses_dependency_preflight():
+            wheel_roots: list[Requirement] = []
+            for ireq in root_ireqs:
+                if (
+                    ireq.constraint
+                    or ireq.link is None
+                    or not ireq.link.is_wheel
+                    or not ireq.match_markers()
+                ):
+                    continue
+                # Mandatory wheel roots expose actual metadata without a backend.
+                wheel_roots.extend(self._make_requirements_from_install_req(ireq, ()))
+            self._add_mandatory_candidate_facts(wheel_roots)
+
+    def _uses_dependency_preflight(self) -> bool:
+        return (
+            self._dependency_preflight_enabled
+            and self.preparer.static_dependency_rejector is not None
+            and self.preparer.static_metadata_fields is not None
+            and not self.preparer.legacy_resolver
+        )
+
+    def _add_mandatory_candidate_facts(
+        self, requirements: Iterable[Requirement]
+    ) -> None:
+        versions = dict(self._mandatory_candidate_versions)
+        extras = dict(self._mandatory_extras)
+        for requirement in requirements:
+            candidate, _ = requirement.get_candidate_lookup()
+            if candidate is None:
+                continue
+            name = candidate.project_name
+            requested = get_requirement(candidate.name).extras
+            extras[name] = extras.get(name, frozenset()) | frozenset(
+                canonicalize_name(extra) for extra in requested
+            )
+            try:
+                version = candidate.version
+            except InvalidVersion:
+                continue
+            known = versions.get(name, ())
+            if not any(str(previous) == str(version) for previous in known):
+                versions[name] = (*known, version)
+        self._mandatory_candidate_versions = MappingProxyType(versions)
+        self._mandatory_extras = MappingProxyType(extras)
+
     def collect_root_requirements(
         self, root_ireqs: list[InstallRequirement]
     ) -> CollectedRootRequirements:
+        try:
+            self._set_mandatory_root_requirements(root_ireqs)
+        except (UndefinedComparison, UndefinedEnvironmentName):
+            # Preserve the owning collection's order of validation and preparation.
+            self._mandatory_versions = MappingProxyType({})
+            self._mandatory_extras = MappingProxyType({})
+            self._mandatory_candidate_versions = MappingProxyType({})
+            self._empty_link_domains = frozenset()
+            self._root_extra_requests = MappingProxyType({})
+            self._dependency_preflight_enabled = False
         collected = CollectedRootRequirements([], {}, {})
         for i, ireq in enumerate(root_ireqs):
             if ireq.constraint:
@@ -588,6 +740,8 @@ class Factory:
                 if ireq.user_supplied and template.name not in collected.user_requested:
                     collected.user_requested[template.name] = i
                 collected.requirements.extend(reqs)
+                if self._uses_dependency_preflight():
+                    self._add_mandatory_candidate_facts(reqs)
         # Put requirements with extras at the end of the root requires. This does not
         # affect resolvelib's picking preference but it does affect its initial criteria
         # population: by putting extras at the end we enable the candidate finder to
@@ -598,6 +752,74 @@ class Factory:
         # the same key.
         collected.requirements.sort(key=lambda r: r.name != r.project_name)
         return collected
+
+    def reject_static_dependencies(
+        self, req: InstallRequirement, dist: BaseDistribution
+    ) -> bool:
+        """Reject fixed dependencies that cannot meet mandatory root domains."""
+        if not self._dependency_preflight_enabled:
+            return False
+        if req.name is not None and canonicalize_name(req.name) != dist.canonical_name:
+            raise MetadataInconsistent(
+                req, "name", canonicalize_name(req.name), dist.canonical_name
+            )
+        own_domain = _ordinary_specifiers(
+            self._mandatory_versions.get(dist.canonical_name, SpecifierSet())
+        )
+        known_own = self._mandatory_candidate_versions.get(dist.canonical_name, ())
+        if (
+            dist.canonical_name in self._empty_link_domains
+            or not own_domain.contains(dist.version, prereleases=True)
+            or any(version != dist.version for version in known_own)
+        ):
+            assert req.link is not None
+            self._static_dependency_rejections.add(req.link)
+            return True
+
+        requested_extras = self._mandatory_extras.get(dist.canonical_name, frozenset())
+        if isinstance(req.comes_from, InstallRequirement):
+            request = self._root_extra_requests.get(req.comes_from)
+            if (
+                request is not None
+                and req.link == request.link
+                and (request.name is None or request.name == dist.canonical_name)
+            ):
+                # Dropping root extras preserves this direct parent for fresh prep.
+                requested_extras |= request.extras
+        known_extras = requested_extras.intersection(dist.iter_provided_extras())
+        try:
+            dependencies = set(dist.iter_dependencies())
+            if known_extras:
+                dependencies.update(dist.iter_dependencies(known_extras))
+        except InvalidRequirement as error:
+            raise MetadataInvalid(req, str(error)) from error
+
+        versions: dict[NormalizedName, SpecifierSet] = {}
+        for dependency in dependencies:
+            if dependency.url is not None:
+                continue
+            name = canonicalize_name(dependency.name)
+            versions[name] = versions.get(name, SpecifierSet()) & dependency.specifier
+        for name, required in versions.items():
+            mandatory = self._mandatory_versions.get(name, SpecifierSet())
+            combined = _ordinary_specifiers(mandatory & required)
+            known = self._mandatory_candidate_versions.get(name, ())
+            self_conflict = name == dist.canonical_name and not _ordinary_specifiers(
+                required
+            ).contains(dist.version, prereleases=True)
+            if (
+                name in self._empty_link_domains
+                or self_conflict
+                or any(
+                    not combined.contains(version, prereleases=True)
+                    for version in known
+                )
+                or _has_version_conflict(mandatory, required)
+            ):
+                assert req.link is not None
+                self._static_dependency_rejections.add(req.link)
+                return True
+        return False
 
     def make_requirement_from_candidate(
         self, candidate: Candidate
