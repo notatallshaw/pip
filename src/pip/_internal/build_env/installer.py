@@ -158,8 +158,8 @@ class InprocessBuildEnvironmentInstaller:
 
     This contains a stripped down version of the install command with
     only the logic necessary for installing build dependencies. The
-    finder, session, build tracker, and wheel cache are reused, but new
-    instances of everything else are created as needed.
+    session, build tracker, and wheel cache are reused. A separate finder
+    selects dependencies for the running interpreter.
 
     Options are inherited from the parent install command unless
     they don't make sense for build dependencies (in which case, they
@@ -180,8 +180,23 @@ class InprocessBuildEnvironmentInstaller:
         verbosity: int = 0,
     ) -> None:
         from pip._internal.distributions.sdist import SDIST_RESOLUTION_FIELDS
+        from pip._internal.index.package_finder import PackageFinder
+        from pip._internal.models.selection_prefs import SelectionPreferences
         from pip._internal.operations.prepare import RequirementPreparer
 
+        # Build dependencies run on the host, independently of runtime targets.
+        finder = PackageFinder.create(
+            link_collector=finder._link_collector,
+            selection_prefs=SelectionPreferences(
+                allow_yanked=True,
+                release_control=finder.release_control,
+                format_control=finder.format_control,
+                prefer_binary=finder.prefer_binary,
+                ignore_requires_python=False,
+            ),
+            target_python=None,
+            uploaded_prior_to=finder.uploaded_prior_to,
+        )
         self._finder = finder
         self._build_constraints = build_constraints
         self._wheel_cache = wheel_cache
