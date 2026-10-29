@@ -179,6 +179,7 @@ class InprocessBuildEnvironmentInstaller:
         build_constraints: Sequence[InstallRequirement] = (),
         verbosity: int = 0,
     ) -> None:
+        from pip._internal.distributions.sdist import SDIST_RESOLUTION_FIELDS
         from pip._internal.operations.prepare import RequirementPreparer
 
         self._finder = finder
@@ -210,6 +211,7 @@ class InprocessBuildEnvironmentInstaller:
             legacy_resolver=False,
             allow_editables=True,
         )
+        self._preparer.static_metadata_fields = SDIST_RESOLUTION_FIELDS
 
     def install(
         self,
@@ -282,6 +284,7 @@ class InprocessBuildEnvironmentInstaller:
         reqs_to_build = [
             r for r in resolved_set.requirements_to_install if not r.is_wheel
         ]
+        self._preparer.prepare_build_requirements(reqs_to_build)
         _, build_failures = build(
             reqs_to_build, self._wheel_cache, verify=True, allow_editables=True
         )
