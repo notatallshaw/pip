@@ -2,12 +2,20 @@ import logging
 import os
 from optparse import Values
 
+from pip._vendor.packaging.markers import UndefinedComparison, UndefinedEnvironmentName
+
 from pip._internal.cli import cmdoptions
 from pip._internal.cli.cmdoptions import make_target_python
 from pip._internal.cli.req_command import RequirementCommand, with_cleanup
 from pip._internal.cli.status_codes import SUCCESS
 from pip._internal.distributions.sdist import SDIST_RESOLUTION_FIELDS
+from pip._internal.exceptions import InstallationError
 from pip._internal.operations.build.build_tracker import get_build_tracker
+from pip._internal.operations.prepare import RequirementPreparer
+from pip._internal.req.req_install import (
+    InstallRequirement,
+    check_invalid_constraint_type,
+)
 from pip._internal.utils.misc import ensure_dir, normalize_path, write_output
 from pip._internal.utils.temp_dir import TempDirectory
 
@@ -77,6 +85,51 @@ class DownloadCommand(RequirementCommand):
         self.parser.insert_option_group(0, selection_opts)
         self.parser.insert_option_group(0, self.cmd_opts)
 
+    @staticmethod
+    def _single_archive_without_metadata(
+        reqs: list[InstallRequirement], options: Values
+    ) -> InstallRequirement | None:
+        """Select an archive when no active root needs project metadata."""
+        if RequirementCommand.determine_resolver_variant(options) == "legacy":
+            return None
+        if not options.ignore_dependencies or not options.ignore_requires_python:
+            return None
+        try:
+            active = [req for req in reqs if req.match_markers()]
+        except (UndefinedComparison, UndefinedEnvironmentName):
+            # Let the resolver preserve its order of root validation and preparation.
+            return None
+        if len(active) != 1:
+            return None
+        req = active[0]
+        if req.req is not None or req.constraint or req.editable or req.link is None:
+            return None
+        if req.link.is_wheel or req.link.is_vcs or req.link.is_existing_dir():
+            return None
+        return req
+
+    def _prepare_anonymous_download(
+        self,
+        reqs: list[InstallRequirement],
+        selected: InstallRequirement,
+        preparer: RequirementPreparer,
+    ) -> None:
+        """Prepare one archive while preserving the order of ignored-root checks."""
+        for req in reqs:
+            if req is selected:
+                preparer.prepare_download_without_metadata(selected)
+                continue
+            if req.constraint:
+                problem = check_invalid_constraint_type(req)
+                if problem:
+                    raise InstallationError(problem)
+            if not req.constraint:
+                logger.info(
+                    "Ignoring %s: markers '%s' don't match your environment",
+                    req.name,
+                    req.markers,
+                )
+
     @with_cleanup
     def run(self, options: Values, args: list[str]) -> int:
         options.ignore_installed = True
@@ -124,6 +177,15 @@ class DownloadCommand(RequirementCommand):
             allow_editables=False,
             static_metadata_fields=SDIST_RESOLUTION_FIELDS,
         )
+
+        archive = self._single_archive_without_metadata(reqs, options)
+        if archive is not None:
+            self.trace_basic_info(finder)
+            self._prepare_anonymous_download(reqs, archive, preparer)
+            preparer.save_linked_requirement(archive)
+            assert archive.link is not None
+            write_output("Successfully downloaded %s", archive.link.filename)
+            return SUCCESS
 
         resolver = self.make_resolver(
             preparer=preparer,
