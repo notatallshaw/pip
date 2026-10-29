@@ -155,6 +155,18 @@ class SourceDistribution(AbstractDistribution):
         check_build_deps: bool,
         allow_editables: bool,
     ) -> None:
+        self.prepare_build_environment(
+            build_env_installer, build_isolation, check_build_deps, allow_editables
+        )
+        self.req.prepare_metadata(allow_editables)
+
+    def prepare_build_environment(
+        self,
+        build_env_installer: BuildEnvironmentInstaller,
+        build_isolation: BuildIsolationMode,
+        check_build_deps: bool,
+        allow_editables: bool,
+    ) -> None:
         # Load pyproject.toml and set up backend environment
         self.req.load_pyproject_toml()
         self._prepare_build_env(build_isolation, build_env_installer)
@@ -188,7 +200,6 @@ class SourceDistribution(AbstractDistribution):
                 self._raise_conflicts("the backend dependencies", conflicting)
             if missing:
                 self._raise_missing_reqs(missing)
-        self.req.prepare_metadata(allow_editables)
 
     def _prepare_build_env(
         self,
