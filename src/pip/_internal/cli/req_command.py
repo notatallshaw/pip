@@ -248,6 +248,7 @@ class RequirementCommand(IndexGroupCommand):
             allow_editables=allow_editables,
         )
         preparer.static_metadata_fields = static_metadata_fields
+        preparer.ignore_requires_python = options.ignore_requires_python
         return preparer
 
     @classmethod

@@ -533,13 +533,15 @@ class ExtrasCandidate(Candidate):
         # support. We ignore any unsupported extras here.
         valid_extras = self.extras.intersection(self.base.dist.iter_provided_extras())
         invalid_extras = self.extras.difference(self.base.dist.iter_provided_extras())
-        for extra in sorted(invalid_extras):
-            logger.warning(
-                "%s %s does not provide the extra '%s'",
-                self.base.name,
-                self.version,
-                extra,
-            )
+        # A partial source snapshot cannot establish that an extra is absent.
+        if "provides-extra" not in self.base._ireq.unresolved_metadata_fields:
+            for extra in sorted(invalid_extras):
+                logger.warning(
+                    "%s %s does not provide the extra '%s'",
+                    self.base.name,
+                    self.version,
+                    extra,
+                )
 
         for r in self.base.dist.iter_dependencies(valid_extras):
             yield from factory.make_requirements_from_spec(
