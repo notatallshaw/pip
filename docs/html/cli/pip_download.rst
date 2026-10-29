@@ -32,6 +32,11 @@ distributions into the directory provided (defaulting to the current
 directory). This directory can later be passed as the value to ``pip install
 --find-links`` to facilitate offline or locked down package installation.
 
+For source distributions with standardized ``name-version.tar.gz`` filenames,
+combining ``--no-deps`` and ``--ignore-requires-python`` uses the filename's name
+and version without preparing metadata. The archive's metadata is not checked in
+this mode. ``--check-build-dependencies`` still prepares the build backend.
+
 ``pip download`` with the ``--platform``, ``--python-version``,
 ``--implementation``, and ``--abi`` options provides the ability to fetch
 dependencies for an interpreter and system other than the ones that pip is

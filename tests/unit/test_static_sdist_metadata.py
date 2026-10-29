@@ -160,9 +160,11 @@ def test_dynamic_resolution_prefixes(tmp_path: Path, metadata_version: str) -> N
         f"Metadata-Version: {metadata_version}\nName: demo\nVersion: 1.0\n"
         "Dynamic: Requires-Dist\nRequires-Dist: dependency==1\n"
         "Dynamic: Provides-Extra\nProvides-Extra: speed\n"
-        "Dynamic: Requires-Python\nRequires-Python: >=99\n"
+        "Requires-Python: >=99\n"
     )
-    dist = read_sdist_metadata(str(tmp_path), "demo-1.0.tar.gz", frozenset())
+    dist = read_sdist_metadata(
+        str(tmp_path), "demo-1.0.tar.gz", frozenset({"requires-python"})
+    )
     assert dist is not None
     if metadata_version == "2.6":
         assert list(dist.iter_raw_dependencies()) == ["dependency==1"]
@@ -170,7 +172,7 @@ def test_dynamic_resolution_prefixes(tmp_path: Path, metadata_version: str) -> N
     else:
         assert list(dist.iter_raw_dependencies()) == []
         assert list(dist.iter_provided_extras()) == []
-    assert "Requires-Python" not in dist.metadata
+    assert str(dist.requires_python) == ">=99"
 
 
 def test_dynamic_metadata_preserves_static_headers(tmp_path: Path) -> None:

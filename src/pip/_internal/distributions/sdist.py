@@ -67,6 +67,16 @@ def read_sdist_metadata(
     identity = parse_sdist_identity(filename, require_normalized=False)
     if identity is None:
         return None
+    if not required_fields and parse_sdist_identity(filename) is not None:
+        name, version = identity
+        # Both resolution checks are disabled; the filename supplies identity.
+        contents = (
+            f"Metadata-Version: 2.2\nName: {name}\nVersion: {version}\n"
+            "Dynamic: Requires-Dist\nDynamic: Provides-Extra\n"
+            "Dynamic: Requires-Python\n"
+        ).encode()
+        return get_metadata_distribution(contents, filename, name)
+
     try:
         contents = Path(source_dir, "PKG-INFO").read_bytes()
         contents.decode("utf-8")
