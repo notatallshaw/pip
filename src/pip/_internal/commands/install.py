@@ -451,6 +451,7 @@ class InstallCommand(RequirementCommand):
 
             wheel_cache = WheelCache(options.cache_dir)
 
+            legacy_resolver = self.determine_resolver_variant(options) == "legacy"
             preparer = self.make_requirement_preparer(
                 temp_build_dir=directory,
                 options=options,
@@ -462,7 +463,7 @@ class InstallCommand(RequirementCommand):
                 allow_editables=True,
                 static_metadata_fields=(
                     frozenset({"*"})
-                    if options.json_report_file
+                    if options.json_report_file and legacy_resolver
                     else SDIST_RESOLUTION_FIELDS
                 ),
                 build_wheel_for_metadata=not options.dry_run,
@@ -486,13 +487,16 @@ class InstallCommand(RequirementCommand):
                 reqs, check_supported_wheels=not options.target_dir
             )
 
+            report = None
             if options.json_report_file:
                 report = InstallationReport(requirement_set.requirements_to_install)
-                if options.json_report_file == "-":
-                    print_json(data=report.to_dict())
-                else:
-                    with open(options.json_report_file, "w", encoding="utf-8") as f:
-                        json.dump(report.to_dict(), f, indent=2, ensure_ascii=False)
+                if legacy_resolver:
+                    self._write_report(report, options.json_report_file)
+                elif options.dry_run:
+                    preparer.complete_report_metadata(
+                        requirement_set.requirements_to_install
+                    )
+                    self._write_report(report, options.json_report_file)
 
             if options.dry_run:
                 would_install_items = sorted(
@@ -538,6 +542,9 @@ class InstallCommand(RequirementCommand):
 
             if build_failures:
                 raise InstallWheelBuildError(build_failures)
+
+            if report is not None and not legacy_resolver:
+                self._write_report(report, options.json_report_file)
 
             to_install = resolver.get_installation_order(requirement_set)
 
@@ -609,6 +616,14 @@ class InstallCommand(RequirementCommand):
         if options.root_user_action == "warn":
             warn_if_run_as_root()
         return SUCCESS
+
+    @staticmethod
+    def _write_report(report: InstallationReport, filename: str) -> None:
+        if filename == "-":
+            print_json(data=report.to_dict())
+        else:
+            with open(filename, "w", encoding="utf-8") as f:
+                json.dump(report.to_dict(), f, indent=2, ensure_ascii=False)
 
     def _handle_target_dir(
         self, target_dir: str, target_temp_dir: TempDirectory, upgrade: bool

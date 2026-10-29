@@ -25,7 +25,6 @@ from pip._internal.cli import cmdoptions
 from pip._internal.cli.cmdoptions import make_target_python
 from pip._internal.cli.index_command import IndexGroupCommand
 from pip._internal.cli.index_command import SessionCommandMixin as SessionCommandMixin
-from pip._internal.distributions.sdist import SDIST_RESOLUTION_FIELDS
 from pip._internal.exceptions import (
     CommandError,
     PreviousBuildDirError,
@@ -256,15 +255,6 @@ class RequirementCommand(IndexGroupCommand):
             if options.ignore_requires_python:
                 static_metadata_fields -= {"requires-python"}
         preparer.static_metadata_fields = static_metadata_fields
-        if (
-            static_metadata_fields is not None
-            and "*" in static_metadata_fields
-            and options.only_dependencies
-        ):
-            root_fields = SDIST_RESOLUTION_FIELDS
-            if options.ignore_requires_python:
-                root_fields -= {"requires-python"}
-            preparer.user_supplied_metadata_fields = root_fields
         preparer.ignore_requires_python = options.ignore_requires_python
         preparer.build_wheel_for_metadata = (
             build_wheel_for_metadata
