@@ -698,7 +698,7 @@ class RequirementPreparer:
             req.needs_build_preparation = False
 
     def prepare_download_without_metadata(self, req: InstallRequirement) -> None:
-        """Validate an anonymous source archive without requesting its metadata."""
+        """Validate an anonymous source without requesting its metadata."""
         assert req.link is not None
         self._log_preparing_link(req)
         with indent_log():
@@ -707,7 +707,7 @@ class RequirementPreparer:
             except HashError as error:
                 error.req = req
                 raise
-            assert local_file is not None
+            assert local_file is not None or req.link.is_existing_dir()
             req.load_pyproject_toml()
             if self.check_build_deps:
                 dist = SourceDistribution(req)

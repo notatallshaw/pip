@@ -16,7 +16,12 @@ from pip._internal.req.req_install import (
     InstallRequirement,
     check_invalid_constraint_type,
 )
-from pip._internal.utils.misc import ensure_dir, normalize_path, write_output
+from pip._internal.utils.misc import (
+    display_path,
+    ensure_dir,
+    normalize_path,
+    write_output,
+)
 from pip._internal.utils.temp_dir import TempDirectory
 
 logger = logging.getLogger(__name__)
@@ -86,10 +91,10 @@ class DownloadCommand(RequirementCommand):
         self.parser.insert_option_group(0, self.cmd_opts)
 
     @staticmethod
-    def _single_archive_without_metadata(
+    def _single_source_without_metadata(
         reqs: list[InstallRequirement], options: Values
     ) -> InstallRequirement | None:
-        """Select an archive when no active root needs project metadata."""
+        """Select a source when no active root needs project metadata."""
         if RequirementCommand.determine_resolver_variant(options) == "legacy":
             return None
         if not options.ignore_dependencies or not options.ignore_requires_python:
@@ -104,7 +109,7 @@ class DownloadCommand(RequirementCommand):
         req = active[0]
         if req.req is not None or req.constraint or req.editable or req.link is None:
             return None
-        if req.link.is_wheel or req.link.is_vcs or req.link.is_existing_dir():
+        if req.link.is_wheel or req.link.is_vcs:
             return None
         return req
 
@@ -178,13 +183,19 @@ class DownloadCommand(RequirementCommand):
             static_metadata_fields=SDIST_RESOLUTION_FIELDS,
         )
 
-        archive = self._single_archive_without_metadata(reqs, options)
-        if archive is not None:
+        source = self._single_source_without_metadata(reqs, options)
+        if source is not None:
             self.trace_basic_info(finder)
-            self._prepare_anonymous_download(reqs, archive, preparer)
-            preparer.save_linked_requirement(archive)
-            assert archive.link is not None
-            write_output("Successfully downloaded %s", archive.link.filename)
+            self._prepare_anonymous_download(reqs, source, preparer)
+            preparer.save_linked_requirement(source)
+            assert source.link is not None
+            if source.link.is_existing_dir():
+                write_output(
+                    "Source directory already available: %s",
+                    display_path(source.link.file_path),
+                )
+            else:
+                write_output("Successfully downloaded %s", source.link.filename)
             return SUCCESS
 
         resolver = self.make_resolver(
