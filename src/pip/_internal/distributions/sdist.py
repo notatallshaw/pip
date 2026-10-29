@@ -28,6 +28,8 @@ from pip._internal.build_env import (
 from pip._internal.distributions.base import AbstractDistribution
 from pip._internal.exceptions import InstallationError
 from pip._internal.metadata import BaseDistribution, get_metadata_distribution
+from pip._internal.utils.filetypes import ARCHIVE_EXTENSIONS, WHEEL_EXTENSION
+from pip._internal.utils.misc import splitext
 from pip._internal.utils.subprocess import runner_with_spinner_message
 
 if TYPE_CHECKING:
@@ -43,12 +45,19 @@ SDIST_RESOLUTION_FIELDS = frozenset(
 def parse_sdist_identity(
     filename: str, *, require_normalized: bool = True
 ) -> tuple[NormalizedName, Version] | None:
-    """Parse an sdist identity, optionally requiring filename normalization."""
-    if not filename.endswith(".tar.gz") or filename[:-7].count("-") != 1:
+    """Parse an archive identity, optionally requiring sdist filename normalization."""
+    stem, extension = splitext(filename)
+    if (
+        extension.lower() not in ARCHIVE_EXTENSIONS
+        or extension.lower() == WHEEL_EXTENSION
+    ):
         return None
-    name_part, version_part = filename[:-7].split("-")
+    if require_normalized and (extension != ".tar.gz" or stem.count("-") != 1):
+        return None
+    name_part, _, version_part = stem.rpartition("-")
     try:
-        name, version = parse_sdist_filename(filename)
+        # Other legacy archive formats use the same name/version split.
+        name, version = parse_sdist_filename(f"{stem}.tar.gz")
         canonicalize_name(name_part, validate=True)
     except (InvalidName, InvalidSdistFilename):
         return None
