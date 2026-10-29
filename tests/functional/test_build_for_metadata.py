@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import shutil
 import textwrap
 from hashlib import sha256
@@ -225,7 +226,15 @@ def test_build_once_for_metadata(
         ["--no-deps"],
         ["--ignore-requires-python"],
         ["--no-deps", "--ignore-requires-python", "--dry-run"],
-        ["--no-deps", "--ignore-requires-python", "--report", "report.json"],
+        ["--no-deps", "--report", "report.json"],
+        ["--ignore-requires-python", "--report", "report.json"],
+        [
+            "--no-deps",
+            "--ignore-requires-python",
+            "--dry-run",
+            "--report",
+            "report.json",
+        ],
     ],
 )
 def test_metadata_hook_is_retained_when_needed(
@@ -486,3 +495,109 @@ def test_legacy_resolver_keeps_normal_metadata_preparation(
         result.assert_installed("package", editable=False)
     else:
         result.did_create(script.scratch / "package-1.0-py2.py3-none-any.whl")
+
+
+@pytest.mark.parametrize("source_kind", ["directory", "editable", "archive"])
+def test_actual_install_report_uses_complete_built_wheel_metadata(
+    script: PipTestEnvironment, source_project: Path, source_kind: str
+) -> None:
+    metadata = (
+        "Metadata-Version: 2.2\nName: package\nVersion: 1.0\n"
+        "Requires-Python: >=99\nRequires-Dist: unused-dependency==99\n"
+        "Summary: café\nProject-URL: Docs, https://example.invalid/docs\n"
+        "\nComplete report description.\n"
+    )
+    wheel = make_wheel(
+        "package",
+        "1.0",
+        metadata=metadata,
+        extra_files=(
+            {"package.pth": str(source_project) + "\n"}
+            if source_kind == "editable"
+            else {"package/__init__.py": ""}
+        ),
+    )
+    source_project.joinpath(
+        "editable-wheel-data" if source_kind == "editable" else "wheel-data"
+    ).write_bytes(base64.b64encode(wheel.as_bytes()))
+    if source_kind == "archive":
+        requirement = Path(
+            shutil.make_archive(
+                str(script.scratch_path / "snapshot"), "gztar", root_dir=source_project
+            )
+        ).as_uri()
+    else:
+        requirement = source_project.as_uri()
+    editable_args = ["--editable"] if source_kind == "editable" else []
+    result = script.pip(
+        "install",
+        "--no-index",
+        "--no-deps",
+        "--ignore-requires-python",
+        "--config-settings=mode=fast",
+        "--report",
+        "report.json",
+        *editable_args,
+        requirement,
+    )
+    expected = (
+        ["editable-requirements", "editable"]
+        if source_kind == "editable"
+        else ["wheel-requirements", "wheel"]
+    )
+    assert script.scratch_path.joinpath("events").read_text().splitlines() == expected
+    report = json.loads(script.scratch_path.joinpath("report.json").read_text())
+    assert len(report["install"]) == 1
+    item = report["install"][0]
+    assert item["metadata"]["name"] == "package"
+    assert item["metadata"]["version"] == "1.0"
+    assert item["metadata"]["requires_python"] == ">=99"
+    assert item["metadata"]["requires_dist"] == ["unused-dependency==99"]
+    assert item["metadata"]["summary"] == "café"
+    assert item["metadata"]["project_url"] == ["Docs, https://example.invalid/docs"]
+    assert item["metadata"]["description"] == "Complete report description.\n"
+    assert item["download_info"]["url"] == requirement
+    assert item["requested"] is True
+    if source_kind == "archive":
+        archive = script.scratch_path / "snapshot.tar.gz"
+        assert item["download_info"]["archive_info"]["hashes"] == {
+            "sha256": sha256(archive.read_bytes()).hexdigest()
+        }
+    else:
+        assert item["download_info"]["dir_info"] == (
+            {"editable": True} if source_kind == "editable" else {}
+        )
+    result.assert_installed(
+        "package", editable=(source_kind == "editable"), editable_vcs=False
+    )
+
+
+def test_actual_report_does_not_eagerly_build_an_installed_vcs_source(
+    script: PipTestEnvironment, source_project: Path
+) -> None:
+    installed = script.scratch_path / "package-1.0-py2.py3-none-any.whl"
+    installed.write_bytes(
+        base64.b64decode(source_project.joinpath("wheel-data").read_bytes())
+    )
+    script.pip(
+        "install", "--no-index", "--no-deps", "--ignore-requires-python", installed
+    )
+    enable_metadata_hook(source_project)
+    script.run("git", "init", "--quiet", cwd=source_project)
+    script.run("git", "add", ".", cwd=source_project)
+    git_commit(source_project)
+    script.pip(
+        "install",
+        "--no-index",
+        "--no-deps",
+        "--ignore-requires-python",
+        "--config-settings=mode=fast",
+        "--report",
+        "report.json",
+        f"package @ git+{source_project.as_uri()}",
+    )
+    report = json.loads(script.scratch_path.joinpath("report.json").read_text())
+    assert report["install"] == []
+    events = script.scratch_path / "events"
+    observed = events.read_text().splitlines() if events.exists() else []
+    assert observed == ["wheel-requirements", "metadata"]
