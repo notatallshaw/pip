@@ -34,6 +34,8 @@ from pip._internal.models.direct_url import DirectUrl
 from pip._internal.models.link import Link
 from pip._internal.operations.build.metadata import generate_metadata
 from pip._internal.operations.build.metadata_editable import generate_editable_metadata
+from pip._internal.operations.build.wheel import build_wheel_pep517, verify_built_wheel
+from pip._internal.operations.build.wheel_editable import build_wheel_editable
 from pip._internal.pyproject import load_pyproject_toml, make_pyproject_path
 from pip._internal.req.req_uninstall import UninstallPathSet
 from pip._internal.utils.deprecation import deprecated
@@ -164,6 +166,10 @@ class InstallRequirement:
         # Retain the sdist promises until the built wheel can be checked.
         self.static_sdist_metadata: BaseDistribution | None = None
         self.needs_build_preparation = False
+
+        # Reuse a wheel built during metadata discovery in the final build stage.
+        self.build_wheel_for_metadata = False
+        self.prebuilt_wheel_path: str | None = None
 
         # The static build requirements (from pyproject.toml)
         self.pyproject_requires: list[str] | None = None
@@ -561,6 +567,28 @@ class InstallRequirement:
             self.warn_on_mismatching_name()
 
         self.assert_source_matches_version()
+
+    def prepare_wheel_metadata(self, allow_editables: bool) -> None:
+        """Build the requested wheel and read its metadata before resolution."""
+        assert self.pep517_backend is not None
+        directory = TempDirectory(kind="metadata-wheel", globally_managed=True)
+        builder = (
+            build_wheel_editable
+            if self.editable and allow_editables
+            else build_wheel_pep517
+        )
+        with self.build_env:
+            wheel_path = builder(
+                name=self.name or str(self),
+                backend=self.pep517_backend,
+                metadata_directory=None,
+                wheel_directory=directory.path,
+            )
+        if wheel_path is None:
+            raise InstallationError(f"Could not build wheel for {self}")
+        self.set_dist(verify_built_wheel(wheel_path, verify=False))
+        self.update_metadata_requirement()
+        self.prebuilt_wheel_path = wheel_path
 
     @property
     def metadata(self) -> Any:

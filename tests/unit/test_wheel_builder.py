@@ -96,9 +96,14 @@ def test_should_not_cache_local_directory(tmpdir: Path, name: str) -> None:
 )
 def test_built_wheel_preserves_static_sdist_metadata(field: str, value: str) -> None:
     source_dist = make_wheel("package", "1.0").as_distribution("package")
-    wheel_dist = make_wheel(
-        "package", "1.0", metadata_updates={field: value}
-    ).as_distribution("package")
+    name = value if field == "Name" else "package"
+    version = value if field == "Version" else "1.0"
+    updates: dict[str, str | list[str]] = (
+        {} if field in {"Name", "Version"} else {field: value}
+    )
+    wheel_dist = make_wheel(name, version, metadata_updates=updates).as_distribution(
+        name
+    )
 
     with pytest.raises(UnsupportedWheel, match=f"different {field}"):
         wheel_builder._check_static_sdist_metadata(source_dist, wheel_dist)

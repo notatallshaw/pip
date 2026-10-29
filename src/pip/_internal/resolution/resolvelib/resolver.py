@@ -75,6 +75,11 @@ class Resolver(BaseResolver):
         self.only_dependencies = only_dependencies
         self.upgrade_strategy = upgrade_strategy
         self._result: Result | None = None
+        preparer.source_build_is_required = (
+            self.factory.is_source_build_required
+            if preparer.build_wheel_for_metadata
+            else None
+        )
 
     def resolve(
         self, root_reqs: list[InstallRequirement], check_supported_wheels: bool

@@ -33,8 +33,8 @@ def parse_wheel(wheel_zip: ZipFile, name: str) -> tuple[str, Message]:
     return info_dir, metadata
 
 
-def wheel_dist_info_dir(source: ZipFile, name: str) -> str:
-    """Returns the name of the contained .dist-info directory.
+def wheel_dist_info_dir(source: ZipFile, name: str | None) -> str:
+    """Return the contained .dist-info directory, checking a supplied project name.
 
     Raises AssertionError or UnsupportedWheel if not found, >1 found, or
     it doesn't match the provided name.
@@ -54,12 +54,14 @@ def wheel_dist_info_dir(source: ZipFile, name: str) -> str:
 
     info_dir = info_dirs[0]
 
-    info_dir_name = canonicalize_name(info_dir)
-    canonical_name = canonicalize_name(name)
-    if not info_dir_name.startswith(canonical_name):
-        raise UnsupportedWheel(
-            f".dist-info directory {info_dir!r} does not start with {canonical_name!r}"
-        )
+    if name is not None:
+        info_dir_name = canonicalize_name(info_dir)
+        canonical_name = canonicalize_name(name)
+        if not info_dir_name.startswith(canonical_name):
+            raise UnsupportedWheel(
+                f".dist-info directory {info_dir!r} does not start with "
+                f"{canonical_name!r}"
+            )
 
     return info_dir
 

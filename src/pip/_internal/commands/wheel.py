@@ -129,6 +129,7 @@ class WheelCommand(RequirementCommand):
             verbosity=self.verbosity,
             allow_editables=False,
             static_metadata_fields=SDIST_RESOLUTION_FIELDS,
+            build_wheel_for_metadata=True,
         )
 
         resolver = self.make_resolver(

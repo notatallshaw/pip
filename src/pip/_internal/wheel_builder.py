@@ -5,17 +5,13 @@ from __future__ import annotations
 import logging
 import os.path
 import re
+import shutil
 from collections.abc import Iterable
 from tempfile import TemporaryDirectory
 
 from pip._vendor.packaging.requirements import InvalidRequirement
 from pip._vendor.packaging.specifiers import InvalidSpecifier, SpecifierSet
-from pip._vendor.packaging.utils import (
-    InvalidName,
-    canonicalize_name,
-    canonicalize_version,
-)
-from pip._vendor.packaging.version import InvalidVersion, Version
+from pip._vendor.packaging.version import Version
 
 from pip._internal.cache import WheelCache
 from pip._internal.exceptions import (
@@ -25,12 +21,9 @@ from pip._internal.exceptions import (
 )
 from pip._internal.metadata import (
     BaseDistribution,
-    FilesystemWheel,
-    get_wheel_distribution,
 )
 from pip._internal.models.link import Link
-from pip._internal.models.wheel import Wheel
-from pip._internal.operations.build.wheel import build_wheel_pep517
+from pip._internal.operations.build.wheel import build_wheel_pep517, verify_built_wheel
 from pip._internal.operations.build.wheel_editable import build_wheel_editable
 from pip._internal.req.req_install import InstallRequirement
 from pip._internal.utils.logging import indent_log
@@ -105,32 +98,7 @@ def _get_cache_dir(
 
 
 def _verify_one(req: InstallRequirement, wheel_path: str) -> None:
-    canonical_name = canonicalize_name(req.name or "")
-    w = Wheel(os.path.basename(wheel_path))
-    if w.name != canonical_name:
-        raise InvalidWheelFilename(
-            f"Wheel has unexpected file name: expected {canonical_name!r}, "
-            f"got {w.name!r}",
-        )
-    dist = get_wheel_distribution(FilesystemWheel(wheel_path), canonical_name)
-    dist_verstr = str(dist.version)
-    if canonicalize_version(dist_verstr) != canonicalize_version(w.version):
-        raise InvalidWheelFilename(
-            f"Wheel has unexpected file name: expected {dist_verstr!r}, "
-            f"got {w.version!r}",
-        )
-    metadata_version_value = dist.metadata_version
-    if metadata_version_value is None:
-        raise UnsupportedWheel("Missing Metadata-Version")
-    try:
-        metadata_version = Version(metadata_version_value)
-    except InvalidVersion:
-        msg = f"Invalid Metadata-Version: {metadata_version_value}"
-        raise UnsupportedWheel(msg)
-    if metadata_version >= Version("1.2") and not isinstance(dist.version, Version):
-        raise UnsupportedWheel(
-            f"Metadata 1.2 mandates PEP 440 version, but {dist_verstr!r} is not"
-        )
+    verify_built_wheel(wheel_path, expected_name=req.name or "")
 
 
 def _check_static_sdist_metadata(
@@ -139,19 +107,9 @@ def _check_static_sdist_metadata(
     """Check the metadata promises used to resolve an sdist before building it."""
     dynamic = {field.lower() for field in source_dist.metadata.get_all("Dynamic", [])}
     append_only = Version(source_dist.metadata_version or "0") >= Version("2.6")
-    # Directory-derived identity can conceal missing or invalid metadata headers.
-    names = wheel_dist.metadata.get_all("Name", [])
-    versions = wheel_dist.metadata.get_all("Version", [])
-    if len(names) != 1 or len(versions) != 1:
-        raise UnsupportedWheel("Built wheel must have one Name and Version")
-    try:
-        wheel_name = canonicalize_name(str(names[0]), validate=True)
-        wheel_version = Version(str(versions[0]))
-    except (InvalidName, InvalidVersion) as exc:
-        raise UnsupportedWheel(f"Built wheel has invalid identity: {exc}") from exc
     comparisons: list[tuple[str, object, object]] = [
-        ("Name", source_dist.canonical_name, wheel_name),
-        ("Version", source_dist.version, wheel_version),
+        ("Name", source_dist.canonical_name, wheel_dist.canonical_name),
+        ("Version", source_dist.version, wheel_dist.version),
     ]
     if "requires-python" not in dynamic:
         try:
@@ -227,21 +185,24 @@ def _build_one(
     wheel_dist = None
     if wheel_path and req.static_sdist_metadata is not None:
         try:
-            wheel_dist = get_wheel_distribution(
-                FilesystemWheel(wheel_path), canonicalize_name(req.name or "")
+            wheel_dist = verify_built_wheel(
+                wheel_path, expected_name=req.name if verify else None, verify=verify
             )
             _check_static_sdist_metadata(req.static_sdist_metadata, wheel_dist)
-        except (InvalidWheel, UnsupportedWheel) as exc:
+        except (InvalidWheel, InvalidWheelFilename, UnsupportedWheel) as exc:
             logger.warning("Built %s for %s is invalid: %s", artifact, req.name, exc)
             # A rejected build must not become a reusable cached wheel.
             os.unlink(wheel_path)
             return None
-    if wheel_path and verify:
+    if wheel_path and verify and wheel_dist is None:
         try:
             _verify_one(req, wheel_path)
         except (InvalidWheelFilename, UnsupportedWheel) as e:
             logger.warning("Built %s for %s is invalid: %s", artifact, req.name, e)
-            if req.static_sdist_metadata is not None:
+            if (
+                req.static_sdist_metadata is not None
+                or req.prebuilt_wheel_path is not None
+            ):
                 os.unlink(wheel_path)
             return None
     if wheel_dist is not None:
@@ -257,7 +218,14 @@ def _build_one_inside_env(
     with TemporaryDirectory(dir=output_dir) as wheel_directory:
         assert req.name
         assert req.pep517_backend
-        if editable:
+        wheel_path: str | None
+        if req.prebuilt_wheel_path is not None:
+            # Retain the one real wheel already used to discover source metadata.
+            wheel_path = os.path.join(
+                wheel_directory, os.path.basename(req.prebuilt_wheel_path)
+            )
+            shutil.copyfile(req.prebuilt_wheel_path, wheel_path)
+        elif editable:
             assert req.metadata_directory
             wheel_path = build_wheel_editable(
                 name=req.name,

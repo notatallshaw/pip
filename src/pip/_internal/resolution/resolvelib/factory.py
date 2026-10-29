@@ -134,6 +134,19 @@ class Factory:
     def force_reinstall(self) -> bool:
         return self._force_reinstall
 
+    def is_source_build_required(self, req: InstallRequirement) -> bool:
+        """Decide whether source metadata discovery is followed by a build."""
+        # Ignoring installed distributions also leaves this snapshot empty.
+        if self._force_reinstall or req.editable or not self._installed_dists:
+            return True
+        if req.link is not None and req.link.is_file:
+            return True
+        # An unknown or installed remote project can still resolve to a no-op.
+        return (
+            req.name is not None
+            and canonicalize_name(req.name) not in self._installed_dists
+        )
+
     def _fail_if_link_is_unsupported_wheel(self, link: Link) -> None:
         if not link.is_wheel:
             return
