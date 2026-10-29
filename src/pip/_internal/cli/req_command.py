@@ -247,6 +247,12 @@ class RequirementCommand(IndexGroupCommand):
             legacy_resolver=legacy_resolver,
             allow_editables=allow_editables,
         )
+        # Full reports need complete metadata even when resolution ignores fields.
+        if static_metadata_fields is not None and "*" not in static_metadata_fields:
+            if options.ignore_dependencies:
+                static_metadata_fields -= {"requires-dist", "provides-extra"}
+            if options.ignore_requires_python:
+                static_metadata_fields -= {"requires-python"}
         preparer.static_metadata_fields = static_metadata_fields
         preparer.ignore_requires_python = options.ignore_requires_python
         return preparer
