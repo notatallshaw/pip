@@ -527,14 +527,15 @@ class TestSSLContextAdapterMixinProxy:
         assert proxy_manager.proxy_ssl_context is ssl_context
         assert proxy_manager.connection_pool_kw["ssl_context"] is ssl_context
 
-    def test_no_ssl_context_leaves_proxy_ssl_context_unset(self) -> None:
+    def test_default_proxy_context_verifies_certificates(self) -> None:
         session = PipSession()
 
         adapter = session.adapters["https://"]
         assert isinstance(adapter, HTTPAdapter)
         proxy_manager = adapter.proxy_manager_for("https://proxy.example:443")
 
-        assert proxy_manager.proxy_ssl_context is None
+        assert proxy_manager.proxy_ssl_context is not None
+        assert proxy_manager.proxy_ssl_context.verify_mode == ssl.CERT_REQUIRED
 
 
 @pytest.mark.parametrize("cached", [False, True], ids=["direct", "cached"])
@@ -575,6 +576,73 @@ def test_https_proxy_uses_custom_ca_bundle(
 
     environ, _ = server.mock.call_args.args
     assert environ["REQUEST_METHOD"] == "CONNECT"
+
+
+@pytest.mark.parametrize(
+    "cached,trusted,legacy,ca_source,scheme",
+    [
+        (False, False, False, "cli", "http"),
+        (True, False, True, "requests", "http"),
+        (False, True, False, "curl", "http"),
+        (True, True, True, "cli", "http"),
+        (False, False, False, None, "http"),
+        (True, True, True, None, "http"),
+        (False, True, False, "cli", "https"),
+        (True, True, True, None, "https"),
+    ],
+)
+def test_https_proxy_verification_is_independent_of_destination(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    cert_factory: Callable[[], str],
+    cached: bool,
+    trusted: bool,
+    legacy: bool,
+    ca_source: str | None,
+    scheme: str,
+) -> None:
+    for name in ("PIP_CERT", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"):
+        monkeypatch.delenv(name, raising=False)
+
+    proxy_cert = cert_factory()
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(proxy_cert)
+    server = make_mock_server(ssl_context=context)
+    server.mock.return_value = text_html_response("proxy response")
+
+    args = ["--retries", "0"]
+    if legacy:
+        args.append("--use-deprecated=legacy-certs")
+    if ca_source == "cli":
+        args.extend(["--cert", proxy_cert])
+    elif ca_source is not None:
+        name = "REQUESTS_CA_BUNDLE" if ca_source == "requests" else "CURL_CA_BUNDLE"
+        monkeypatch.setenv(name, proxy_cert)
+    if trusted:
+        args.extend(["--trusted-host", "origin.example"])
+    args.extend(
+        ["--cache-dir", str(tmp_path / "cache")] if cached else ["--no-cache-dir"]
+    )
+    _, session = TestSessionProxy._build_session(monkeypatch, [*args, "example"])
+    session.proxies = {scheme: f"https://{server.host}:{server.port}"}
+    url = f"{scheme}://origin.example/"
+
+    with session, server_running(server):
+        if ca_source is None:
+            with pytest.raises(ProxyConnectionError):
+                session.get(url, verify=False, timeout=5)
+        elif scheme == "https":
+            with pytest.raises((SSLVerificationError, ConnectionFailedError)):
+                session.get(url, timeout=5)
+        else:
+            response = session.get(url, verify=False, timeout=5)
+            assert response.text == "proxy response"
+
+    if ca_source is None:
+        server.mock.assert_not_called()
+    else:
+        environ, _ = server.mock.call_args.args
+        assert environ["REQUEST_METHOD"] == ("CONNECT" if scheme == "https" else "GET")
 
 
 class TestConnectionErrors:
