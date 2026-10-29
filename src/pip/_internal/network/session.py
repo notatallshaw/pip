@@ -18,13 +18,13 @@ import subprocess
 import sys
 import urllib.parse
 import warnings
-from collections.abc import Generator, Mapping, Sequence
+from collections.abc import Callable, Generator, Mapping, Sequence
 from typing import (
     TYPE_CHECKING,
     Any,
 )
 
-from pip._vendor import requests, urllib3
+from pip._vendor import certifi, requests, urllib3
 from pip._vendor.cachecontrol import CacheControlAdapter as _BaseCacheControlAdapter
 from pip._vendor.requests.adapters import DEFAULT_POOLBLOCK, BaseAdapter
 from pip._vendor.requests.adapters import HTTPAdapter as _BaseHTTPAdapter
@@ -32,6 +32,7 @@ from pip._vendor.requests.models import PreparedRequest, Response
 from pip._vendor.requests.structures import CaseInsensitiveDict
 from pip._vendor.urllib3.connectionpool import ConnectionPool
 from pip._vendor.urllib3.exceptions import InsecureRequestWarning
+from pip._vendor.urllib3.util import ssl_
 
 from pip import __version__
 from pip._internal.exceptions import SSLMissingError
@@ -78,6 +79,33 @@ SECURE_ORIGINS: list[SecureOrigin] = [
     # ssh is always secure.
     ("ssh", "*", "*"),
 ]
+
+
+def create_proxy_ssl_context(
+    verify: bool | str | None,
+    *,
+    context_factory: Callable[[], SSLContext | None] | None = None,
+) -> SSLContext | None:
+    """Create an SSL context for HTTPS proxy connections."""
+    if (verify is None or verify is True) and context_factory is not None:
+        context = context_factory()
+        if context is not None:
+            return context
+
+    if ssl_.SSLContext is None:
+        return None
+    if verify is False or verify == "":
+        return ssl_.create_urllib3_context(
+            cert_reqs=ssl_.resolve_cert_reqs("CERT_NONE")
+        )
+
+    context = ssl_.create_urllib3_context()
+    ca_source = verify if isinstance(verify, str) else certifi.where()
+    if os.path.isdir(ca_source):
+        context.load_verify_locations(capath=ca_source)
+    else:
+        context.load_verify_locations(cafile=ca_source)
+    return context
 
 
 @functools.lru_cache(maxsize=1)
@@ -228,22 +256,17 @@ class LocalFSAdapter(BaseAdapter):
 
 
 class _SSLContextAdapterMixin:
-    """Mixin to add the ``ssl_context`` constructor argument to HTTP adapters.
-
-    The additional argument is forwarded directly to the pool manager. This allows us
-    to dynamically decide what SSL store to use at runtime, which is used to implement
-    the optional ``truststore`` backend.
-    """
+    """Route origin and HTTPS proxy TLS contexts."""
 
     def __init__(
         self,
         *,
         ssl_context: SSLContext | None = None,
-        use_ssl_context_for_proxy: bool = True,
+        proxy_ssl_context_factory: Callable[[], SSLContext | None] | None = None,
         **kwargs: Any,
     ) -> None:
         self._ssl_context = ssl_context
-        self._use_ssl_context_for_proxy = use_ssl_context_for_proxy
+        self._proxy_ssl_context_factory = proxy_ssl_context_factory
         super().__init__(**kwargs)
 
     def init_poolmanager(
@@ -267,9 +290,18 @@ class _SSLContextAdapterMixin:
         # context here too. https://github.com/pypa/pip/issues/13288
         if self._ssl_context is not None:
             proxy_kwargs.setdefault("ssl_context", self._ssl_context)
-            if self._use_ssl_context_for_proxy:
-                # Leave this unset when urllib3 must apply a custom proxy CA bundle.
-                proxy_kwargs.setdefault("proxy_ssl_context", self._ssl_context)
+        if (
+            urllib.parse.urlsplit(proxy).scheme.lower() == "https"
+            and "proxy_ssl_context" not in proxy_kwargs
+        ):
+            # Build this context only when an HTTPS proxy is actually used.
+            proxy_ssl_context = (
+                self._proxy_ssl_context_factory()
+                if self._proxy_ssl_context_factory is not None
+                else self._ssl_context
+            )
+            if proxy_ssl_context is not None:
+                proxy_kwargs["proxy_ssl_context"] = proxy_ssl_context
         return super().proxy_manager_for(proxy, **proxy_kwargs)  # type: ignore[misc]
 
 
@@ -306,6 +338,22 @@ class InsecureCacheControlAdapter(CacheControlAdapter):
 class PipSession(requests.Session):
     timeout: int | None = None
 
+    def _create_default_proxy_ssl_context(
+        self,
+        ssl_context: SSLContext | None,
+    ) -> SSLContext | None:
+        """Create the HTTPS proxy context for a session without CLI policy."""
+        verify = self.verify
+        if self.trust_env:
+            verify = (
+                os.environ.get("REQUESTS_CA_BUNDLE")
+                or os.environ.get("CURL_CA_BUNDLE")
+                or verify
+            )
+        if verify is True and ssl_context is not None:
+            return ssl_context
+        return create_proxy_ssl_context(verify)
+
     def __init__(
         self,
         *args: Any,
@@ -315,7 +363,7 @@ class PipSession(requests.Session):
         trusted_hosts: Sequence[str] = (),
         index_urls: list[str] | None = None,
         ssl_context: SSLContext | None = None,
-        use_ssl_context_for_proxy: bool = True,
+        proxy_ssl_context_factory: Callable[[], SSLContext | None] | None = None,
         refresh_package: set[str] | None = None,
         **kwargs: Any,
     ) -> None:
@@ -324,6 +372,15 @@ class PipSession(requests.Session):
             HTTPS.
         """
         super().__init__(*args, **kwargs)
+
+        if proxy_ssl_context_factory is None:
+            proxy_ssl_context_factory = functools.partial(
+                self._create_default_proxy_ssl_context,
+                ssl_context,
+            )
+        proxy_ssl_context_factory = functools.lru_cache(maxsize=1)(
+            proxy_ssl_context_factory
+        )
 
         # Namespace the attribute with "pip_" just in case to prevent
         # possible conflicts with the base class.
@@ -369,7 +426,10 @@ class PipSession(requests.Session):
         # If caching is disabled, we will also use it for
         # https:// hosts that we've marked as ignoring
         # TLS errors for (trusted-hosts).
-        insecure_adapter = InsecureHTTPAdapter(max_retries=retries)
+        insecure_adapter = InsecureHTTPAdapter(
+            max_retries=retries,
+            proxy_ssl_context_factory=proxy_ssl_context_factory,
+        )
 
         # We want to _only_ cache responses on securely fetched origins or when
         # the host is specified as trusted. We do this because
@@ -382,17 +442,18 @@ class PipSession(requests.Session):
                 cache=SafeFileCache(cache),
                 max_retries=retries,
                 ssl_context=ssl_context,
-                use_ssl_context_for_proxy=use_ssl_context_for_proxy,
+                proxy_ssl_context_factory=proxy_ssl_context_factory,
             )
             self._trusted_host_adapter = InsecureCacheControlAdapter(
                 cache=SafeFileCache(cache),
                 max_retries=retries,
+                proxy_ssl_context_factory=proxy_ssl_context_factory,
             )
         else:
             secure_adapter = HTTPAdapter(
                 max_retries=retries,
                 ssl_context=ssl_context,
-                use_ssl_context_for_proxy=use_ssl_context_for_proxy,
+                proxy_ssl_context_factory=proxy_ssl_context_factory,
             )
             self._trusted_host_adapter = insecure_adapter
 
