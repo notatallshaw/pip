@@ -33,6 +33,23 @@ HeaderValue = str | list[str]
 File = namedtuple("File", ["name", "contents"])
 Record = namedtuple("Record", ["path", "digest", "size"])
 
+RECORD_FILENAMES = (
+    "plain.dat",
+    "comma,name.dat",
+    'quote"name.dat',
+    "we\nird.dat",
+    "we\rird.dat",
+    "we\r\nird.dat",
+    "we\vird.dat",
+    "we\fird.dat",
+    "we\x1cird.dat",
+    "we\x1dird.dat",
+    "we\x1eird.dat",
+    "we\x85ird.dat",
+    "we\u2028ird.dat",
+    "we\u2029ird.dat",
+)
+
 
 class Default(Enum):
     token = 0

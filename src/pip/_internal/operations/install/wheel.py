@@ -7,6 +7,7 @@ import compileall
 import contextlib
 import csv
 import importlib
+import io
 import logging
 import os.path
 import re
@@ -715,7 +716,7 @@ def _install_wheel(  # noqa: C901, PLR0915 function is too long
         generated.append(requested_path)
 
     record_text = distribution.read_text("RECORD")
-    record_rows = list(csv.reader(record_text.splitlines()))
+    record_rows = list(csv.reader(io.StringIO(record_text, newline="")))
 
     rows = get_csv_rows_for_installed(
         record_rows,

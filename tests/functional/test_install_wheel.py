@@ -10,8 +10,10 @@ from typing import Any
 
 import pytest
 
+from pip._internal.utils.compat import WINDOWS
+
 from tests.lib import PipTestEnvironment, TestData, create_basic_wheel_for_package
-from tests.lib.wheel import WheelBuilder, make_wheel
+from tests.lib.wheel import RECORD_FILENAMES, WheelBuilder, digest, make_wheel
 
 
 # assert_installed expects a package subdirectory, so give it to them
@@ -366,6 +368,46 @@ def test_wheel_record_lines_have_hash_for_data_files(
         "sha256=Ln0sA6lQeuJl7PW1NWiFpTOTogKdJBOUmXJloaJa78Y",
         "1",
     ]
+
+
+def test_wheel_record_preserves_filenames_on_install_and_uninstall(
+    script: PipTestEnvironment,
+) -> None:
+    filenames = [
+        name
+        for name in RECORD_FILENAMES
+        if not WINDOWS or ('"' not in name and all(ord(char) >= 32 for char in name))
+    ]
+    contents = b"package data\n"
+    package = make_wheel(
+        "simple",
+        "1.0",
+        extra_files=dict.fromkeys(filenames, contents),
+    ).save_to_dir(script.scratch_path)
+    decoys = [
+        script.site_packages_path / name for name in ("weird.dat", "we", "ird.dat")
+    ]
+    for decoy in decoys:
+        decoy.write_bytes(b"unrelated data\n")
+
+    script.pip("install", "--no-index", package)
+    record_file = script.site_packages_path / "simple-1.0.dist-info" / "RECORD"
+    with record_file.open(encoding="utf-8", newline="") as stream:
+        rows = list(csv.reader(stream))
+    payload_rows = [
+        row for row in rows if not row[0].startswith("simple-1.0.dist-info/")
+    ]
+    assert sorted(payload_rows) == sorted(
+        [name, digest(contents), str(len(contents))] for name in filenames
+    )
+    for name in filenames:
+        assert (script.site_packages_path / name).read_bytes() == contents
+
+    script.pip("uninstall", "-y", "simple")
+    for name in filenames:
+        assert not (script.site_packages_path / name).exists()
+    for decoy in decoys:
+        assert decoy.read_bytes() == b"unrelated data\n"
 
 
 def test_wheel_record_lines_have_updated_hash_for_scripts(

@@ -1,3 +1,6 @@
+import csv
+import importlib.metadata
+import io
 import logging
 import os
 from pathlib import Path
@@ -15,9 +18,112 @@ from pip._internal.metadata import (
     get_wheel_distribution,
 )
 from pip._internal.metadata.base import FilesystemWheel
+from pip._internal.metadata.importlib import Distribution as ImportlibDistribution
+from pip._internal.metadata.importlib import Environment as ImportlibEnvironment
+from pip._internal.metadata.pkg_resources import (
+    Distribution as PkgResourcesDistribution,
+)
 from pip._internal.models.direct_url import DIRECT_URL_METADATA_NAME
 
-from tests.lib.wheel import make_wheel
+from tests.lib.wheel import RECORD_FILENAMES, make_wheel
+
+
+def _record_text(terminator: str) -> str:
+    """Build RECORD rows with quoted line breaks on every supported Python."""
+    record = io.StringIO(newline="")
+    # Older CSV writers only quote line breaks present in the row terminator.
+    writer = csv.writer(
+        record,
+        lineterminator=terminator,
+        quoting=csv.QUOTE_MINIMAL if terminator == "\r\n" else csv.QUOTE_ALL,
+    )
+    writer.writerows((filename, "", "") for filename in RECORD_FILENAMES)
+    return record.getvalue()
+
+
+@pytest.mark.parametrize(
+    "backend",
+    [ImportlibDistribution, PkgResourcesDistribution],
+    ids=["importlib", "pkg_resources"],
+)
+@pytest.mark.parametrize("storage", ["directory", "wheel"])
+@pytest.mark.parametrize("terminator", ["\n", "\r\n", "\r"])
+def test_declared_entries_preserve_record_filenames(
+    tmp_path: Path,
+    backend: type[BaseDistribution],
+    storage: str,
+    terminator: str,
+) -> None:
+    record = _record_text(terminator)
+    if storage == "directory":
+        info = tmp_path / "simple-1.0.dist-info"
+        info.mkdir()
+        (info / "RECORD").write_bytes(record.encode("utf-8"))
+        dist = backend.from_directory(str(info))
+    else:
+        wheel_path = make_wheel("simple", "1.0", record=record).save_to_dir(tmp_path)
+        dist = backend.from_wheel(
+            FilesystemWheel(wheel_path), canonicalize_name("simple")
+        )
+
+    entries = dist.iter_declared_entries()
+    assert entries is not None
+    assert list(entries) == list(RECORD_FILENAMES)
+
+
+@pytest.mark.parametrize("state", ["missing", "empty", "directory", "legacy-file"])
+def test_importlib_unavailable_record(tmp_path: Path, state: str) -> None:
+    info = tmp_path / "simple-1.0.dist-info"
+    if state == "legacy-file":
+        info = tmp_path / "simple.egg-info"
+        info.write_bytes(b"Name: simple\nVersion: 1.0\n")
+    else:
+        info.mkdir()
+        if state == "empty":
+            (info / "RECORD").write_bytes(b"")
+        elif state == "directory":
+            (info / "RECORD").mkdir()
+
+    dist = ImportlibDistribution.from_directory(str(info))
+    entries = dist.iter_declared_entries()
+    if state == "empty":
+        assert entries is not None
+        assert list(entries) == []
+    else:
+        assert entries is None
+
+
+def test_importlib_non_record_newline_handling(tmp_path: Path) -> None:
+    info = tmp_path / "simple-1.0.dist-info"
+    info.mkdir()
+    (info / "METADATA").write_bytes(b"Name: simple\r\nVersion: 1.0\r")
+    dist = ImportlibDistribution.from_directory(str(info))
+
+    assert dist.read_text("METADATA") == "Name: simple\nVersion: 1.0\n"
+
+
+def test_importlib_record_without_metadata_location(tmp_path: Path) -> None:
+    info = tmp_path / "simple-1.0.dist-info"
+    info.mkdir()
+    (info / "RECORD").write_bytes(b"plain.dat,,\n")
+    underlying = importlib.metadata.Distribution.at(info)
+    dist = ImportlibDistribution(underlying, None, None)
+
+    assert dist.read_text("RECORD") == "plain.dat,,\n"
+
+
+@pytest.mark.parametrize("terminator", ["\n", "\r\n", "\r"])
+def test_declared_entries_preserve_zipped_record_filenames(
+    tmp_path: Path, terminator: str
+) -> None:
+    location = str(tmp_path / "simple.zip")
+    make_wheel("simple", "1.0", record=_record_text(terminator)).save_to(location)
+    dist = ImportlibEnvironment.from_paths([location]).get_distribution("simple")
+
+    assert dist is not None
+    entries = dist.iter_declared_entries()
+    assert entries is not None
+    assert list(entries) == list(RECORD_FILENAMES)
 
 
 @mock.patch.object(BaseDistribution, "read_text", side_effect=FileNotFoundError)
