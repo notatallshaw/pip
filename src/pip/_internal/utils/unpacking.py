@@ -221,7 +221,6 @@ def untar_file(filename: str, location: str) -> None:
                         member = data_filter(member, location)
                     except tarfile.LinkOutsideDestinationError:
                         if sys.version_info[:3] in {
-                            (3, 9, 17),
                             (3, 10, 12),
                             (3, 11, 4),
                         }:
