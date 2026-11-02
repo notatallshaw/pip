@@ -982,6 +982,24 @@ def test_parse_editable_vcs_extras() -> None:
             "https://token-secret@example.com/pkg.zip",
             "https://****@example.com/pkg.zip",
         ),
+        (
+            'demo @ "https://user:secret@example.com/pkg.zip"',
+            'demo @ "https://user:****@example.com/pkg.zip"',
+        ),
+        (
+            "demo @ git+https://user:secret@example.com/repo.git ; "
+            "python_version >= 3.10",
+            "demo @ git+https://user:****@example.com/repo.git ; "
+            "python_version >= 3.10",
+        ),
+        (
+            "demo @ https://token-secret@example.com/pkg.zip ; python_version >= 3.10",
+            "demo @ https://****@example.com/pkg.zip ; python_version >= 3.10",
+        ),
+        (
+            "demo @ https://user:secret@[invalid ; python_version >= 3.10",
+            "demo @ **** ; python_version >= 3.10",
+        ),
     ],
 )
 def test_parse_editable_error_redacts_credentials(

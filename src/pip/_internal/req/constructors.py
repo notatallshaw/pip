@@ -53,6 +53,8 @@ logger = logging.getLogger(__name__)
 # https://packaging.python.org/en/latest/specifications/version-specifiers/#id5
 operators = ("~=", "==", "!=", "<=", ">=", "<", ">", "===")
 
+_editable_url_re = re.compile(r"(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]*://\S+")
+
 
 def strip_extras(path: str) -> tuple[str, set[str]]:
     m = re.match(r"^(.+)(\[[^\]]+\])$", path)
@@ -137,12 +139,17 @@ def _parse_pip_syntax_editable(editable_req: str) -> tuple[str | None, str, set[
     return Link(url).egg_fragment, url, set()
 
 
-def _redact_editable_req(editable_req: str, url: str) -> str:
-    """Return editable_req with any credentials in its URL redacted."""
-    # _parse_pip_syntax_editable() may have added a "<vcs>+" prefix to url.
-    if url in editable_req:
-        return editable_req.replace(url, redact_auth_from_url(url))
-    return redact_auth_from_url(editable_req)
+def _redact_editable_req(editable_req: str) -> str:
+    """Redact URL credentials even when the requirement cannot be parsed."""
+
+    def redact_url(match: re.Match[str]) -> str:
+        try:
+            return redact_auth_from_url(match[0])
+        except ValueError:
+            # An unparseable URL can still contain credentials.
+            return "****"
+
+    return _editable_url_re.sub(redact_url, editable_req)
 
 
 def parse_editable(editable_req: str) -> tuple[str | None, str, set[str]]:
@@ -165,7 +172,7 @@ def parse_editable(editable_req: str) -> tuple[str | None, str, set[str]]:
     if not link.is_vcs and not link.url.startswith("file:"):
         backends = ", ".join(vcs.all_schemes)
         raise InstallationError(
-            f"{_redact_editable_req(editable_req, url)} is not a valid "
+            f"{_redact_editable_req(editable_req)} is not a valid "
             "editable requirement. It should either be a path to a local "
             "project or a VCS URL "
             f"(beginning with {backends})."
@@ -175,7 +182,7 @@ def parse_editable(editable_req: str) -> tuple[str | None, str, set[str]]:
     if not package_name and not link.url.startswith("file:"):
         raise InstallationError(
             "Could not detect requirement name for "
-            f"'{_redact_editable_req(editable_req, url)}', "
+            f"'{_redact_editable_req(editable_req)}', "
             "please specify one with your_package_name @ URL"
         )
     return package_name, url, extras
