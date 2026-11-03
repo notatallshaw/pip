@@ -35,7 +35,8 @@ For developing pip, you need to install :pypi:`nox`. The full development setup 
 
         python -m venv .venv
         source .venv/bin/activate
-        python -m pip install nox
+        python -m pip install "pip>=26.3"
+        python -m pip install --group pylock.dev.toml:dev
 
 .. tab:: Windows
 
@@ -43,7 +44,18 @@ For developing pip, you need to install :pypi:`nox`. The full development setup 
 
         py -m venv .venv
         .venv\Scripts\activate
-        py -m pip install nox
+        py -m pip install "pip>=26.3"
+        py -m pip install --group pylock.dev.toml:dev
+
+Nox installs each session's dependencies from ``pylock.dev.toml`` and uses
+Nab to generate and check this lock. To update it after changing dependencies,
+run::
+
+    python -m nox -s lock
+
+To check the committed lock without rewriting it, run
+``python -m nox -s lock -- --locked``.
+
 
 Running pip From Source Tree
 ============================

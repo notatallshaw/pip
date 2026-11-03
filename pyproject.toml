@@ -49,9 +49,13 @@ requires = ["flit-core >=3.11,<5"]
 build-backend = "flit_core.buildapi"
 
 [dependency-groups]
+dev = ["nox"]
+
 test = [
+    "build >= 1.4.2",
     "cryptography",
-    "flit-core >= 3.11, < 5",
+    # PyPy bundles CFFI, but its parser is a separate distribution.
+    "pycparser; implementation_name == 'pypy'",
     "freezegun",
     "installer",
     # pytest-subket requires 7.0+
@@ -69,6 +73,7 @@ test = [
 ]
 
 test-common-wheels = [
+    # Used as test input, independently of pip's build backend.
     "flit-core >= 3.11, < 5",
     # We pin setuptools<80 because our test suite currently
     # depends on setup.py develop to generate egg-link files.
@@ -83,6 +88,7 @@ test-common-wheels = [
 
 typecheck = [
     {include-group = "test"},
+    "mypy",
     "certifi >= 2026.10.23",
     "keyring",  # An optional runtime dependency.
     "nox",
@@ -105,6 +111,47 @@ docs = [
     "sphinx-inline-tabs",
     "sphinxcontrib-towncrier >= 0.2.0a0",
     "sphinx-issues",
+]
+
+lint = ["pre-commit"]
+docs-live = [{include-group = "docs"}, "sphinx-autobuild"]
+vendoring = [
+    "vendoring ~= 1.4.0; python_version >= '3.11'",
+    "certifi >= 2026.10.23",
+]
+release = ["packaging", "towncrier", "twine", "certifi >= 2026.10.23"]
+packaging = ["check-sdist"]
+redirects = ["httpx", "rich", "pyyaml", "certifi >= 2026.10.23"]
+
+[tool.nab]
+base-group = "runtime"
+build-group = "build"
+decision-order = "stable"
+uploaded-prior-to = "P7D"
+build-policy = "never"
+
+[tool.nab.matrix]
+python = ">=3.10,<3.16"
+platforms = [
+    "linux_x86_64",
+    "linux_aarch64",
+    "macos_x86_64",
+    "macos_arm64",
+    "windows_amd64",
+    "windows_arm64",
+]
+
+[[tool.nab.matrix.include]]
+python = ">=3.13,<3.16"
+free-threaded = true
+
+[[tool.nab.matrix.include]]
+python = "==3.11"
+implementations = ["pypy"]
+platforms = [
+    {id = "linux_x86_64", pypy-abi = "pp73"},
+    {id = "macos_arm64", pypy-abi = "pp80"},
+    {id = "windows_amd64", pypy-abi = "pp80"},
 ]
 
 [tool.flit.sdist]
@@ -392,6 +439,7 @@ exclude_also = [
 
 [tool.check-sdist]
 git-only = [
+  "pylock.dev.toml",
   "tests/**",
   "tools/**",
   "news/.gitignore",

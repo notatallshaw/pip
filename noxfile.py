@@ -17,6 +17,7 @@ sys.path.pop()
 # fmt: on
 
 nox.options.reuse_existing_virtualenvs = True
+nox.options.default_venv_backend = "virtualenv"
 nox.options.sessions = ["lint"]
 nox.needs_version = ">=2024.03.02"  # for session.run_install()
 
@@ -27,15 +28,11 @@ LOCATIONS = {
 
 AUTHORS_FILE = "AUTHORS.txt"
 VERSION_FILE = "src/pip/__init__.py"
+DEV_LOCK = "pylock.dev.toml"
 
 
 def run_with_protected_pip(session: nox.Session, *arguments: str) -> None:
-    """Do a session.run("pip", *arguments), using a "protected" pip.
-
-    This invokes a wrapper script, that forwards calls to original virtualenv
-    (stable) version, and not the code being tested. This ensures pip being
-    used is not the code being tested.
-    """
+    """Run the cached stable pip independently of the pip being tested."""
     env = {"VIRTUAL_ENV": session.virtualenv.location}
 
     command = ("python", LOCATIONS["protected-pip"]) + arguments
@@ -44,27 +41,34 @@ def run_with_protected_pip(session: nox.Session, *arguments: str) -> None:
     session.run_install(*command, env=env, silent=True)
 
 
+def install_groups(session: nox.Session, *groups: str) -> None:
+    """Install the session's dependency groups from the development lock."""
+    arguments = [arg for group in groups for arg in ("--group", f"{DEV_LOCK}:{group}")]
+    run_with_protected_pip(session, "install", *arguments)
+
+
 def should_update_common_wheels(session: nox.Session) -> bool:
     """Determine if the common wheels cache needs to be updated.
 
     The cache is invalidated if:
     1. It doesn't exist yet
-    2. pyproject.toml was modified after the cache was created
+    2. pyproject.toml or the development lock was modified after cache creation
     3. The cached wheels cannot satisfy the current Python version's requirements
     """
     # If the cache hasn't been created, create it.
     if not os.path.exists(LOCATIONS["common-wheels"]):
         return True
 
-    # If the pyproject.toml was updated after cache, we'll repopulate it.
+    # Dependency declarations and locked artifacts both invalidate the cache.
     cache_last_populated_at = os.path.getmtime(LOCATIONS["common-wheels"])
-    pyproject_updated_at = os.path.getmtime("pyproject.toml")
-    need_to_repopulate = pyproject_updated_at > cache_last_populated_at
+    inputs_updated_at = max(
+        os.path.getmtime("pyproject.toml"), os.path.getmtime(DEV_LOCK)
+    )
+    need_to_repopulate = inputs_updated_at > cache_last_populated_at
 
     if not need_to_repopulate:
-        # Check all common wheels are available for the current Python version,
-        # by using --ignore-installed and --dry-run against the common-wheels
-        # directory.
+        # Check the project group against local wheels. Pylock artifact URLs
+        # would fetch distributions instead of testing this directory.
         result = session.run(
             "python",
             LOCATIONS["protected-pip"],
@@ -104,7 +108,7 @@ def get_common_wheels(session: nox.Session) -> None:
             session,
             "wheel",
             "-w", LOCATIONS["common-wheels"],
-            "--group", "test-common-wheels",
+            "--group", f"{DEV_LOCK}:test-common-wheels",
         )
         # fmt: on
     else:
@@ -115,6 +119,13 @@ def get_common_wheels(session: nox.Session) -> None:
 # -----------------------------------------------------------------------------
 # Development Commands
 # -----------------------------------------------------------------------------
+@nox.session(venv_backend="venv")
+def lock(session: nox.Session) -> None:
+    """Update the development lock with a pinned resolver."""
+    session.install("nab==0.0.25")
+    session.run("nab", "lock", "--all-groups", "--output", DEV_LOCK, *session.posargs)
+
+
 @nox.session(name="common-wheels")
 def common_wheels(session: nox.Session) -> None:
     """Build the common wheels needed by tests."""
@@ -123,6 +134,9 @@ def common_wheels(session: nox.Session) -> None:
 
 @nox.session(python=["3.10", "3.11", "3.12", "3.13", "3.14", "3.15", "3.14t", "pypy3"])
 def test(session: nox.Session) -> None:
+    if isinstance(session.python, str) and session.python.endswith("t"):
+        session.env["PYTHON_GIL"] = "0"
+
     # Get the common wheels.
     get_common_wheels(session)
 
@@ -136,16 +150,13 @@ def test(session: nox.Session) -> None:
     if not no_install and os.path.exists(sdist_dir):
         shutil.rmtree(sdist_dir, ignore_errors=True)
 
-    # build 1.4.2 fixed a bug that broke the uninstall workaround below by
-    # failing to fall back to virtualenv when pip is missing.
-    run_with_protected_pip(session, "install", "build>=1.4.2")
-    # build uses the pip present in the outer environment (aka the nox environment)
-    # as an optimization. This will crash if the last test run installed a broken
-    # pip, so uninstall pip to force build to provision a known good version of pip.
+    install_groups(session, "test", "build")
+    # Remove pip left by a previous run so the new sdist is always installed.
     run_with_protected_pip(session, "uninstall", "pip", "-y")
     # fmt: off
     session.run_install(
-        "python", "-I", "-m", "build", "--sdist", "--outdir", sdist_dir,
+        "python", "-I", "-m", "build", "--no-isolation", "--sdist",
+        "--outdir", sdist_dir,
         silent=True,
     )
     # fmt: on
@@ -156,9 +167,6 @@ def test(session: nox.Session) -> None:
 
     # Install source distribution
     run_with_protected_pip(session, "install", generated_sdist)
-
-    # Install test dependencies
-    run_with_protected_pip(session, "install", "--group", "test")
 
     # Parallelize tests as much as possible, by default.
     arguments = session.posargs or ["-n", "auto"]
@@ -188,13 +196,7 @@ def typecheck(session: nox.Session) -> None:
     Type errors within the vendored packages themselves are an upstream concern
     and are ignored via tests/typing/pyproject.toml.
     """
-    run_with_protected_pip(
-        session,
-        "install",
-        "mypy",
-        "--group",
-        "typecheck",
-    )
+    install_groups(session, "typecheck")
 
     mypy_cmd = [
         "mypy",
@@ -218,8 +220,10 @@ def typecheck(session: nox.Session) -> None:
 
 @nox.session
 def docs(session: nox.Session) -> None:
-    session.install("-e", ".")
-    session.install("--group", "docs")
+    install_groups(session, "docs", "build")
+    run_with_protected_pip(
+        session, "install", "--no-deps", "--no-build-isolation", "-e", "."
+    )
 
     def get_sphinx_build_command(kind: str) -> list[str]:
         # Having the conf.py in the docs/html is weird but needed because we
@@ -248,8 +252,10 @@ def docs(session: nox.Session) -> None:
 
 @nox.session(name="docs-live")
 def docs_live(session: nox.Session) -> None:
-    session.install("-e", ".")
-    session.install("--group", "docs", "sphinx-autobuild")
+    install_groups(session, "docs-live", "build")
+    run_with_protected_pip(
+        session, "install", "--no-deps", "--no-build-isolation", "-e", "."
+    )
 
     session.run(
         "sphinx-autobuild",
@@ -264,7 +270,7 @@ def docs_live(session: nox.Session) -> None:
 
 @nox.session
 def lint(session: nox.Session) -> None:
-    session.install("pre-commit")
+    install_groups(session, "lint")
 
     if session.posargs:
         args = session.posargs + ["--all-files"]
@@ -289,7 +295,14 @@ def vendoring(session: nox.Session) -> None:
     parser.add_argument("--skip", action="append", default=[])
     args = parser.parse_args(session.posargs)
 
-    session.install("vendoring~=1.4.0", "--constraint", "tools/constraints.txt")
+    session.run(
+        "python",
+        "-c",
+        "import sys; sys.exit(0 if sys.version_info >= (3, 11) else "
+        "'vendoring requires Python 3.11 or newer')",
+        silent=True,
+    )
+    install_groups(session, "vendoring")
 
     if not (args.upgrade or args.upgrade_all):
         session.run("vendoring", "sync", "-v")
@@ -347,11 +360,8 @@ def vendoring(session: nox.Session) -> None:
 def coverage(session: nox.Session) -> None:
     get_common_wheels(session)
 
-    # Install source distribution
-    run_with_protected_pip(session, "install", ".")
-
-    # Install test dependencies
-    run_with_protected_pip(session, "install", "--group", "test")
+    install_groups(session, "test", "build")
+    run_with_protected_pip(session, "install", "--no-deps", "--no-build-isolation", ".")
 
     coverage_output_dir = Path(".coverage-output").resolve()
     coverage_output_dir.mkdir(exist_ok=True)
@@ -422,8 +432,7 @@ def build_release(session: nox.Session) -> None:
             "You can use `git clean -fxdi -- dist` command to do this"
         )
 
-    session.log("# Install dependencies")
-    session.install("twine", "--constraint", "tools/constraints.txt")
+    install_groups(session, "packaging", "build")
 
     with release.isolated_temporary_checkout(session, version) as build_dir:
         session.log(
@@ -462,6 +471,8 @@ def build_dists(session: nox.Session) -> list[str]:
     session.run("python", "build-project/build-project.py", silent=True)
     produced_dists = glob.glob("dist/*")
 
+    session.run("check-sdist", "--no-isolation", silent=True)
+
     session.log(f"# Verify distributions: {', '.join(produced_dists)}")
     session.run("twine", "check", "--strict", *produced_dists, silent=True)
 
@@ -473,9 +484,6 @@ def upload_release(session: nox.Session) -> None:
     version = release.get_version_from_arguments(session)
     if not version:
         session.error("Usage: nox -s upload-release -- YY.N[.P]")
-
-    session.log("# Install dependencies")
-    session.install("twine", "--constraint", "tools/constraints.txt")
 
     distribution_files = glob.glob("dist/*")
     session.log(f"# Distribution files: {distribution_files}")

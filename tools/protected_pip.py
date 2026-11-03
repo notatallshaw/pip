@@ -10,8 +10,8 @@ from glob import glob
 
 VIRTUAL_ENV = os.environ["VIRTUAL_ENV"]
 TOX_PIP_DIR = os.path.join(VIRTUAL_ENV, "pip")
-# pip 26.2.2 includes the certifi fix for the emSign compromise.
-PIP_REQUIREMENT = "pip>=26.2.2"
+# Selecting dependency groups from Pylock files requires pip 26.3.
+PIP_REQUIREMENT = "pip>=26.3"
 
 
 def pip(args: Iterable[str | pathlib.Path]) -> None:
@@ -45,7 +45,15 @@ def pip(args: Iterable[str | pathlib.Path]) -> None:
             shutil.rmtree(dist_info)
         requirement_file.write_text(PIP_REQUIREMENT + "\n", encoding="utf-8")
 
-    subprocess.check_call([sys.executable, "-m", "pip", *(os.fspath(a) for a in args)])
+    subprocess.check_call(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "--disable-pip-version-check",
+            *(os.fspath(a) for a in args),
+        ]
+    )
 
 
 if __name__ == "__main__":
