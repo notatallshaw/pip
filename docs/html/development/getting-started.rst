@@ -101,7 +101,8 @@ To run tests without parallelization, run:
     $ nox -s test-3.10
 
 The example above runs tests against Python 3.10. You can also use other
-versions like ``3.15`` and ``pypy3``.
+versions like ``3.15`` and ``pypy3``. The PyPy test profile uses PyPy 3.11;
+its cryptography dependency no longer supports PyPy 3.10.
 
 ``nox`` has been configured to forward any additional arguments it is given to
 ``pytest``. This enables the use of pytest's `rich CLI`_. As an example, you

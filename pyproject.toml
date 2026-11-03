@@ -149,9 +149,9 @@ free-threaded = true
 python = "==3.11"
 implementations = ["pypy"]
 platforms = [
-    {id = "linux_x86_64", pypy-abi = "pp73"},
-    {id = "macos_arm64", pypy-abi = "pp80"},
-    {id = "windows_amd64", pypy-abi = "pp80"},
+    "linux_x86_64",
+    "macos_arm64",
+    "windows_amd64",
 ]
 
 [tool.flit.sdist]
