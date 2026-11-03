@@ -173,7 +173,7 @@ def test(session: nox.Session) -> None:
     generated_sdist = os.path.join(sdist_dir, generated_files[0])
 
     # Install source distribution
-    run_with_protected_pip(session, "install", generated_sdist)
+    run_with_protected_pip(session, "install", "--no-build-isolation", generated_sdist)
 
     # Parallelize tests as much as possible, by default.
     arguments = session.posargs or ["-n", "auto"]
