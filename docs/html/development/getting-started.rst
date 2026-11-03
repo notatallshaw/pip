@@ -45,6 +45,16 @@ For developing pip, you need to install :pypi:`nox`. The full development setup 
         .venv\Scripts\activate
         py -m pip install nox
 
+Nox installs each session's dependencies from ``pylock.dev.toml`` and uses
+Nab to generate and check this lock. To update it after changing dependencies,
+run::
+
+    python -m nox -s lock
+
+To check the committed lock without rewriting it, run
+``python -m nox -s lock -- --locked``.
+
+
 Running pip From Source Tree
 ============================
 
@@ -89,7 +99,8 @@ To run tests without parallelization, run:
     $ nox -s test-3.10
 
 The example above runs tests against Python 3.10. You can also use other
-versions like ``3.15`` and ``pypy3``.
+versions like ``3.15`` and ``pypy3``. The PyPy test toolchain requires PyPy 3.11
+because the current cryptography dependency does not support PyPy 3.10.
 
 ``nox`` has been configured to forward any additional arguments it is given to
 ``pytest``. This enables the use of pytest's `rich CLI`_. As an example, you

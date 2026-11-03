@@ -27,7 +27,8 @@ def get_version_from_arguments(session: Session) -> str | None:
     version = session.posargs[0]
 
     # We delegate to a script here, so that it can depend on packaging.
-    session.install("packaging")
+    session.install("pip>=26.3")
+    session.install("--group", "pylock.dev.toml:release")
     cmd = [
         os.path.join(session.bin, "python"),
         "tools/release/check_version.py",
@@ -117,7 +118,6 @@ def commit_file(session: Session, filename: str, *, message: str) -> None:
 
 
 def generate_news(session: Session, version: str) -> None:
-    session.install("towncrier")
     session.run("towncrier", "build", "--yes", "--version", version, silent=True)
 
 
