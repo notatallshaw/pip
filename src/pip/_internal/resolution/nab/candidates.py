@@ -305,7 +305,7 @@ class LinkCandidate(_InstallRequirementBackedCandidate):
             if version is not None:
                 wheel_version = Version(wheel.version)
                 assert version == wheel_version, (
-                    f"{version!r} != {wheel_version!r} for wheel {name}"
+                    f"{version!r} != {wheel_version!r} " + f"for wheel {name}"
                 )
 
         if cache_entry is not None:

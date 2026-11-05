@@ -362,9 +362,7 @@ class Factory:
     ) -> None:
         """Check additional input hashes discovered with an archive's package name."""
         source_link = candidate.source_link
-        assert source_link is not None, (
-            "A prepared linked candidate must retain its source"
-        )
+        assert source_link is not None, "Prepared candidates retain their source"
 
         _, wanted = self._input_hash_template(
             source_link, template, candidate.project_name
