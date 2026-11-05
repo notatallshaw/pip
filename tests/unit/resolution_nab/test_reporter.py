@@ -33,7 +33,9 @@ def test_no_multiple_versions_message_on_first_rejection(
 ) -> None:
     caplog.set_level(logging.INFO)
     reporter = PipReporter()
+
     reporter.rejecting_candidate((), candidate)
+
     assert "looking at multiple versions" not in caplog.text
 
 
@@ -42,6 +44,8 @@ def test_multiple_versions_message_on_second_rejection(
 ) -> None:
     caplog.set_level(logging.INFO)
     reporter = PipReporter()
+
     reporter.rejecting_candidate((), candidate)
     reporter.rejecting_candidate((), candidate)
+
     assert "looking at multiple versions of django" in caplog.text

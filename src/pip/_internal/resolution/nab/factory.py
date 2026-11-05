@@ -372,9 +372,11 @@ class Factory:
             return
         if source_link.is_vcs or source_link.is_existing_dir():
             return
+
         hashes = Hashes(wanted.hash_options)
         if self._native_input_hashes_known(prepared, wanted, hashes):
             return
+
         info = prepared.download_info
         if (
             prepared.is_wheel_from_cache
@@ -384,9 +386,11 @@ class Factory:
             and hashes.has_one_of(info.archive_info.hashes)
         ):
             return
+
         if prepared.local_file_path is None:
             self.preparer.prepare_linked_requirements_more([prepared])
         assert prepared.local_file_path is not None
+
         try:
             hashes.check_against_path(prepared.local_file_path)
         except HashError as error:

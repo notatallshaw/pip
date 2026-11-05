@@ -64,7 +64,9 @@ def make_install_req_from_link(
     *,
     source_link: Link,
 ) -> InstallRequirement:
+    """Create a requirement with its original source and selected fetch link."""
     assert not template.editable, "template is editable"
+
     if version is not None and template.req and template.hash_options:
         # When hashes are provided via constraints for an unpinned requirement,
         # the resulting install requirement must appear pinned so that the
@@ -74,6 +76,7 @@ def make_install_req_from_link(
         line = str(template.req)
     else:
         line = link.url
+
     ireq = install_req_from_line(
         line,
         user_supplied=template.user_supplied,
@@ -84,6 +87,7 @@ def make_install_req_from_link(
         hash_options=template.hash_options,
         config_settings=template.config_settings,
     )
+
     ireq.original_link = template.original_link
     ireq.link = link
     ireq.extras = template.extras
@@ -285,11 +289,13 @@ class LinkCandidate(_InstallRequirementBackedCandidate):
         name: NormalizedName | None = None,
         version: Version | None = None,
     ) -> None:
+        # Preserve the source before selecting a cached wheel.
         source_link = link
         cache_entry = factory.get_wheel_cache_entry(source_link, name)
         if cache_entry is not None:
             logger.debug("Using cached wheel link: %s", cache_entry.link)
             link = cache_entry.link
+
         ireq = make_install_req_from_link(
             link,
             template,
@@ -304,9 +310,9 @@ class LinkCandidate(_InstallRequirementBackedCandidate):
             # Version may not be present for PEP 508 direct URLs
             if version is not None:
                 wheel_version = Version(wheel.version)
-                assert version == wheel_version, (
-                    f"{version!r} != {wheel_version!r} " + f"for wheel {name}"
-                )
+                assert (
+                    version == wheel_version
+                ), f"{version!r} != {wheel_version!r} for wheel {name}"
 
         if cache_entry is not None:
             assert ireq.link.is_wheel
