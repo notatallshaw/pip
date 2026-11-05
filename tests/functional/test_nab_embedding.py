@@ -17,6 +17,10 @@ import pip._vendor as vendor
 
 debundled = sys.argv.pop(1) == "1"
 if debundled:
+    # This fixture keeps metadata helpers bundled while making Nab external.
+    for name in ("packaging", "pkg_resources"):
+        sys.modules[name] = None
+
     initializer = Path(vendor.__file__).read_text()
     initializer = initializer.replace("DEBUNDLED = False", "DEBUNDLED = True")
     exec(compile(initializer, vendor.__file__, "exec"), vendor.__dict__)
@@ -210,4 +214,3 @@ def test_shared_preference_resolves_with_bundled_or_external_modules(
     selected = json.loads(report.read_text())["install"]
     dependency = next(item for item in selected if item["metadata"]["name"] == "dep")
     assert dependency["is_yanked"]
-
