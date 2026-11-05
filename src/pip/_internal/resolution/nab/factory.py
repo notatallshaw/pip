@@ -47,7 +47,7 @@ from pip._internal.req.req_install import (
 from pip._internal.resolution.base import InstallRequirementProvider
 from pip._internal.utils.compatibility_tags import get_supported
 from pip._internal.utils.hashes import Hashes
-from pip._internal.utils.packaging import get_requirement
+from pip._internal.utils.packaging import get_requirement, requirement_without_marker
 from pip._internal.utils.virtualenv import running_under_virtualenv
 
 from .base import (
@@ -361,13 +361,18 @@ class Factory:
         template: InstallRequirement,
     ) -> None:
         """Check additional input hashes discovered with an archive's package name."""
+        source_link = candidate.source_link
+        assert source_link is not None, (
+            "A prepared linked candidate must retain its source"
+        )
+
         _, wanted = self._input_hash_template(
-            candidate.source_link, template, candidate.project_name
+            source_link, template, candidate.project_name
         )
         prepared = candidate.get_install_requirement()
         if not wanted.hash_options:
             return
-        if candidate.source_link.is_vcs or candidate.source_link.is_existing_dir():
+        if source_link.is_vcs or source_link.is_existing_dir():
             return
         hashes = Hashes(wanted.hash_options)
         if self._native_input_hashes_known(prepared, wanted, hashes):
@@ -1035,11 +1040,12 @@ class Factory:
     def _report_single_requirement_conflict(
         self, req: Requirement, parent: Candidate | None
     ) -> DistributionNotFound:
-        if parent is None:
-            req_disp = str(req)
+        _, ireq = req.get_candidate_lookup()
+        if ireq is not None and ireq.req is not None:
+            req_str = str(requirement_without_marker(ireq.req))
         else:
-            req_disp = f"{req} (from {parent.name})"
-
+            req_str = str(req)
+        req_disp = req_str if parent is None else f"{req_str} (from {parent.name})"
         cands = self._finder.find_all_candidates(req.project_name)
         skipped_by_requires_python = self._finder.requires_python_skipped_reasons()
 
@@ -1112,8 +1118,7 @@ class Factory:
                 "using the '-r' flag to install the packages listed in "
                 "requirements.txt"
             )
-
-        return DistributionNotFound(f"No matching distribution found for {req}")
+        return DistributionNotFound(f"No matching distribution found for {req_disp}")
 
     def _has_any_candidates(self, project_name: str) -> bool:
         """
