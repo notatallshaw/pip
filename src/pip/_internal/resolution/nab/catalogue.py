@@ -176,7 +176,6 @@ class CatalogueProvider(BaseProvider[str, Version]):
         self.solution_ranges: Mapping[str, RangeProtocol[Version]] = {}
         self.solution_decisions: Mapping[str, Version] = {}
         self.has_conditional_prereleases = False
-        self.has_incomplete_queries = False
         self.pending_dependencies: list[Incompatibility[str, Version]] = []
         self.matching_counts: dict[tuple[str, RangeProtocol[Version]], int] = {}
         self.universes: dict[str, list[Version]] = {}
@@ -784,11 +783,6 @@ class CatalogueProvider(BaseProvider[str, Version]):
         except IncompletePreferenceError:
             raise
         except ResolutionError as error:
-            if (
-                error.incompatibility is None
-                or not proxy.catalogue.has_complete_metadata(proxy.input_pins)
-            ):
-                raise
             raise yanked_installation_error(error, proxy) from error
         edges = tuple(
             (name, child)
@@ -813,10 +807,7 @@ class CatalogueProvider(BaseProvider[str, Version]):
         except ResolutionTerminatedError:
             raise
         except ResolutionError as error:
-            if error.incompatibility is not None and self.has_complete_metadata():
-                logger.info("Nab catalogue certified failure")
-                raise catalogue_installation_error(error, self) from error
-            raise
+            raise catalogue_installation_error(error, self) from error
 
     def has_unavailable_input_source(self) -> bool:
         """Check mandatory fixed sources against the original input version bounds."""
@@ -831,47 +822,6 @@ class CatalogueProvider(BaseProvider[str, Version]):
             if candidate.version not in allowed:
                 return True
         return False
-
-    def has_complete_metadata(self) -> bool:
-        """Check metadata coverage for the fixed domain used by this attempt."""
-        if self.native.ignore_dependencies or self.has_unavailable_input_source():
-            return True
-        for package, installed in self.installed_versions.items():
-            if (
-                self.installed_version_matches_inputs(package)
-                and (package, installed) not in self.dependencies
-            ):
-                return False
-        referenced = set(self.roots)
-        for _, dependencies in self.dependencies.values():
-            referenced.update(dependencies)
-        covered = (
-            set(self.catalogues)
-            | set(self.explicit_candidates)
-            | self.unavailable_sources
-        )
-        if any(
-            not package.startswith("<") and package not in covered
-            for package in referenced
-        ):
-            return False
-        for package, catalogue in self.catalogues.items():
-            allowed = self.input_bounds(package)
-            for artifact in catalogue.candidates:
-                # Versions excluded by fixed inputs cannot introduce a dependency.
-                if artifact.version not in allowed:
-                    continue
-                if (package, artifact.version) in self.dependencies:
-                    candidate = self.candidates[package, artifact.version]
-                    if str(candidate.version) != str(artifact.version):
-                        return False
-                    continue
-                if artifact.version not in self.rejected_versions.get(package, ()):
-                    return False
-        return all(
-            (candidate.name, candidate.version) in self.dependencies
-            for candidate in self.explicit_candidates.values()
-        )
 
     def selected_requirements(
         self, solution: Solution[str, Version]

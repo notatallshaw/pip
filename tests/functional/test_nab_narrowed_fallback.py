@@ -125,7 +125,6 @@ def test_complete_dependency_domain_certifies_failure(
         expect_error=True,
     )
 
-    assert "Nab catalogue certified failure" in result.stdout
     assert "Nab catalogue fallback" not in result.stdout
     assert "No matching distribution found for missing==1" in result.stderr
 
@@ -317,7 +316,7 @@ def test_excluded_installation_does_not_repeat_metadata_rejections_on_failure(
     script.assert_installed(app="1")
 
 
-def test_excluded_installation_does_not_certify_an_unread_url_source(
+def test_excluded_installation_does_not_search_unread_url_metadata(
     script: PipTestEnvironment,
 ) -> None:
     installed = create_basic_wheel_for_package(script, "dep", "1")
@@ -341,11 +340,13 @@ def test_excluded_installation_does_not_certify_an_unread_url_source(
         index,
         "dep>=3",
         "bridge",
+        expect_error=True,
     )
 
-    assert "Nab catalogue fallback: ResolutionError" in result.stdout
-    assert "Nab catalogue certified failure" not in result.stdout
-    script.assert_installed(dep="3", bridge="1")
+    assert "Nab catalogue fallback" not in result.stdout
+    assert "No matching distribution found for dep>=3" in result.stderr
+    script.assert_installed(dep="1")
+    script.assert_not_installed("bridge")
 
 
 @pytest.mark.parametrize("required", [False, True])
@@ -516,12 +517,11 @@ def test_read_installed_metadata_can_certify_a_closed_failed_domain(
         expect_error=True,
     )
 
-    assert "Nab catalogue certified failure" in result.stdout
     assert "Nab catalogue fallback" not in result.stdout
     script.assert_installed(dep="1")
 
 
-def test_installed_metadata_does_not_cover_an_unread_version_text_source(
+def test_unread_version_text_source_does_not_retry_a_failed_solve(
     script: PipTestEnvironment,
 ) -> None:
     initial = create_basic_wheel_for_package(script, "dep", "1", depends=["missing==1"])
@@ -539,12 +539,12 @@ def test_installed_metadata_does_not_cover_an_unread_version_text_source(
         index,
         "dep",
         other,
+        expect_error=True,
     )
 
-    assert "Nab catalogue fallback" in result.stdout
-    assert "Nab catalogue certified failure" not in result.stdout
-    script.assert_installed(dep="1.0", other="2")
-    script.pip("check")
+    assert "Nab catalogue fallback" not in result.stdout
+    script.assert_installed(dep="1")
+    script.assert_not_installed("other")
 
 
 def test_no_deps_can_certify_failure_without_reading_possible_url_dependencies(
@@ -575,7 +575,6 @@ def test_no_deps_can_certify_failure_without_reading_possible_url_dependencies(
         expect_error=True,
     )
 
-    assert "Nab catalogue certified failure" in result.stdout
     assert "Nab catalogue fallback" not in result.stdout
     assert "No matching distribution found for dep>=3" in result.stderr
     script.assert_not_installed("dep", "bridge")
@@ -621,7 +620,6 @@ def test_impossible_mandatory_source_does_not_read_an_unrelated_url_parent(
         expect_error=True,
     )
 
-    assert "Nab catalogue certified failure" in result.stdout
     assert "Nab catalogue fallback" not in result.stdout
     assert "Nab native retry" not in result.stdout
     assert "bridge-1-py3-none-any.whl" not in result.stdout

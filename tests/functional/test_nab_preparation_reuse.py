@@ -17,7 +17,7 @@ from pip._internal.resolution.nab.candidates import LinkCandidate
 from pip._internal.resolution.nab.resolver import Resolver
 
 original = LinkCandidate._prepare
-original_resolve = Resolver._resolve_attempt
+original_resolve = Resolver._resolve_native
 
 def prepare(candidate):
     print("PREPARE " + candidate.source_link.filename, flush=True)
@@ -25,13 +25,13 @@ def prepare(candidate):
 
 LinkCandidate._prepare = prepare
 
-def resolve_native(resolver, collected, *, provisional):
-    print("NATIVE " + str(provisional), flush=True)
+def resolve_native(resolver, collected):
+    print("NATIVE", flush=True)
     if sys.exc_info()[0] is not None:
         print("NATIVE_ACTIVE_EXCEPTION", flush=True)
-    return original_resolve(resolver, collected, provisional=provisional)
+    return original_resolve(resolver, collected)
 
-Resolver._resolve_attempt = resolve_native
+Resolver._resolve_native = resolve_native
 runpy.run_module("pip", run_name="__main__", alter_sys=True)
 """
 
@@ -98,23 +98,22 @@ def test_fallback_reuses_prepared_wheels_and_accepts_url_dependencies(
     assert preparation_count(result.stdout, older) == 1
 
 
-def test_unsatisfiable_fallback_reuses_prepared_wheel(
+def test_unsatisfiable_catalogue_does_not_retry(
     script: PipTestEnvironment,
 ) -> None:
     app = create_basic_wheel_for_package(script, "app", "1.0", depends=["dep>=2"])
     create_basic_wheel_for_package(script, "dep", "1.0")
     result = tracked_install(script, "app", expect_error=True)
 
-    assert "Nab catalogue fallback: ResolutionError" in result.stdout
+    assert "Nab catalogue fallback" not in result.stdout
     assert "No matching distribution found for dep>=2" in result.stdout + result.stderr
     assert preparation_count(result.stdout, app) == 1
-    assert "NATIVE True" not in result.stdout
-    assert result.stdout.splitlines().count("NATIVE False") == 1
+    assert "NATIVE" not in result.stdout
     assert "NATIVE_ACTIVE_EXCEPTION" not in result.stdout
 
 
 @pytest.mark.parametrize("group", ["numeric", "aliases", "yanked"])
-def test_definitive_fallback_discovers_a_url_after_static_failure(
+def test_unread_url_does_not_retry_after_static_failure(
     script: PipTestEnvironment, group: str
 ) -> None:
     create_basic_wheel_for_package(script, "dep", "1.0")
@@ -147,15 +146,14 @@ def test_definitive_fallback_discovers_a_url_after_static_failure(
         )
         options = ("--find-links", str(listing))
 
-    result = tracked_install(script, "dep>=2", "bridge", options=options)
+    result = tracked_install(
+        script, "dep>=2", "bridge", options=options, expect_error=True
+    )
 
-    script.assert_installed(dep="3.0", bridge="1.0")
-    expected = "ResolutionError" if group == "numeric" else "IncompletePreferenceError"
-    assert f"Nab catalogue fallback: {expected}" in result.stdout
-    assert "NATIVE True" not in result.stdout
-    assert result.stdout.splitlines().count("NATIVE False") == 1
-    assert "NATIVE_ACTIVE_EXCEPTION" not in result.stdout
-    script.pip("check")
+    script.assert_not_installed("dep", "bridge")
+    assert "Nab catalogue fallback" not in result.stdout
+    assert "NATIVE" not in result.stdout
+    assert "PREPARE bridge-1.0-" not in result.stdout
 
 
 def test_catalogue_rejects_an_artifact_without_repreparing_it(
@@ -185,8 +183,7 @@ def test_explicit_root_url_closure_uses_catalogue(
     script.assert_installed(app="1.0", dep="3.0")
     assert "Nab catalogue success" in result.stdout
     assert preparation_count(result.stdout, older) == 1
-    assert "NATIVE True" not in result.stdout
-    assert "NATIVE False" not in result.stdout
+    assert "NATIVE" not in result.stdout
 
 
 def test_empty_environment_uses_catalogue_without_ignore_installed(
@@ -197,5 +194,4 @@ def test_empty_environment_uses_catalogue_without_ignore_installed(
 
     script.assert_installed(pkg="1.0")
     assert "Nab catalogue success" in result.stdout
-    assert "NATIVE True" not in result.stdout
-    assert "NATIVE False" not in result.stdout
+    assert "NATIVE" not in result.stdout

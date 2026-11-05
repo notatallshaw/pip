@@ -1,4 +1,4 @@
-"""Solver limits and faults must not become conflicts or provisional retries."""
+"""Solver limits and faults stop without another search."""
 
 import logging
 from functools import partial
@@ -28,7 +28,10 @@ from pip._internal.resolution.nab.factory import Factory
 from pip._internal.resolution.nab.provider import PipProvider
 from pip._internal.resolution.nab.ranges import CandidateKey
 from pip._internal.resolution.nab.resolver import Resolver
-from pip._internal.resolution.nab.yank_preference import PreferenceScope
+from pip._internal.resolution.nab.yank_preference import (
+    IncompletePreferenceError,
+    PreferenceScope,
+)
 from pip._internal.resolution.nab.yanked_resolution import YankProxyProvider
 
 
@@ -104,37 +107,41 @@ def test_diagnostic_graph_does_not_certify_a_solver_fault(
     assert "catalogue fallback" not in caplog.text
 
 
-@pytest.mark.parametrize("provisional", [False, True])
 def test_native_limit_does_not_retry_with_a_fresh_budget(
     resolver: Resolver,
     monkeypatch: pytest.MonkeyPatch,
-    provisional: bool,
 ) -> None:
     monkeypatch.setattr(
         resolver_module, "NabResolver", partial(CoreResolver, max_iterations=0)
     )
     collected = resolver.factory.collect_root_requirements([])
     with pytest.raises(InstallationError, match="exceeded 0 iterations"):
-        resolver._resolve_native(collected, provisional=provisional)
+        resolver._resolve_native(collected)
 
 
-def test_error_without_a_proof_is_not_certified(
+@pytest.mark.parametrize("error_type", [ResolutionError, IncompletePreferenceError])
+def test_error_without_a_proof_does_not_restart(
     resolver: Resolver,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    error_type: type[ResolutionError],
 ) -> None:
+    attempts = 0
+
     def stop(*_args: object, **_kwargs: object) -> None:
-        raise ResolutionError("analysis interrupted")
+        nonlocal attempts
+        attempts += 1
+        raise error_type("analysis interrupted")
 
     monkeypatch.setattr(CoreResolver, "solve", stop)
     collected = resolver.factory.collect_root_requirements([])
     with caplog.at_level(logging.INFO), pytest.raises(InstallationError):
         resolver._resolve(collected)
-    assert "certified failure" not in caplog.text
-    assert "catalogue fallback" in caplog.text
+    assert attempts == 1
+    assert "catalogue fallback" not in caplog.text
 
 
-def test_limit_after_provisional_absence_is_not_retried(
+def test_native_solver_uses_definitive_candidate_absences(
     resolver: Resolver,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -153,9 +160,9 @@ def test_limit_after_provisional_absence_is_not_retried(
         [install_req_from_line("probe")]
     )
     with pytest.raises(InstallationError, match="exceeded 1 iterations"):
-        resolver._resolve_native(collected, provisional=True)
+        resolver._resolve_native(collected)
     assert len(solvers) == 1
-    assert solvers[0].provisional_absences > 0
+    assert solvers[0].provisional_absences == 0
 
 
 def test_proxy_query_limit_keeps_its_terminal_classification(

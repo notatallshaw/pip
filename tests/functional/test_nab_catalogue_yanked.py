@@ -156,7 +156,8 @@ def test_rejected_pin_cannot_admit_a_yanked_release_for_another_parent(
     result = script.pip(
         "install", "--no-index", "--find-links", listing, "app", expect_error=True
     )
-    assert "Nab catalogue fallback: IncompletePreferenceError" in result.stdout
+    assert "Nab catalogue fallback" not in result.stdout
+    assert "No matching installation found" in result.stderr
     script.assert_not_installed("app", "dep")
 
 
@@ -294,8 +295,7 @@ def test_transitive_pin_admits_an_unversioned_extra(
         script, *roots, find_links=listing, options=("--report", str(report))
     )
 
-    assert "NATIVE True" not in result.stdout
-    assert "NATIVE False" not in result.stdout
+    assert "NATIVE" not in result.stdout
     assert "Nab catalogue success" in result.stdout
     selected = next(
         item
@@ -340,8 +340,7 @@ def test_rejected_parent_metadata_cannot_expand_the_live_proof(
         script, app_requirement, "parent", "tools==2", find_links=listing
     )
 
-    assert "NATIVE True" not in result.stdout
-    assert "NATIVE False" not in result.stdout
+    assert "NATIVE" not in result.stdout
     assert "Nab catalogue success" in result.stdout
     script.assert_installed(app="2", parent="1", dep="1.0", tools="2")
     script.assert_not_installed("ghost")
@@ -406,7 +405,8 @@ def test_unread_url_source_can_rescue_a_live_file(
         options=("--report", str(report)),
     )
 
-    assert "NATIVE True" not in result.stdout
+    assert "NATIVE" in result.stdout
+    assert "CatalogueUnsupported: URL dependency" in result.stdout
     selected = next(
         item
         for item in json.loads(report.read_text())["install"]

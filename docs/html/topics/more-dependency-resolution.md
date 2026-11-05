@@ -151,9 +151,7 @@ Invalid index dependency metadata excludes that candidate version, including
 when another version is installed. An inconsistent artifact, such as a wheel whose
 metadata version disagrees with its filename, can be skipped while another
 artifact of that version is tried. An installed version excluded by fixed input
-version bounds does not change these rejection rules. Read installed dependency
-metadata can also establish a closed candidate domain, but it does not cover an
-unread source with different version text.
+version bounds does not change these rejection rules.
 
 ### Fallback: changing candidate sources or admission
 
@@ -165,18 +163,18 @@ active requirements. Pip uses it under the following conditions:
 | A dependency introduces a URL outside the prepared fixed sources and explicit-input URL closure | Its source may depend on which parent version is selected. |
 | A candidate's source must change under the same package/version key | The metadata attached to a learned clause must remain fixed. |
 | An installed package requires replacing itself | Native handling preserves pip's treatment of that installation's dependency obligations. |
-| A failed solve still has unread eligible metadata or changeable candidate sources | Unread metadata may supply another source or admission condition. |
 | The completed selection fails original requirements, constraints, prerelease or artifact checks | Pip retries with native candidate admission. |
 
-Conflicting fixed inputs are reported directly. A failed solve can also be
-reported directly when pip has complete metadata for the relevant fixed
-candidate domain, when dependencies are ignored, or when a mandatory fixed
-source cannot satisfy the original input bounds. These checks retain pip's conflict and lock-file diagnostics.
-A rejected constrained archive is unavailable, and another parent version can
-avoid requiring it. Invalid metadata in a mandatory source, invalid installed
-metadata, build failures and terminal index errors are reported directly.
-Exhausted solver budgets and inconsistent solver state are also reported
-directly, without retrying or claiming that the requirements conflict.
+A failed fast solve is reported directly, even if unread candidate metadata might
+supply another URL source. This differs from the resolvelib resolver: for example,
+`dep>=2` and `bridge` can fail when the index lists only `dep 1`, although unread
+`bridge` metadata would supply a URL for `dep 3`. Declaring that URL in the input
+lets the fast solver use it from the start.
+
+Conflicting fixed inputs, invalid metadata in a mandatory source or installed
+package, build failures and terminal index errors are reported directly.
+Exhausted solver budgets, inconsistent solver state and failures to establish
+non-yanked preference are also reported without another search.
 
 Fallback starts with fresh solver state and the original requirements and
 options. Successful preparation can be reused, but decisions and learned
@@ -197,11 +195,10 @@ supplies candidates from installed distributions, indexes, direct URLs and
 editable projects. The host attaches source identities to the version ranges,
 so equal versions with different metadata remain separate choices.
 
-Each fallback attempt creates a new host, provider and solver. A failed
-catalogue solve goes directly to definitive native resolution. Other fallback
-cases may first try provisional candidate availability and retry if those
-assumptions fail validation. Index and direct URL requests retain separate
-preparation identities so their installation provenance survives backtracking.
+Fallback creates a new host, provider and solver. It uses definitive candidate
+availability without a speculative attempt or retry. Index and direct URL
+requests retain separate preparation identities so their installation provenance
+survives backtracking.
 
 Nab prioritizes packages involved in contextual query failures and can
 temporarily demote repeated dependency blockers. Within that feedback ordering,

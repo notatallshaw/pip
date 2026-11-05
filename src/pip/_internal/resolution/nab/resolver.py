@@ -20,11 +20,7 @@ from pip._vendor.packaging.utils import canonicalize_name
 from pip._vendor.packaging.version import Version
 
 from pip._internal.cache import WheelCache
-from pip._internal.exceptions import (
-    InstallationError,
-    InvalidInstalledPackage,
-    PipError,
-)
+from pip._internal.exceptions import InstallationError
 from pip._internal.index.package_finder import PackageFinder
 from pip._internal.operations.prepare import RequirementPreparer
 from pip._internal.req.constructors import install_req_extend_extras
@@ -49,6 +45,7 @@ from pip._internal.resolution.nab.reporter import (
     PipDebuggingReporter,
     PipReporter,
 )
+from pip._internal.resolution.nab.yank_preference import IncompletePreferenceError
 from pip._internal.utils.packaging import get_requirement
 
 logger = logging.getLogger(__name__)
@@ -62,13 +59,6 @@ class Result(NamedTuple):
     mapping: dict[str, Candidate]
     graph: DependencyGraph
     requirements: dict[str, list[Requirement]] | None = None
-
-
-class _CatalogueAttempt(NamedTuple):
-    """Carry the catalogue result and its contextual query policy."""
-
-    result: Result | None
-    provisional: bool
 
 
 class Resolver(BaseResolver):
@@ -114,33 +104,19 @@ class Resolver(BaseResolver):
         self._result: Result | None = None
 
     def _resolve(self, collected: CollectedRootRequirements) -> Result:
-        """Choose native fallback policy from the catalogue solve outcome."""
+        """Switch providers only after observing an invalid catalogue assumption."""
         try:
-            attempt = self._resolve_catalogue(collected)
-        except ResolutionTerminatedError as error:
-            raise InstallationError(str(error)) from error
+            result = self._resolve_catalogue(collected)
+        except IncompletePreferenceError as error:
+            message = f"No matching installation found: {error}"
+            raise InstallationError(message) from error
         except ResolutionError as error:
-            logger.info("Nab catalogue fallback: %s: %s", type(error).__name__, error)
-            provisional = False
-        else:
-            if attempt.result is not None:
-                return attempt.result
-            provisional = attempt.provisional
-        return self._resolve_native(collected, provisional=provisional)
+            raise InstallationError(str(error)) from error
+        if result is not None:
+            return result
+        return self._resolve_native(collected)
 
-    def _resolve_native(
-        self, collected: CollectedRootRequirements, *, provisional: bool
-    ) -> Result:
-        """Retry provisional absences with the original native declarations."""
-        result = self._resolve_attempt(collected, provisional=provisional)
-        if result is None and provisional:
-            result = self._resolve_attempt(collected, provisional=False)
-        assert result is not None
-        return result
-
-    def _resolve_catalogue(
-        self, collected: CollectedRootRequirements
-    ) -> _CatalogueAttempt:
+    def _resolve_catalogue(self, collected: CollectedRootRequirements) -> Result | None:
         """Try fixed catalogues while retaining native preparation for fallback."""
         factory = self.factory
         native = PipProvider(
@@ -150,7 +126,6 @@ class Resolver(BaseResolver):
             upgrade_strategy=self.upgrade_strategy,
             user_requested=collected.user_requested,
         )
-        provider: CatalogueProvider | None = None
         try:
             with factory.catalogue_context():
                 provider = CatalogueProvider(factory, native, collected)
@@ -162,15 +137,10 @@ class Resolver(BaseResolver):
                 solution = provider.solve(reporter)
                 if not provider.validate(solution):
                     logger.info("Nab catalogue fallback: final admission")
-                    return _CatalogueAttempt(
-                        None, provisional=not provider.has_complete_metadata()
-                    )
+                    return None
         except CatalogueUnsupported as error:
             logger.info("Nab catalogue fallback: %s: %s", type(error).__name__, error)
-            return _CatalogueAttempt(
-                None,
-                provisional=provider is None or not provider.has_incomplete_queries,
-            )
+            return None
         logger.info("Nab catalogue success")
         graph: DependencyGraph = {None: set(solution.roots)}
         graph.update((package, set()) for package in solution.pins)
@@ -180,15 +150,10 @@ class Resolver(BaseResolver):
         for declarations in provider.selected_requirements(solution).values():
             for requirement in declarations:
                 requirements[requirement.project_name].append(requirement)
-        return _CatalogueAttempt(
-            Result(dict(provider.selected(solution)), graph, requirements),
-            provisional=False,
-        )
+        return Result(dict(provider.selected(solution)), graph, requirements)
 
-    def _resolve_attempt(
-        self, collected: CollectedRootRequirements, *, provisional: bool
-    ) -> Result | None:
-        """Return an install graph, or None when assumptions need a retry."""
+    def _resolve_native(self, collected: CollectedRootRequirements) -> Result:
+        """Return an install graph using the original native declarations."""
         native = PipProvider(
             factory=self.factory,
             constraints=collected.constraints,
@@ -217,24 +182,13 @@ class Resolver(BaseResolver):
             root_version=CandidateKey(Version("0"), "root"),
             observer=_Observer(provider, reporter),
             availability_generation=host.availability_generation,
-            provisional=provisional,
         )
         constraints = host.constraints(collected)
         try:
             solution = resolver.solve(provider.root_requirements(), constraints)
-            if resolver.provisional_absences and not provider.validate_solution(
-                solution, constraints
-            ):
-                return None
         except ResolutionTerminatedError as error:
             raise InstallationError(str(error)) from error
-        except (ResolutionError, PipError) as error:
-            if isinstance(error, InvalidInstalledPackage):
-                raise
-            if resolver.provisional_absences:
-                return None
-            if not isinstance(error, ResolutionError):
-                raise
+        except ResolutionError as error:
             raise installation_error(
                 error, provider, self.factory, collected.constraints
             ) from error

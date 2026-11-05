@@ -70,7 +70,7 @@ def test_url_fallback_preserves_origin_after_catalogue_preparation(
                 f"Requires-Dist: dep @ {dep.as_uri()}\n"
             ),
         ).save_to_dir(script.scratch_path)
-        dependencies = ["missing>=2", "bridge==1.0"]
+        dependencies = [f"dep @ {dep.as_uri()}", "missing>=2", "bridge==1.0"]
         other_root = "shortcut"
         expected.update(missing="3.0", shortcut="1.0")
     create_basic_wheel_for_package(script, other_root, "1.0", depends=["dep>=1"])
@@ -107,10 +107,7 @@ def test_url_fallback_preserves_origin_after_catalogue_preparation(
             result.stdout.splitlines().count("PREPARE app-2.0-py2.py3-none-any.whl")
             == 1
         )
-        if hidden_url:
-            assert "Nab catalogue fallback: ResolutionError" in result.stdout
-        else:
-            assert "CatalogueUnsupported: URL dependency" in result.stdout
+        assert "CatalogueUnsupported: URL dependency" in result.stdout
 
 
 def test_rejected_url_parent_does_not_change_ordinary_origin(

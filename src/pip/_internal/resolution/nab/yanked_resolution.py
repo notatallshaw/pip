@@ -401,7 +401,6 @@ class YankProxyProvider(BaseProvider[Package, int]):
                     self.input_pins, fixed=scope.fixed, live=scope.live
                 )
             ):
-                self.catalogue.provider.has_incomplete_queries = True
                 message = "yanked dependency resolution is incomplete"
                 if query.incomplete:
                     message += ": " + self.catalogue.unavailable_reason
