@@ -1,5 +1,42 @@
+import json
+import shutil
+from pathlib import Path
+
+import pytest
+
 from tests.lib import PipTestEnvironment, create_basic_wheel_for_package
 from tests.lib.wheel import make_wheel
+
+_PACKAGING_RANGES_PROBE = """\
+import runpy
+import sys
+from pathlib import Path
+
+import pip._vendor as vendor
+
+external = sys.argv.pop(1) == "1"
+if external:
+    initializer = Path(vendor.__file__).read_text()
+    initializer = initializer.replace("DEBUNDLED = False", "DEBUNDLED = True")
+    exec(compile(initializer, vendor.__file__, "exec"), vendor.__dict__)
+
+try:
+    runpy.run_module("pip", run_name="__main__", alter_sys=True)
+except SystemExit as result:
+    if result.code in (None, 0):
+        # Preserve pip's normal import order before checking the resulting types.
+        from pip._vendor.packaging import ranges, specifiers, version
+
+        if external:
+            import packaging.ranges
+            assert ranges is packaging.ranges
+
+        allowed = specifiers.SpecifierSet(">=1").to_range()
+        assert isinstance(allowed, ranges.VersionRange)
+        selected = allowed & ranges.VersionRange.singleton(version.Version("2"))
+        assert version.Version("2") in selected
+    raise
+"""
 
 
 def test_direct_url_discovered_after_installed_candidate(
@@ -44,3 +81,50 @@ def test_try_another_file_when_preferred_wheel_has_inconsistent_metadata(
 
     script.pip("install", "--no-index", "--find-links", script.scratch_path, "pkg")
     script.assert_installed(pkg="1.0")
+
+
+@pytest.mark.parametrize("external", [False, True])
+def test_packaging_ranges_share_the_dependency_namespace(
+    script: PipTestEnvironment, external: bool
+) -> None:
+    """Resolve with matching bundled or external range-producing dependencies."""
+    source = Path(__file__).parents[2] / "src/pip/_vendor"
+    external_packages = script.scratch_path / "external"
+    external_packages.mkdir()
+    if external:
+        # Matching dependency code keeps this a namespace compatibility check.
+        for package in ("nab_resolver", "packaging", "pkg_resources"):
+            shutil.copytree(
+                source / package,
+                external_packages / package,
+                ignore=shutil.ignore_patterns("__pycache__"),
+            )
+
+    create_basic_wheel_for_package(script, "app", "1", depends=["dep>=1"])
+    create_basic_wheel_for_package(script, "dep", "1")
+    create_basic_wheel_for_package(script, "dep", "2")
+    script.environ["PYTHONPATH"] = str(external_packages)
+    probe = script.scratch_path / "packaging_ranges.py"
+    probe.write_text(_PACKAGING_RANGES_PROBE)
+    report = script.scratch_path / "selection.json"
+
+    script.run(
+        "python",
+        str(probe),
+        str(int(external)),
+        "install",
+        "--ignore-installed",
+        "--no-index",
+        "--find-links",
+        str(script.scratch_path),
+        "--report",
+        str(report),
+        "app",
+        allow_stderr_warning=True,
+    )
+
+    script.assert_installed(app="1", dep="2")
+    selected = json.loads(report.read_text())["install"]
+    assert {
+        item["metadata"]["name"]: item["metadata"]["version"] for item in selected
+    } == {"app": "1", "dep": "2"}

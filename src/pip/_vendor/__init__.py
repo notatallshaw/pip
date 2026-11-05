@@ -74,6 +74,7 @@ if DEBUNDLED:
     vendored("packaging")
     vendored("packaging.version")
     vendored("packaging.specifiers")
+    vendored("packaging.ranges")
     vendored("pkg_resources")
     vendored("platformdirs")
     vendored("progress")
