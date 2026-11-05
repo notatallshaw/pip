@@ -8,7 +8,7 @@ from pip._internal.models.link import Link, links_equivalent
 from pip._internal.resolution.nab import host as host_module
 from pip._internal.resolution.nab.candidates import as_base_candidate
 from pip._internal.resolution.nab.factory import Factory
-from pip._internal.resolution.nab.host import NativeHost
+from pip._internal.resolution.nab.host import NativeHost, SelfRefinement
 from pip._internal.resolution.nab.provider import PipProvider
 from pip._internal.resolution.nab.ranges import CandidateKey, CandidateRange
 
@@ -215,3 +215,112 @@ def test_prepared_source_keys_retain_native_provenance(
     assert base is not None
     extras = factory.make_extras_candidate(base, frozenset())
     assert host._source(extras) == host._source(ordinary)
+
+
+@pytest.mark.parametrize("self_declaration", [False, True])
+def test_native_query_reoffers_only_active_equivalent_self_provenance(
+    factory: Factory, provider: PipProvider, self_declaration: bool
+) -> None:
+    host = NativeHost(factory, provider)
+    (root,) = factory.make_requirements_from_spec("simplewheel", comes_from=None)
+    ordinary = next(iter(provider.find_matches("simplewheel", {"simplewheel": [root]})))
+    assert ordinary.source_link is not None
+    (direct,) = factory.make_requirements_from_spec(
+        f"simplewheel @ {ordinary.source_link.url}", comes_from=None
+    )
+    key = CandidateKey(ordinary.version, host._source(ordinary))
+    declarations = {
+        "simplewheel": [
+            host.bind(root),
+            host.bind(direct, ordinary if self_declaration else None),
+        ]
+    }
+
+    selected = list(
+        host.iter_candidates("simplewheel", CandidateRange.singleton(key), declarations)
+    )
+    assert bool(selected) == self_declaration
+    assert all(
+        prepared.key == key and prepared.origin is ordinary for prepared in selected
+    )
+
+
+@pytest.mark.parametrize("admitted", [False, True])
+def test_retained_refinement_requires_current_native_admission(
+    factory: Factory, provider: PipProvider, admitted: bool
+) -> None:
+    host = NativeHost(factory, provider)
+    (root,) = factory.make_requirements_from_spec("simplewheel", comes_from=None)
+    candidate = next(
+        iter(provider.find_matches("simplewheel", {"simplewheel": [root]}))
+    )
+    key = host._refinement_key(candidate)
+    refinement = SelfRefinement(
+        candidate, (factory.make_requirement_from_candidate(candidate),)
+    )
+    host.refinements[candidate.name, key] = refinement
+    (requirement,) = factory.make_requirements_from_spec(
+        "simplewheel" if admitted else "simplewheel>999", comes_from=None
+    )
+    declarations = {"simplewheel": [host.bind(requirement)]}
+
+    selected = list(
+        host.iter_candidates("simplewheel", CandidateRange.singleton(key), declarations)
+    )
+    assert bool(selected) == admitted
+    assert all(
+        prepared.key == key and prepared.origin is refinement for prepared in selected
+    )
+
+
+def test_native_query_deduplicates_a_self_preparation_alias(
+    factory: Factory, provider: PipProvider
+) -> None:
+    host = NativeHost(factory, provider)
+    (root,) = factory.make_requirements_from_spec("simplewheel", comes_from=None)
+    ordinary = next(iter(provider.find_matches("simplewheel", {"simplewheel": [root]})))
+    assert ordinary.source_link is not None
+    (direct,) = factory.make_requirements_from_spec(
+        f"simplewheel @ {ordinary.source_link.url}", comes_from=None
+    )
+    parent, _ = direct.get_candidate_lookup()
+    assert parent is not None
+    declaration = host.bind(direct, parent)
+    key = CandidateKey(parent.version, host._source(parent))
+
+    selected = list(
+        host.iter_candidates(
+            "simplewheel", CandidateRange.singleton(key), {"simplewheel": [declaration]}
+        )
+    )
+    assert len(selected) == 1
+    assert selected[0].key == key
+    assert selected[0].origin is parent
+
+
+def test_retained_direct_refinement_is_not_an_index_candidate(
+    factory: Factory, provider: PipProvider
+) -> None:
+    host = NativeHost(factory, provider)
+    (root,) = factory.make_requirements_from_spec("simplewheel", comes_from=None)
+    ordinary = next(iter(provider.find_matches("simplewheel", {"simplewheel": [root]})))
+    assert ordinary.source_link is not None
+    (direct,) = factory.make_requirements_from_spec(
+        f"simplewheel @ {ordinary.source_link.url}", comes_from=None
+    )
+    replacement, _ = direct.get_candidate_lookup()
+    assert replacement is not None
+    assert replacement == ordinary
+    key = host._refinement_key(replacement)
+    host.refinements[replacement.name, key] = SelfRefinement(
+        replacement, (factory.make_requirement_from_candidate(replacement),)
+    )
+
+    selected = list(
+        host.iter_candidates(
+            "simplewheel",
+            CandidateRange.singleton(key),
+            {"simplewheel": [host.bind(root)]},
+        )
+    )
+    assert selected == []

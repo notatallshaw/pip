@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar
 from ._compat import override
 
 if TYPE_CHECKING:
-    from typing_extensions import Self
+    from pip._vendor.typing_extensions import Self
 
 __all__ = [
     "Incompatibility",
@@ -380,6 +380,9 @@ class IncompatibilityCause(enum.Enum):
 
     CONTEXTUAL_NO_VERSIONS = enum.auto()
     """No candidate exists while the decisions after the first term remain selected."""
+
+    SOLUTION_REJECTED = enum.auto()
+    """A complete assignment violates stable host policy."""
 
 
 class Incompatibility(Generic[PackageType, VersionType]):

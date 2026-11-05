@@ -133,11 +133,17 @@ def installation_error(
     factory: Factory,
     constraints: dict[str, Constraint],
 ) -> Exception:
-    """Render native conflict causes, or the solver error when no causes survive."""
+    """Render native conflicts or preserve complete-plan policy rejection."""
     if isinstance(error, ResolutionTerminatedError) or error.incompatibility is None:
         return InstallationError(str(error))
 
     clauses = _external_clauses(error.incompatibility)
+    # Host rejection has no native requirement pair to blame.
+    if any(
+        clause.cause is IncompatibilityCause.SOLUTION_REJECTED for clause in clauses
+    ):
+        return InstallationError(str(error))
+
     selected = _select_requested_pairs(clauses)
     records = _native_causes(provider, clauses, selected)
     if not records:

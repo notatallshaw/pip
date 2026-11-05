@@ -52,7 +52,7 @@ def test_source_constraints_obey_set_laws(specifier: str) -> None:
 def test_singleton_keeps_the_source_at_the_same_version() -> None:
     installed = CandidateKey(Version("1"), "installed")
     direct = CandidateKey(Version("1"), "direct")
-    selected = CandidateRange.singleton(installed)
+    selected = CandidateRange.singleton(version=installed)
     assert installed in selected
     assert direct not in selected
     assert selected.is_disjoint(CandidateRange.singleton(direct))

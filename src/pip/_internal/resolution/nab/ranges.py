@@ -225,10 +225,10 @@ class CandidateRange(_ImmutableSlots):
         return cls(_CANDIDATE_VERSIONS)
 
     @classmethod
-    def singleton(cls, candidate: CandidateKey) -> CandidateRange:
+    def singleton(cls, version: CandidateKey) -> CandidateRange:
         """Return a constraint admitting this candidate identity alone."""
         return cls.for_source(
-            candidate.source, SpecifierSet(f"==={candidate.version}").to_range()
+            version.source, SpecifierSet(f"==={version.version}").to_range()
         )
 
     @classmethod
