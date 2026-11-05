@@ -36,9 +36,10 @@ class Request:
 
 @dataclass(frozen=True)
 class SelfRefinement:
-    """Identify a candidate selected through an installed self requirement."""
+    """Retain a replacement and the self declarations that admit its source."""
 
     candidate: Candidate
+    self_requirements: tuple[Requirement, ...]
 
 
 @dataclass(slots=True)
@@ -201,16 +202,63 @@ class NativeHost:
         if package not in native:
             return
 
+        offered: set[CandidateKey] = set()
         for candidate in self.provider.find_matches(package, native):
             for prepared in self._prepared_candidates(candidate, native):
-                if prepared.key in allowed:
+                if prepared.key in allowed and prepared.key not in offered:
+                    offered.add(prepared.key)
                     yield prepared
+
+            for prepared in self._prepared_aliases(candidate, requirements[package]):
+                if prepared.key in allowed and prepared.key not in offered:
+                    offered.add(prepared.key)
+                    yield prepared
+
+    def _prepared_aliases(
+        self,
+        candidate: Candidate,
+        declarations: Sequence[CandidateRequirement[str, CandidateKey]],
+    ) -> Iterable[PreparedCandidate[CandidateKey]]:
+        """Reoffer preparation identities supported by current native admission."""
+        # A retained refinement is eligible only after its native candidate is offered.
+        key = self._refinement_key(candidate)
+        refinement = self.refinements.get((candidate.name, key))
+        if (
+            refinement is not None
+            and refinement.candidate == candidate
+            and str(refinement.candidate.version) == str(candidate.version)
+        ):
+            yield PreparedCandidate(key, refinement)
+
+        aliases: dict[CandidateKey, Candidate] = {}
+        for cause in declarations:
+            request = cause.origin
+            assert isinstance(request, Request)
+            parent = request.parent
+            if isinstance(parent, ExtrasCandidate):
+                parent = parent.base
+            if parent is None or parent.name != candidate.name or parent != candidate:
+                continue
+            if str(parent.version) != str(candidate.version):
+                continue
+
+            # Keep the declaring parent's provenance for an equivalent self URL.
+            key = CandidateKey(parent.version, self._source(parent))
+            aliases[key] = parent
+
+        for key, parent in aliases.items():
+            yield PreparedCandidate(key, parent)
 
     def get_dependencies(
         self, candidate: PreparedCandidate[CandidateKey]
     ) -> Iterable[CandidateRequirement[str, CandidateKey]]:
-        """Yield dependencies of the selected distribution."""
+        """Yield dependencies and source admission for the selected identity."""
         native = native_candidate(candidate)
+        if isinstance(candidate.origin, SelfRefinement):
+            # These satisfied self bounds retain admission for this fixed refinement.
+            for requirement in candidate.origin.self_requirements:
+                yield self.bind(requirement, native)
+
         for requirement in self.dependencies_for(native):
             yield self.bind(requirement, native)
 
@@ -279,7 +327,7 @@ class NativeHost:
             key = self._refinement_key(replacement)
             origin = self.refinements.setdefault(
                 (candidate.name, key),
-                SelfRefinement(replacement),
+                SelfRefinement(replacement, self_requirements),
             )
             yield PreparedCandidate(key, origin)
 

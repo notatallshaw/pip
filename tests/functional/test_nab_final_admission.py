@@ -98,3 +98,36 @@ def test_native_final_policy_uses_one_search(
     else:
         assert "exceeded 4 iterations" in result.stderr
         assert "VALIDATE 1.0" not in result.stdout
+
+
+def test_later_range_keeps_the_selected_installed_self_replacement(
+    script: PipTestEnvironment,
+) -> None:
+    replacement = create_basic_wheel_for_package(
+        script, "selfpkg", "2.0", depends=["child==1.0"]
+    )
+    hidden = script.scratch_path / "hidden"
+    hidden.mkdir()
+    replacement = replacement.rename(hidden / replacement.name)
+    initial = make_wheel(
+        name="selfpkg",
+        version="1.0",
+        metadata=(
+            "Metadata-Version: 2.1\nName: selfpkg\nVersion: 1.0\n"
+            f"Requires-Dist: selfpkg @ {replacement.as_uri()}\n"
+        ),
+    ).save_to_dir(script.scratch_path)
+    create_basic_wheel_for_package(script, "child", "1.0")
+    create_basic_wheel_for_package(script, "other", "1.0", depends=["selfpkg>=2"])
+    script.pip("install", "--no-index", "--no-deps", initial)
+
+    script.pip(
+        "install",
+        "--no-index",
+        "--find-links",
+        script.scratch_path,
+        "selfpkg",
+        "other",
+    )
+    script.assert_installed(selfpkg="2.0", child="1.0", other="1.0")
+    script.pip("check")
