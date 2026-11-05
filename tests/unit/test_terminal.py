@@ -205,7 +205,17 @@ def test_ascii_output_preserves_unicode_data() -> None:
 
 @pytest.mark.parametrize("color", [False, True])
 def test_json_roundtrip(color: bool) -> None:
-    data = {"[red]": [True, None, -2.5, 'a"b', "你好", '\\\\"\\u1234 true -42']}
+    data = {
+        "[red]": [
+            True,
+            None,
+            -2.5,
+            'a"b',
+            "你好",
+            '\\\\"\\u1234 true -42',
+            "100% %s %(value)s\nnext line",
+        ]
+    }
     stream = io.StringIO()
     print_json(data, Terminal(stream, color=color))
     text = stream.getvalue()
@@ -267,6 +277,14 @@ def test_multiline_text_restores_style_after_line_prefix() -> None:
     output = Terminal(color=True)
     text = output.format(Text("first\nsecond", "green"))
     assert text.split("\n") == ["\x1b[32mfirst\x1b[0m", "\x1b[32msecond\x1b[0m"]
+
+
+def test_no_color_preserves_multiline_emphasis() -> None:
+    output = Terminal(color=True, no_color=True)
+
+    text = Text("first\nsecond", "bold blue").format(output)
+
+    assert text == "\x1b[1mfirst\x1b[0m\n\x1b[1msecond\x1b[0m"
 
 
 def test_json_styles_keys_and_complete_negative_numbers() -> None:

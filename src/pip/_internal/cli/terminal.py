@@ -149,7 +149,11 @@ class Text:
     def format(self, terminal: Terminal) -> str:
         # Prefixing a diagnostic line must not reset the next line's style.
         return "".join(
-            "\n".join(terminal.style(line, style) for line in text.split("\n"))
+            (
+                text
+                if not style or not terminal.styled
+                else "\n".join(terminal.style(line, style) for line in text.split("\n"))
+            )
             for text, style in self.parts
         )
 
@@ -358,7 +362,12 @@ def print_json(data: object, terminal: Terminal) -> None:
         return
 
     decoder = json.JSONDecoder()
-    parts: list[str | tuple[str, str]] = []
+    # JSON tokens have no literal LF; each role can share one wrapper per document.
+    # https://www.rfc-editor.org/rfc/rfc8259#section-7
+    styles = {
+        style: terminal.style("%s", style) for style in ("bold blue", "green", "cyan")
+    }
+    parts: list[str] = []
     start = 0
     while match := _JSON_TOKEN.search(text, start):
         parts.append(text[start : match.start()])
@@ -370,11 +379,14 @@ def print_json(data: object, terminal: Terminal) -> None:
         else:
             end = match.end()
             style = "cyan"
-        parts.append((text[match.start() : end], style))
+        parts.append(styles[style] % text[match.start() : end])
         start = end
 
     parts.append(text[start:])
-    terminal.print(Text.assemble(*parts))
+    text = "".join(parts)
+    # Drop token fragments before the stream's encoding copies.
+    del parts
+    terminal.print(Text(text))
 
 
 def _traceback_locals(
