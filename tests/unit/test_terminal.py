@@ -90,7 +90,32 @@ def test_nested_style() -> None:
         (False, {"FORCE_COLOR": ""}, False, False, False),
         (True, {"FORCE_COLOR": ""}, False, False, True),
         (True, {"TTY_COMPATIBLE": "0", "FORCE_COLOR": "1"}, False, False, False),
+        (
+            False,
+            {"TTY_COMPATIBLE": "1", "TTY_INTERACTIVE": "0"},
+            False,
+            True,
+            False,
+        ),
+        (
+            False,
+            {"TTY_COMPATIBLE": "1", "FORCE_COLOR": "", "TTY_INTERACTIVE": "0"},
+            False,
+            True,
+            False,
+        ),
+        (
+            False,
+            {"TTY_COMPATIBLE": "1", "TTY_INTERACTIVE": "1"},
+            False,
+            True,
+            True,
+        ),
+        (False, {"TTY_INTERACTIVE": "1"}, False, False, True),
+        (True, {"TTY_COMPATIBLE": "0", "TTY_INTERACTIVE": "1"}, False, False, False),
         (True, {"TTY_INTERACTIVE": "0"}, False, True, False),
+        (True, {"NO_COLOR": ""}, False, True, True),
+        (False, {"TTY_COMPATIBLE": "1", "NO_COLOR": ""}, False, True, False),
         (True, {"NO_COLOR": "1"}, False, False, True),
         (True, {"FORCE_COLOR": "1"}, True, False, True),
         (True, {"TERM": "dumb"}, False, False, False),
@@ -107,9 +132,18 @@ def test_color_and_animation(
 ) -> None:
     for key, value in environment.items():
         monkeypatch.setenv(key, value)
-    output = Terminal(TtyStream() if tty else io.StringIO(), no_color=no_color)
+    stream = TtyStream() if tty else io.StringIO()
+    output = Terminal(stream, no_color=no_color)
     assert output.color is color
     assert output.interactive is interactive
+
+    with LiveLine(output) as line:
+        line.update("working")
+        output.print(Text("done", "green"))
+
+    text = stream.getvalue()
+    assert ("\x1b[32m" in text) is color
+    assert ("\r" in text) is interactive
 
 
 def test_nested_progress_and_logging() -> None:

@@ -212,9 +212,11 @@ class Terminal:
         self.file = file if file is not None else sys.stdout
         tty = self.file.isatty()
 
-        # Styling and cursor animation have independent opt-outs.
+        # Color-capable CI streams need not support cursor animation.
+        # https://rich.readthedocs.io/en/stable/console.html#environment-variables
+        compatible = os.environ.get("TTY_COMPATIBLE")
         capable = os.environ.get("TERM", "").lower() not in {"dumb", "unknown"}
-        capable = capable and os.environ.get("TTY_COMPATIBLE") != "0"
+        capable = capable and compatible != "0"
         if os.name == "nt" and tty:
             capable = capable and _enable_windows_vt(self.file)
         # An empty FORCE_COLOR explicitly disables automatic styling.
@@ -222,10 +224,16 @@ class Terminal:
         self.styled = (
             color
             if color is not None
-            else (tty if forced is None else bool(forced)) and capable
+            else (compatible == "1" or (tty if forced is None else bool(forced)))
+            and capable
         )
-        self.color = self.styled and not no_color and "NO_COLOR" not in os.environ
-        self.interactive = tty and capable and os.environ.get("TTY_INTERACTIVE") != "0"
+        self.color = (
+            self.styled and not no_color and os.environ.get("NO_COLOR", "") == ""
+        )
+        interactive = os.environ.get("TTY_INTERACTIVE")
+        self.interactive = capable and (
+            interactive == "1" or (tty and interactive != "0")
+        )
 
         self.ascii_only = False
         try:

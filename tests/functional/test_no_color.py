@@ -13,6 +13,33 @@ import pytest
 from tests.lib import PipTestEnvironment
 
 
+@pytest.mark.parametrize("force_color", [None, ""])
+def test_tty_compatible_ci_output(
+    script: PipTestEnvironment, force_color: str | None
+) -> None:
+    for name in ("NO_COLOR", "PIP_NO_COLOR", "FORCE_COLOR"):
+        script.environ.pop(name, None)
+    script.environ.update(TERM="xterm", TTY_COMPATIBLE="1", TTY_INTERACTIVE="0")
+    if force_color is not None:
+        script.environ["FORCE_COLOR"] = force_color
+
+    result = script.pip("--help")
+
+    assert "\x1b[3" in result.stdout
+
+
+def test_empty_no_color_allows_inspect_color(script: PipTestEnvironment) -> None:
+    for name in ("PIP_NO_COLOR", "FORCE_COLOR"):
+        script.environ.pop(name, None)
+    script.environ.update(
+        TERM="xterm", TTY_COMPATIBLE="1", TTY_INTERACTIVE="0", NO_COLOR=""
+    )
+
+    result = script.pip("inspect", "--path", str(script.scratch_path / "empty"))
+
+    assert "\x1b[3" in result.stdout
+
+
 @pytest.mark.parametrize(
     "environment",
     [
