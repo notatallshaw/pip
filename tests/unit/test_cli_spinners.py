@@ -85,6 +85,26 @@ def test_auto_spinner_animates_and_stops() -> None:
     assert not any(thread.name == "pip-spinner" for thread in threading.enumerate())
 
 
+def test_auto_spinner_runs_when_threads_are_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def reject_start(_thread: threading.Thread) -> None:
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(threading.Thread, "start", reject_start)
+    stream = StringIO()
+    console = Terminal(stream, color=False)
+    console.interactive = True
+
+    with patch_logger_level(logging.INFO):
+        with open_auto_spinner("working", console):
+            console.print("operation ran")
+
+    assert "operation ran\n" in stream.getvalue()
+    assert stream.getvalue().endswith("working ... done\n")
+    assert not console.display.lines
+
+
 @pytest.mark.parametrize("exception", [SystemExit, GeneratorExit])
 def test_subprocess_spinner_cleans_up_base_exception(
     monkeypatch: pytest.MonkeyPatch, exception: type[BaseException]

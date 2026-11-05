@@ -156,7 +156,7 @@ def open_auto_spinner(label: str, console: Terminal | None = None) -> Generator[
                     try:
                         line.update(prefix + frame)
                     except OSError:
-                        # Report output failures on the calling thread at completion.
+                        # Leave the final output attempt to the calling thread.
                         return
 
             thread = None
@@ -165,7 +165,11 @@ def open_auto_spinner(label: str, console: Terminal | None = None) -> Generator[
                 thread = threading.Thread(
                     target=repaint, name="pip-spinner", daemon=True
                 )
-                thread.start()
+                try:
+                    thread.start()
+                except RuntimeError:
+                    # Animation must not prevent work when threads are unavailable.
+                    thread = None
 
             try:
                 yield
@@ -177,6 +181,7 @@ def open_auto_spinner(label: str, console: Terminal | None = None) -> Generator[
                 raise
             finally:
                 # Stop the worker before releasing its live line.
+                # https://docs.python.org/3/library/threading.html#threading.Thread.join
                 stopped.set()
                 if thread is not None:
                     thread.join()
