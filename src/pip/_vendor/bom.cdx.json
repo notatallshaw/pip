@@ -3,6 +3,11 @@
   "bomFormat": "CycloneDX",
   "components": [
     {
+      "bom-ref": "bom-ref:pip",
+      "name": "pip",
+      "type": "library"
+    },
+    {
       "bom-ref": "pkg:pypi/CacheControl@0.14.4",
       "name": "CacheControl",
       "purl": "pkg:pypi/CacheControl@0.14.4",
@@ -57,11 +62,6 @@
       "purl": "pkg:pypi/packaging@26.3",
       "type": "library",
       "version": "26.3"
-    },
-    {
-      "bom-ref": "bom-ref:pip",
-      "name": "pip",
-      "type": "library"
     },
     {
       "bom-ref": "pkg:pypi/platformdirs@4.12.4",
@@ -151,8 +151,8 @@
         "pkg:pypi/requests@2.34.2",
         "pkg:pypi/rich@15.0.0",
         "pkg:pypi/setuptools@70.3.0",
-        "pkg:pypi/tomli-w@1.2.0",
         "pkg:pypi/tomli@2.3.2",
+        "pkg:pypi/tomli-w@1.2.0",
         "pkg:pypi/truststore@0.10.5",
         "pkg:pypi/urllib3@2.8.0"
       ],
@@ -201,10 +201,10 @@
       "ref": "pkg:pypi/setuptools@70.3.0"
     },
     {
-      "ref": "pkg:pypi/tomli-w@1.2.0"
+      "ref": "pkg:pypi/tomli@2.3.2"
     },
     {
-      "ref": "pkg:pypi/tomli@2.3.2"
+      "ref": "pkg:pypi/tomli-w@1.2.0"
     },
     {
       "ref": "pkg:pypi/truststore@0.10.5"
