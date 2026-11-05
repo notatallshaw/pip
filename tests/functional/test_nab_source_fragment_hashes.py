@@ -104,8 +104,7 @@ def test_constraint_url_fragment_hash_is_checked(
 
     if correct_hash:
         script.assert_installed(dep="1")
-        assert "NATIVE True" not in result.stdout
-        assert "NATIVE False" not in result.stdout
+        assert "NATIVE" not in result.stdout
         script.pip("check")
     else:
         assert "THESE PACKAGES DO NOT MATCH THE HASHES" in result.stderr
@@ -206,8 +205,7 @@ def test_selected_dependency_fragment_is_checked(
 
     if correct_hash:
         script.assert_installed(app="1", dep="1")
-        assert "NATIVE True" not in result.stdout
-        assert "NATIVE False" not in result.stdout
+        assert "NATIVE" not in result.stdout
         script.pip("check")
     else:
         assert "THESE PACKAGES DO NOT MATCH THE HASHES" in result.stderr

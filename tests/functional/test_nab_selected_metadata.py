@@ -37,8 +37,7 @@ def test_installed_self_requirement_uses_only_selected_metadata(
         script, "parent" if transitive else "app", "other", ignore_installed=False
     )
 
-    assert "NATIVE True" not in result.stdout
-    assert "NATIVE False" not in result.stdout
+    assert "NATIVE" not in result.stdout
     if self_satisfied:
         script.assert_installed(app="1", other="1", olddep="1")
     else:

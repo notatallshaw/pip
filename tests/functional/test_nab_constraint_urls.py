@@ -56,8 +56,7 @@ def test_constrained_root_expands_its_mandatory_dependency_urls(
         options=("-c", str(constraints)),
     )
 
-    assert "NATIVE True" not in result.stdout
-    assert "NATIVE False" not in result.stdout
+    assert "NATIVE" not in result.stdout
     assert "Nab catalogue success" in result.stdout
     script.assert_installed(app="1", dep="1", leaf="1")
     script.pip("check")
@@ -95,8 +94,7 @@ def test_ineligible_constrained_root_dependencies_are_not_prepared(
         expect_error=inactive == "version",
     )
 
-    assert "NATIVE True" not in result.stdout
-    assert "NATIVE False" not in result.stdout
+    assert "NATIVE" not in result.stdout
     assert preparation_count(result.stdout, dep) == 0
     script.assert_not_installed("dep")
     if inactive == "version":
@@ -133,8 +131,7 @@ def test_fixed_source_closure_follows_a_named_constrained_dependency(
 
     result = tracked_install(script, app, options=("-c", str(constraints)))
 
-    assert "NATIVE True" not in result.stdout
-    assert "NATIVE False" not in result.stdout
+    assert "NATIVE" not in result.stdout
     assert "Nab catalogue success" in result.stdout
     script.assert_installed(app="1", dep="1", leaf="1")
     script.pip("check")
@@ -168,8 +165,7 @@ def test_mandatory_closure_checks_parent_hashes_against_the_fixed_archive(
         script, "app", "dep", options=("-c", str(constraints)), expect_error=not valid
     )
 
-    assert "NATIVE True" not in result.stdout
-    assert "NATIVE False" not in result.stdout
+    assert "NATIVE" not in result.stdout
     if valid:
         script.assert_installed(app="1", dep="1")
         script.pip("check")
@@ -206,8 +202,7 @@ def test_mandatory_url_closure_keeps_root_source_constraints(
         script, app, "dep", options=("-c", str(constraints)), expect_error=True
     )
 
-    assert "NATIVE True" not in result.stdout
-    assert "NATIVE False" not in result.stdout
+    assert "NATIVE" not in result.stdout
     assert preparation_count(result.stdout, other) == 0
     script.assert_not_installed("app", "dep")
 
@@ -251,8 +246,7 @@ def test_dependency_url_fixed_by_a_constraint_uses_the_catalogue(
         ignore_installed=False,
     )
 
-    assert "NATIVE True" not in result.stdout
-    assert "NATIVE False" not in result.stdout
+    assert "NATIVE" not in result.stdout
     script.assert_installed(app="1", dep="1")
     if with_extra:
         script.assert_installed(child="1")
@@ -298,8 +292,7 @@ def test_inactive_constrained_source_is_not_prepared(
 
     result = tracked_install(script, "app", options=options)
 
-    assert "NATIVE True" not in result.stdout
-    assert "NATIVE False" not in result.stdout
+    assert "NATIVE" not in result.stdout
     script.assert_installed(app="1")
     script.assert_not_installed("dep")
 
@@ -337,8 +330,7 @@ def test_conflicting_parent_url_cannot_replace_the_constrained_source(
         options=("-c", str(constraints), "--report", str(report)),
     )
 
-    assert "NATIVE True" not in result.stdout
-    assert "NATIVE False" not in result.stdout
+    assert "NATIVE" not in result.stdout
     script.assert_installed(app="1", dep="1")
     script.pip("check")
     items = {
@@ -390,8 +382,7 @@ def test_url_constraint_hashes_are_checked_before_installation(
         expect_error=not correct_hash,
     )
 
-    assert "NATIVE True" not in result.stdout
-    assert "NATIVE False" not in result.stdout
+    assert "NATIVE" not in result.stdout
     if correct_hash:
         script.assert_installed(dep="1")
         script.pip("check")
@@ -482,8 +473,7 @@ def test_constraint_hash_checks_the_source_of_a_cached_built_wheel(
         ),
     )
 
-    assert "NATIVE True" not in result.stdout
-    assert "NATIVE False" not in result.stdout
+    assert "NATIVE" not in result.stdout
     script.assert_installed(dep="1")
     script.pip("check")
 
@@ -507,7 +497,7 @@ def test_unconstrained_url_does_not_discard_a_working_newer_parent(
 
     result = tracked_install(script, "app")
 
-    assert "NATIVE True" in result.stdout
+    assert result.stdout.splitlines().count("NATIVE") == 1
     script.assert_installed(app="2", dep="3")
     script.pip("check")
 

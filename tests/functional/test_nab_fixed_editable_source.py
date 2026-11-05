@@ -71,8 +71,7 @@ def test_matching_dependency_url_uses_the_fixed_source_mode(
 
     result = tracked_install(script, *roots, options=("--no-build-isolation",))
 
-    assert "NATIVE True" not in result.stdout
-    assert "NATIVE False" not in result.stdout
+    assert "NATIVE" not in result.stdout
     script.assert_installed(app="1", dep="1")
     script.pip("check")
     origin = script.site_packages_path / "dep-1.dist-info" / "direct_url.json"
