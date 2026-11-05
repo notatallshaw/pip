@@ -71,6 +71,8 @@ if DEBUNDLED:
     vendored("nab_resolver.resolver")
     vendored("nab_resolver.root")
     vendored("nab_resolver.types")
+    vendored("nab_provider")
+    vendored("nab_provider.preference")
     vendored("packaging")
     vendored("packaging.version")
     vendored("packaging.specifiers")
