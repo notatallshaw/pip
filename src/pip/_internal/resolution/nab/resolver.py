@@ -184,8 +184,15 @@ class Resolver(BaseResolver):
             availability_generation=host.availability_generation,
         )
         constraints = host.constraints(collected)
+        # Final admission needs the complete declaration set.
         try:
-            solution = resolver.solve(provider.root_requirements(), constraints)
+            solution = resolver.solve(
+                provider.root_requirements(),
+                constraints,
+                solution_validator=functools.partial(
+                    provider.validate_solution, constraints=constraints
+                ),
+            )
         except ResolutionTerminatedError as error:
             raise InstallationError(str(error)) from error
         except ResolutionError as error:
