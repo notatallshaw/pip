@@ -80,12 +80,12 @@ def make_install_req_from_link(
         comes_from=template.comes_from,
         isolated=template.isolated,
         constraint=template.constraint,
+        source_link=source_link,
         hash_options=template.hash_options,
         config_settings=template.config_settings,
     )
     ireq.original_link = template.original_link
     ireq.link = link
-    ireq.set_source_link(source_link)
     ireq.extras = template.extras
     return ireq
 
