@@ -2,25 +2,14 @@ from __future__ import annotations
 
 import functools
 import sys
+import time
 from collections.abc import Callable, Generator, Iterable, Iterator
 from typing import TYPE_CHECKING, Literal, TypeVar
 
-from pip._vendor.rich.progress import (
-    BarColumn,
-    DownloadColumn,
-    FileSizeColumn,
-    MofNCompleteColumn,
-    Progress,
-    ProgressColumn,
-    SpinnerColumn,
-    TextColumn,
-    TimeElapsedColumn,
-    TimeRemainingColumn,
-    TransferSpeedColumn,
-)
-
 from pip._internal.cli.spinners import RateLimiter
+from pip._internal.cli.terminal import LiveLine, Text
 from pip._internal.utils.logging import get_console, get_indentation
+from pip._internal.utils.misc import format_size
 
 if TYPE_CHECKING:
     from pip._internal.req.req_install import InstallRequirement
@@ -30,68 +19,81 @@ ProgressRenderer = Callable[[Iterable[T]], Iterator[T]]
 BarType = Literal["on", "off", "raw"]
 
 
-def _rich_download_progress_bar(
+def _bar(completed: int, total: int) -> str:
+    """Render a compact bar for known totals."""
+    width = 20
+    filled = min(width, int(width * completed / total)) if total > 0 else 0
+    return "[" + "=" * filled + " " * (width - filled) + "]"
+
+
+def _elapsed(seconds: float) -> str:
+    """Format a duration in hours, minutes and seconds."""
+    minutes, seconds = divmod(int(seconds), 60)
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}:{minutes:02}:{seconds:02}"
+
+
+def _download_progress_bar(
     iterable: Iterable[bytes],
     *,
-    bar_type: BarType,
     size: int | None,
     initial_progress: int | None = None,
 ) -> Generator[bytes, None, None]:
-    assert bar_type == "on", "This should only be used in the default mode."
+    console = get_console()
+    current = initial = initial_progress or 0
+    start = time.monotonic()
+    limiter = RateLimiter(1 / 5)
+    indent = " " * (get_indentation() + 2)
 
-    if not size:
-        total = float("inf")
-        columns: tuple[ProgressColumn, ...] = (
-            TextColumn("[progress.description]{task.description}"),
-            SpinnerColumn("line", speed=1.5),
-            FileSizeColumn(),
-            TransferSpeedColumn(),
-            TimeElapsedColumn(),
-        )
-    else:
-        total = size
-        columns = (
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            DownloadColumn(),
-            TransferSpeedColumn(),
-            TextColumn("{task.fields[time_description]}"),
-            TimeRemainingColumn(elapsed_when_finished=True),
-        )
+    def description(*, finished: bool = False) -> str:
+        """Report current bytes and throughput from this download attempt."""
+        elapsed = max(time.monotonic() - start, 0)
+        speed = (current - initial) / elapsed if elapsed else 0
+        rate = f"{format_size(speed)}/s" if speed else "?"
 
-    progress = Progress(*columns, refresh_per_second=5)
-    task_id = progress.add_task(
-        " " * (get_indentation() + 2), total=total, time_description="eta"
-    )
-    if initial_progress is not None:
-        progress.update(task_id, advance=initial_progress)
-    with progress:
+        if size is not None and size > 0:
+            amount = f"{format_size(current)}/{format_size(size)} {_bar(current, size)}"
+            remaining = (
+                _elapsed((size - current) / speed)
+                if speed and size > current
+                else "0:00:00"
+            )
+            timing = _elapsed(elapsed) if finished else f"eta {remaining}"
+        else:
+            amount = format_size(current)
+            timing = _elapsed(elapsed)
+
+        return f"{indent}{amount} {rate} {timing}"
+
+    with LiveLine(console) as line:
         for chunk in iterable:
             yield chunk
-            progress.update(task_id, advance=len(chunk))
-        progress.update(task_id, time_description="")
+            # Count a chunk only after the consumer has accepted it.
+            current += len(chunk)
+            if console.interactive and limiter.ready():
+                line.update(description())
+                limiter.reset()
+
+    console.print(Text(description(finished=True)))
 
 
-def _rich_install_progress_bar(
+def _install_progress_bar(
     iterable: Iterable[InstallRequirement], *, total: int
 ) -> Iterator[InstallRequirement]:
-    columns = (
-        TextColumn("{task.fields[indent]}"),
-        BarColumn(),
-        MofNCompleteColumn(),
-        TextColumn("{task.description}"),
-    )
     console = get_console()
+    current = 0
+    limiter = RateLimiter(1 / 6)
+    indent = " " * get_indentation()
 
-    bar = Progress(*columns, refresh_per_second=6, console=console, transient=True)
-    # Hiding the progress bar at initialization forces a refresh cycle to occur
-    # until the bar appears, avoiding very short flashes.
-    task = bar.add_task("", total=total, indent=" " * get_indentation(), visible=False)
-    with bar:
+    with LiveLine(console) as line:
         for req in iterable:
-            bar.update(task, description=rf"\[{req.name}]", visible=True)
+            if console.interactive and limiter.ready():
+                line.update(
+                    f"{indent}{current}/{total} [{req.name}] {_bar(current, total)}"
+                )
+                limiter.reset()
             yield req
-            bar.advance(task)
+            current += 1
 
 
 def _raw_progress_bar(
@@ -126,8 +128,7 @@ def get_download_progress_renderer(
     """
     if bar_type == "on":
         return functools.partial(
-            _rich_download_progress_bar,
-            bar_type=bar_type,
+            _download_progress_bar,
             size=size,
             initial_progress=initial_progress,
         )
@@ -138,7 +139,7 @@ def get_download_progress_renderer(
             initial_progress=initial_progress,
         )
     else:
-        return iter  # no-op, when passed an iterator
+        return lambda iterable: iter(iterable)
 
 
 def get_install_progress_renderer(
@@ -148,6 +149,6 @@ def get_install_progress_renderer(
     Returns a callable, that takes an iterable to "wrap".
     """
     if bar_type == "on":
-        return functools.partial(_rich_install_progress_bar, total=total)
+        return functools.partial(_install_progress_bar, total=total)
     else:
-        return iter
+        return lambda iterable: iter(iterable)

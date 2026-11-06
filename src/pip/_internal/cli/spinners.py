@@ -4,21 +4,13 @@ import contextlib
 import itertools
 import logging
 import sys
+import threading
 import time
 from collections.abc import Generator
-from typing import IO, Final
+from typing import Final, TextIO
 
-from pip._vendor.rich.console import (
-    Console,
-    ConsoleOptions,
-    RenderableType,
-    RenderResult,
-)
-from pip._vendor.rich.live import Live
-from pip._vendor.rich.measure import Measurement
-from pip._vendor.rich.text import Text
-
-from pip._internal.utils.compat import WINDOWS
+from pip._internal.cli.terminal import LiveLine, Terminal, Text
+from pip._internal.utils.compat import override
 from pip._internal.utils.logging import get_console, get_indentation
 
 logger = logging.getLogger(__name__)
@@ -36,52 +28,99 @@ class SpinnerInterface:
 
 
 class InteractiveSpinner(SpinnerInterface):
+    """Animate an operation until finish() releases its live line."""
+
     def __init__(
         self,
         message: str,
-        file: IO[str] | None = None,
+        file: TextIO | None = None,
         spin_chars: str = SPINNER_CHARS,
         # Empirically, 8 updates/second looks nice
         min_update_interval_seconds: float = 1 / SPINS_PER_SECOND,
+        *,
+        console: Terminal | None = None,
     ):
-        self._message = message
-        if file is None:
-            file = sys.stdout
-        self._file = file
+        if console is None:
+            console = (
+                get_console() if file is None or file is sys.stdout else Terminal(file)
+            )
+
+        self._console = console
+        self._line = LiveLine(self._console)
         self._rate_limiter = RateLimiter(min_update_interval_seconds)
+        self._interval = min_update_interval_seconds
         self._finished = False
-
         self._spin_cycle = itertools.cycle(spin_chars)
+        self._prefix = " " * get_indentation() + message + " ... "
+        self._stopped = threading.Event()
+        self._thread: threading.Thread | None = None
 
-        self._file.write(" " * get_indentation() + self._message + " ... ")
-        self._width = 0
+        self._next_update = time.monotonic() + self._interval
+        self._line.__enter__()
+        try:
+            self._line.update(self._prefix + next(self._spin_cycle))
+        except BaseException:
+            self._line.__exit__()
+            raise
 
-    def _write(self, status: str) -> None:
-        assert not self._finished
-        # Erase what we wrote before by backspacing to the beginning, writing
-        # spaces to overwrite the old text, and then backspacing again
-        backup = "\b" * self._width
-        self._file.write(backup + " " * self._width + backup)
-        # Now we have a blank slate to add our status
-        self._file.write(status)
-        self._width = len(status)
-        self._file.flush()
         self._rate_limiter.reset()
 
-    def spin(self) -> None:
-        if self._finished:
-            return
-        if not self._rate_limiter.ready():
-            return
-        self._write(next(self._spin_cycle))
+        # A silent backend blocks readline(), so animation needs its own clock.
+        # Prior art: https://rich.readthedocs.io/en/stable/live.html#auto-refresh
+        if self._console.interactive:
+            thread = threading.Thread(
+                target=self._repaint, name="pip-spinner", daemon=True
+            )
+            try:
+                thread.start()
+            except RuntimeError:
+                # Keep callback updates when the OS cannot create a worker.
+                pass
+            else:
+                self._thread = thread
 
+    def _repaint(self) -> None:
+        """Advance frames at monotonic deadlines without accumulating draw time."""
+        # https://docs.python.org/3/library/time.html#time.monotonic
+        deadline = self._next_update
+
+        while not self._stopped.wait(max(deadline - time.monotonic(), 0)):
+            try:
+                self._line.update(self._prefix + next(self._spin_cycle))
+            except OSError:
+                # Leave the final output attempt to the calling thread.
+                return
+
+            deadline += self._interval
+            now = time.monotonic()
+            if deadline <= now:
+                # A stalled terminal must not trigger a burst of overdue frames.
+                deadline = now + self._interval
+
+    @override
+    def spin(self) -> None:
+        if self._finished or self._thread is not None or not self._rate_limiter.ready():
+            return
+
+        self._line.update(self._prefix + next(self._spin_cycle))
+        self._rate_limiter.reset()
+
+    @override
     def finish(self, final_status: str) -> None:
         if self._finished:
             return
-        self._write(final_status)
-        self._file.write("\n")
-        self._file.flush()
+
+        # Stop the worker before releasing its line or printing the final status.
+        # https://docs.python.org/3/library/threading.html#threading.Thread.join
+        self._stopped.set()
+        if self._thread is not None:
+            self._thread.join()
+
+        self._line.__exit__()
+        # Do not release the line twice if the final status write fails.
         self._finished = True
+
+        self._console.print(Text(self._prefix + final_status))
 
 
 # Used for dumb terminals, non-interactive installs (no tty), etc.
@@ -100,6 +139,7 @@ class NonInteractiveSpinner(SpinnerInterface):
         self._rate_limiter.reset()
         logger.info("%s: %s", self._message, status)
 
+    @override
     def spin(self) -> None:
         if self._finished:
             return
@@ -107,6 +147,7 @@ class NonInteractiveSpinner(SpinnerInterface):
             return
         self._update("still running...")
 
+    @override
     def finish(self, final_status: str) -> None:
         if self._finished:
             return
@@ -120,12 +161,12 @@ class RateLimiter:
         self._last_update: float = 0
 
     def ready(self) -> bool:
-        now = time.time()
+        now = time.monotonic()
         delta = now - self._last_update
         return delta >= self._min_update_interval_seconds
 
     def reset(self) -> None:
-        self._last_update = time.time()
+        self._last_update = time.monotonic()
 
 
 @contextlib.contextmanager
@@ -135,101 +176,39 @@ def open_spinner(message: str) -> Generator[SpinnerInterface, None, None]:
     # i.e. it's only displayed if we're at level INFO or better.
     # Non-interactive spinner goes through the logging system, so it is always
     # in sync with logging configuration.
-    if sys.stdout.isatty() and logger.getEffectiveLevel() <= logging.INFO:
+    if get_console().interactive and logger.getEffectiveLevel() <= logging.INFO:
         spinner: SpinnerInterface = InteractiveSpinner(message)
     else:
         spinner = NonInteractiveSpinner(message)
     try:
-        with hidden_cursor(sys.stdout):
-            yield spinner
+        yield spinner
     except KeyboardInterrupt:
         spinner.finish("canceled")
         raise
-    except Exception:
+    except BaseException:
         spinner.finish("error")
         raise
     else:
         spinner.finish("done")
 
 
-class _PipRichSpinner:
-    """
-    Custom rich spinner that matches the style of the legacy spinners.
-
-    (*) Updates will be handled in a background thread by a rich live panel
-        which will call render() automatically at the appropriate time.
-    """
-
-    def __init__(self, label: str) -> None:
-        self.label = label
-        self._spin_cycle = itertools.cycle(SPINNER_CHARS)
-        self._spinner_text = ""
-        self._finished = False
-        self._indent = get_indentation() * " "
-
-    def __rich_console__(
-        self, console: Console, options: ConsoleOptions
-    ) -> RenderResult:
-        yield self.render()
-
-    def __rich_measure__(
-        self, console: Console, options: ConsoleOptions
-    ) -> Measurement:
-        text = self.render()
-        return Measurement.get(console, options, text)
-
-    def render(self) -> RenderableType:
-        if not self._finished:
-            self._spinner_text = next(self._spin_cycle)
-
-        return Text.assemble(self._indent, self.label, " ... ", self._spinner_text)
-
-    def finish(self, status: str) -> None:
-        """Stop spinning and set a final status message."""
-        self._spinner_text = status
-        self._finished = True
-
-
 @contextlib.contextmanager
-def open_rich_spinner(label: str, console: Console | None = None) -> Generator[None]:
+def open_auto_spinner(label: str, console: Terminal | None = None) -> Generator[None]:
+    """Animate while the calling thread waits for an in-process build."""
     if not logger.isEnabledFor(logging.INFO):
-        # Don't show spinner if --quiet is given.
         yield
         return
 
-    console = console or get_console()
-    spinner = _PipRichSpinner(label)
-    with Live(spinner, refresh_per_second=SPINS_PER_SECOND, console=console):
-        try:
-            yield
-        except KeyboardInterrupt:
-            spinner.finish("canceled")
-            raise
-        except Exception:
-            spinner.finish("error")
-            raise
-        else:
-            spinner.finish("done")
+    spinner = InteractiveSpinner(label, console=console)
+    status = "done"
 
-
-HIDE_CURSOR = "\x1b[?25l"
-SHOW_CURSOR = "\x1b[?25h"
-
-
-@contextlib.contextmanager
-def hidden_cursor(file: IO[str]) -> Generator[None, None, None]:
-    # The Windows terminal does not support the hide/show cursor ANSI codes,
-    # even via colorama. So don't even try.
-    if WINDOWS:
+    try:
         yield
-    # We don't want to clutter the output with control characters if we're
-    # writing to a file, or if the user is running with --quiet.
-    # See https://github.com/pypa/pip/issues/3418
-    elif not file.isatty() or logger.getEffectiveLevel() > logging.INFO:
-        yield
-    else:
-        file.write(HIDE_CURSOR)
-        try:
-            yield
-        finally:
-            file.write(SHOW_CURSOR)
+    except KeyboardInterrupt:
+        status = "canceled"
+        raise
+    except BaseException:
+        status = "error"
+        raise
+    finally:
+        spinner.finish(status)
