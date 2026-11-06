@@ -7,9 +7,9 @@ new file mode 100644
 +
 +The base distribution is nab-provider 0.0.26. Pip retains its supported candidate preference modules and the record and compatibility helpers they use. The index-backed provider and universal-resolution modules are excluded.
 +
-+The selected source comes from `nab-provider/src/nab_provider` at Nab commit `2d54f3b4ac18ba50d94dc220e8ce6b35a2eca695`, based on main `f7a4b51609494f8d62b74606f1a2e6ef3d7d81a6`. The vendoring patch reproduces `_compat.py`, `preference.py`, `preference_provider.py`, `value.py` and `version_candidates.py`, with imports redirected to `pip._vendor` and a minimal initializer.
++The selected source comes from `nab-provider/src/nab_provider` at Nab commit `ef457fec8dd69d5073247cff015773dbe7e31b79`, based on main `53112670b7ec73f98bd986bd290406b954792627`. The vendoring patch reproduces `_compat.py`, `preference.py`, `preference_provider.py`, `value.py` and `version_candidates.py`, with host packaging imports, imports redirected to `pip._vendor`, and a minimal initializer.
 +
-+These prototype APIs are not released in 0.0.26. The complete distribution declares nab-markersets, but this subset does not import it or typing_extensions at runtime. Pip supplies the separately sourced resolver SDK recorded in `nab_resolver/PROVENANCE.md`; the two selected snapshots are verified together.
++These APIs are prototype patches, not released in 0.0.26. The complete distribution declares nab-markersets, but this subset does not import it or typing_extensions at runtime. Pip supplies the separately composed resolver SDK recorded in `nab_resolver/PROVENANCE.md`; the two selected snapshots are verified together.
 diff --git a/src/pip/_vendor/nab_provider/__init__.py b/src/pip/_vendor/nab_provider/__init__.py
 --- a/src/pip/_vendor/nab_provider/__init__.py
 +++ b/src/pip/_vendor/nab_provider/__init__.py
@@ -23,17 +23,6 @@ diff --git a/src/pip/_vendor/nab_provider/__init__.py b/src/pip/_vendor/nab_prov
 -    nab_provider.environment  classify_dependency
 -"""
 +"""Reusable candidate preference from nab-provider."""
-diff --git a/src/pip/_vendor/nab_provider/_compat.py b/src/pip/_vendor/nab_provider/_compat.py
---- a/src/pip/_vendor/nab_provider/_compat.py
-+++ b/src/pip/_vendor/nab_provider/_compat.py
-@@ -15,6 +15,6 @@
- __all__ = ["override"]
- 
- if TYPE_CHECKING:
--    from typing_extensions import override
-+    from pip._vendor.typing_extensions import override
- else:
-     override = getattr(typing, "override", lambda method: method)
 diff --git a/src/pip/_vendor/nab_provider/preference.py b/src/pip/_vendor/nab_provider/preference.py
 new file mode 100644
 --- /dev/null
@@ -50,22 +39,22 @@ new file mode 100644
 +from enum import Enum, auto
 +from typing import TYPE_CHECKING, Final, Generic, Protocol, TypeVar
 +
-+from pip._vendor.nab_resolver.errors import (
++from nab_resolver.errors import (
 +    ResolutionError,
 +    ResolutionInvariantError,
 +    ResolutionLimitError,
 +    ResolutionTerminatedError,
 +)
-+from pip._vendor.nab_resolver.ranges import Range
-+from pip._vendor.nab_resolver.resolver import BaseProvider, Resolver, ResolverStats
++from nab_resolver.ranges import Range
++from nab_resolver.resolver import BaseProvider, Resolver, ResolverStats
 +
 +if TYPE_CHECKING:
 +    from collections.abc import Callable, Mapping, Sequence
 +    from collections.abc import Set as AbstractSet
 +
-+    from pip._vendor.typing_extensions import override as _override
++    from typing_extensions import override as _override
 +
-+    from pip._vendor.nab_resolver.types import RangeProtocol
++    from nab_resolver.types import RangeProtocol
 +else:
 +    MethodType = TypeVar("MethodType")
 +
@@ -788,7 +777,7 @@ diff --git a/src/pip/_vendor/nab_provider/preference_provider.py b/src/pip/_vend
 new file mode 100644
 --- /dev/null
 +++ b/src/pip/_vendor/nab_provider/preference_provider.py
-@@ -0,0 +1,471 @@
+@@ -0,0 +1,549 @@
 +"""Enforce grounded candidate admission using shared PubGrub proxy packages."""
 +
 +from __future__ import annotations
@@ -797,11 +786,13 @@ new file mode 100644
 +from dataclasses import dataclass
 +from typing import TYPE_CHECKING, Generic, TypeVar
 +
-+from pip._vendor.nab_resolver.errors import ResolutionError, ResolutionTerminatedError
-+from pip._vendor.nab_resolver.priority import compute_tier
-+from pip._vendor.nab_resolver.ranges import Range
-+from pip._vendor.nab_resolver.resolver import BaseProvider, Resolver
-+from pip._vendor.nab_resolver.types import Incompatibility, IncompatibilityCause, Term
++from nab_resolver.errors import ResolutionError, ResolutionTerminatedError
++from nab_resolver.priority import compute_tier
++from nab_resolver.proofs import external_clauses
++from nab_resolver.ranges import Range
++from nab_resolver.resolver import BaseProvider, Resolver
++from nab_resolver.root import ROOT
++from nab_resolver.types import Incompatibility, IncompatibilityCause, Term
 +
 +from ._compat import override
 +from .preference import (
@@ -814,16 +805,18 @@ new file mode 100644
 +)
 +
 +if TYPE_CHECKING:
-+    from collections.abc import Callable, Mapping, Sequence
++    from collections.abc import Callable, Iterator, Mapping, Sequence
 +
-+    from pip._vendor.nab_resolver.resolver import ResolverProvider
-+    from pip._vendor.nab_resolver.types import RangeProtocol
++    from nab_resolver.resolver import ResolverProvider
++    from nab_resolver.types import RangeProtocol
 +
 +__all__ = ["MetadataProxy", "Package", "PermissionProxy", "PreferenceProvider"]
 +
 +CandidateType = TypeVar("CandidateType", bound=Hashable)
 +RangeType = TypeVar("RangeType")
 +PinnedRequirementType = TypeVar("PinnedRequirementType")
++ProjectedVersionType = TypeVar("ProjectedVersionType", bound=Hashable)
++ClausePackageType = TypeVar("ClausePackageType", bound=Hashable)
 +
 +
 +@dataclass(frozen=True, slots=True)
@@ -929,6 +922,80 @@ new file mode 100644
 +            query_is_complete=query_is_complete,
 +            resolver_factory=resolver_factory,
 +        )
++
++    def empty_requirements(
++        self, clause: Incompatibility[Package, int]
++    ) -> Iterator[tuple[str, RangeType]]:
++        """Recover original requirements whose encoded candidate domains are empty."""
++        if clause.cause not in {
++            IncompatibilityCause.ROOT,
++            IncompatibilityCause.DEPENDENCY,
++        }:
++            return
++
++        parent = clause.terms[0].package
++        for term in clause.terms[1:]:
++            if not isinstance(term.package, str) or not term.constraint.is_empty:
++                continue
++
++            if isinstance(parent, MetadataProxy):
++                data = self.catalogue.facts[self.items[parent.candidate]]
++                assert data is not None
++                allowed = data.dependencies[term.package]
++            else:
++                allowed = self.roots[term.package]
++            yield (
++                term.package,
++                self.catalogue.intersect_ranges(
++                    allowed,
++                    self.constraints.get(term.package, self.catalogue.full_range()),
++                ),
++            )
++
++    def project_requirements(
++        self,
++        derivation: Incompatibility[ClausePackageType, int] | None,
++        *,
++        version_of: Callable[[CandidateType], ProjectedVersionType],
++        range_type: type[RangeProtocol[ProjectedVersionType]],
++        left_first: bool = True,
++    ) -> list[Incompatibility[object, ProjectedVersionType]]:
++        """Decode original request clauses into the host's candidate version domain."""
++        projected: list[Incompatibility[object, ProjectedVersionType]] = []
++        for clause in external_clauses(derivation, left_first=left_first):
++            if clause.cause not in {
++                IncompatibilityCause.ROOT,
++                IncompatibilityCause.DEPENDENCY,
++            }:
++                continue
++
++            terms: list[Term[object, ProjectedVersionType]] = []
++            for term in clause.terms:
++                # Solver-root terms share the proof with encoded catalogue packages.
++                package: object = term.package
++                if isinstance(package, MetadataProxy):
++                    candidate = self.items[package.candidate]
++                    named: object = self.catalogue.candidate_package(candidate)
++                    allowed = range_type.singleton(version_of(candidate))
++                elif isinstance(package, str):
++                    named = package
++                    allowed = range_type.empty()
++                    for token, candidate in self.items.items():
++                        if (
++                            self.catalogue.candidate_package(candidate) == package
++                            and token in term.constraint
++                        ):
++                            allowed |= range_type.singleton(version_of(candidate))
++                elif package is ROOT:
++                    named = ROOT
++                    allowed = range_type.full()
++                else:
++                    break
++                terms.append(Term(named, allowed, positive=term.is_positive()))
++            else:
++                if terms:
++                    projected.append(Incompatibility(terms, cause=clause.cause))
++        return projected
 +
 +    def identify(self, candidate: CandidateType) -> int:
 +        """Assign a stable identity without relying on the size of the catalogue."""
@@ -1263,7 +1330,16 @@ new file mode 100644
 diff --git a/src/pip/_vendor/nab_provider/value.py b/src/pip/_vendor/nab_provider/value.py
 --- a/src/pip/_vendor/nab_provider/value.py
 +++ b/src/pip/_vendor/nab_provider/value.py
-@@ -23,7 +23,7 @@
+@@ -5,6 +5,8 @@
+ import dataclasses
+ from reprlib import recursive_repr
+ from typing import TYPE_CHECKING, ClassVar, TypeVar
++
++from nab_resolver.values import SlottedValue
+ 
+ from ._compat import override
+ 
+@@ -23,7 +25,7 @@
      "replace",
  ]
  
@@ -1272,7 +1348,7 @@ diff --git a/src/pip/_vendor/nab_provider/value.py b/src/pip/_vendor/nab_provide
  
  
  class FactoryDefault:
-@@ -40,7 +40,9 @@
+@@ -40,7 +42,9 @@
  FACTORY = FactoryDefault()
  
  
@@ -1283,7 +1359,7 @@ diff --git a/src/pip/_vendor/nab_provider/value.py b/src/pip/_vendor/nab_provide
      """Allocate an omitted default, retaining explicitly supplied values."""
      if isinstance(value, FactoryDefault):
          return factory()
-@@ -121,7 +123,7 @@
+@@ -121,7 +125,7 @@
      raise TypeError(msg)
  
  
@@ -1292,15 +1368,48 @@ diff --git a/src/pip/_vendor/nab_provider/value.py b/src/pip/_vendor/nab_provide
      """Reconstruct a record, retaining omitted constructor arguments."""
      if isinstance(value, Record):
          names = field_names(value)
-@@ -148,7 +150,7 @@
+@@ -148,40 +152,5 @@
          elif name not in changes:
              changes[name] = getattr(value, name)
  
 -    constructor: Callable[..., _T] = type(value)
 +    constructor: Callable[..., ValueType] = type(value)
      return constructor(**changes)
- 
- 
+-
+-
+-class SlottedValue:
+-    """Equality, hashing and repr over a subclass's declared fields.
+-
+-    ``__match_args__`` sets field order. Equality checks the exact class.
+-    Subclasses using ``cached_property`` retain a ``__dict__``.
+-    """
+-
+-    __slots__ = ()
+-    __match_args__: ClassVar[tuple[str, ...]]
+-
+-    @override
+-    def __eq__(self, other: object) -> bool:
+-        """Compare every field against an instance of the same class."""
+-        if other.__class__ is not self.__class__:
+-            return NotImplemented
+-
+-        names = self.__match_args__
+-        return tuple(getattr(self, name) for name in names) == tuple(
+-            getattr(other, name) for name in names
+-        )
+-
+-    @override
+-    def __hash__(self) -> int:
+-        """Hash every field together."""
+-        return hash(tuple(getattr(self, name) for name in self.__match_args__))
+-
+-    @override
+-    def __repr__(self) -> str:
+-        """Return the class name and every field, in declaration order."""
+-        fields = ", ".join(
+-            f"{name}={getattr(self, name)!r}" for name in self.__match_args__
+-        )
+-        return f"{type(self).__qualname__}({fields})"
 diff --git a/src/pip/_vendor/nab_provider/version_candidates.py b/src/pip/_vendor/nab_provider/version_candidates.py
 new file mode 100644
 --- /dev/null
@@ -1318,9 +1427,9 @@ new file mode 100644
 +if TYPE_CHECKING:
 +    from collections.abc import Sequence
 +
-+    from pip._vendor.packaging.ranges import VersionRange
-+    from pip._vendor.packaging.requirements import Requirement
-+    from pip._vendor.packaging.version import Version
++    from packaging.ranges import VersionRange
++    from packaging.requirements import Requirement
++    from packaging.version import Version
 +
 +__all__ = [
 +    "PreparedVersionCatalogue",

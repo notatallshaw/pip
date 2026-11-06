@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
     from collections.abc import Set as AbstractSet
 
-    from pip._vendor.typing_extensions import override as _override
+    from typing_extensions import override as _override
 
     from pip._vendor.nab_resolver.types import RangeProtocol
 else:
