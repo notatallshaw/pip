@@ -1,1 +1,1 @@
-"""Selected reusable components from nab-provider."""
+"""Reusable candidate preference from nab-provider."""
