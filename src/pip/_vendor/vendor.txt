@@ -17,3 +17,4 @@ tomli==2.3.2
 tomli-w==1.2.0
 truststore==0.10.5
 nab-resolver==0.0.26
+nab-provider==0.0.26

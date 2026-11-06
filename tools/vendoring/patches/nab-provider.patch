@@ -1,0 +1,24 @@
+diff --git a/src/pip/_vendor/nab_provider/__init__.py b/src/pip/_vendor/nab_provider/__init__.py
+--- a/src/pip/_vendor/nab_provider/__init__.py
++++ b/src/pip/_vendor/nab_provider/__init__.py
+@@ -1,8 +1 @@
+-"""IO-free resolution core shared by nab-index and nab-project.
+-
+-Supported imports:
+-
+-    nab_provider.diagnostics  Diagnostic, ResolutionMessage
+-    nab_provider.priority  compute_tier
+-    nab_provider.environment  classify_dependency
+-"""
++"""Selected reusable components from nab-provider."""
+diff --git a/src/pip/_vendor/nab_provider/_compat.py b/src/pip/_vendor/nab_provider/_compat.py
+--- a/src/pip/_vendor/nab_provider/_compat.py
++++ b/src/pip/_vendor/nab_provider/_compat.py
+@@ -15,6 +15,6 @@
+ __all__ = ["override"]
+ 
+ if TYPE_CHECKING:
+-    from typing_extensions import override
++    from pip._vendor.typing_extensions import override
+ else:
+     override = getattr(typing, "override", lambda method: method)
