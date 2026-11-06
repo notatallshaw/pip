@@ -117,8 +117,10 @@ class InteractiveSpinner(SpinnerInterface):
             self._thread.join()
 
         self._line.__exit__()
-        self._console.print(Text(self._prefix + final_status))
+        # Do not release the line twice if the final status write fails.
         self._finished = True
+
+        self._console.print(Text(self._prefix + final_status))
 
 
 # Used for dumb terminals, non-interactive installs (no tty), etc.

@@ -331,3 +331,31 @@ def test_subprocess_callbacks_do_not_advance_worker_frames(
 
     spinner.finish("done")
     assert stream.getvalue().endswith("working ... done\n")
+
+
+def test_subprocess_spinner_preserves_final_write_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A final status failure must survive the context manager's second finish."""
+
+    class BrokenStatusStream(StringIO):
+        def write(self, text: str) -> int:
+            if text.endswith("done\n"):
+                raise BrokenPipeError("final status")
+            return super().write(text)
+
+    console = Terminal(BrokenStatusStream(), color=False)
+    console.interactive = True
+    monkeypatch.setattr(spinners, "get_console", lambda: console)
+
+    with patch_logger_level(logging.INFO):
+        with pytest.raises(BrokenPipeError, match="final status"):
+            with spinners.open_spinner("working") as spinner:
+                call_subprocess(
+                    [sys.executable, "-c", "pass"],
+                    command_desc="backend",
+                    spinner=spinner,
+                )
+
+    assert not console.display.lines
+    assert not any(thread.name == "pip-spinner" for thread in threading.enumerate())
