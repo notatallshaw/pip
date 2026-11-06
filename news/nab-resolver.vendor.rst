@@ -1,1 +1,1 @@
-Vendor nab-resolver 0.0.26.
+Refresh the prototype nab-resolver snapshot for shared range and proof APIs.

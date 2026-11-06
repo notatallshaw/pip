@@ -2,16 +2,18 @@ diff --git a/src/pip/_vendor/nab_resolver/PROVENANCE.md b/src/pip/_vendor/nab_re
 new file mode 100644
 --- /dev/null
 +++ b/src/pip/_vendor/nab_resolver/PROVENANCE.md
-@@ -0,0 +1,5 @@
-+# Resolver snapshot
+@@ -0,0 +1,7 @@
++# Resolver SDK snapshot
 +
-+The base distribution is nab-resolver 0.0.26. The vendoring patch reproduces `nab-resolver/src/nab_resolver` at Nab commit `712a9c08efdb95091b08573e40828c4e316807ed`, based on main `066b2d4388c6838ff5e9d0ba271857c36bd02999`, with imports redirected to `pip._vendor`.
++The base distribution is nab-resolver 0.0.26. The vendoring patch reproduces `nab-resolver/src/nab_resolver` at Nab commit `bf83840356d940aa863ac0abf709e6f1d9e87855`, with imports redirected to `pip._vendor`.
 +
-+The source includes the merged generic provider checks and current resolver changes. Its additional candidate-provider, deferred-query and scheduling APIs are prototype patches, not released APIs. The candidate preference subset is sourced independently from the main-based provider API recorded in `nab_provider/PROVENANCE.md`.
++The candidate-provider, deferred-query and scheduling APIs come from SDK commit `712a9c08efdb95091b08573e40828c4e316807ed`. Shared value, keyed-range, proof, selected-graph and version-span changes were composed from the native API delta `2d54f3b4ac18ba50d94dc220e8ce6b35a2eca695` to `97d72ef02ac4fd0b7bcc240db6129ec1406af027` using Git's three-way merge. The SDK's other source files retain their earlier implementations.
++
++These APIs are prototype patches, not released in 0.0.26. The separately sourced candidate preference subset is recorded in `nab_provider/PROVENANCE.md`; the two selected snapshots are verified together.
 diff --git a/src/pip/_vendor/nab_resolver/__init__.py b/src/pip/_vendor/nab_resolver/__init__.py
 --- a/src/pip/_vendor/nab_resolver/__init__.py
 +++ b/src/pip/_vendor/nab_resolver/__init__.py
-@@ -6,13 +6,22 @@
+@@ -6,15 +6,30 @@
  
      nab_resolver.diagnostics DiagnosticMessage, Suggestion, error_message,
                               suggestion_lines
@@ -21,30 +23,27 @@ diff --git a/src/pip/_vendor/nab_resolver/__init__.py b/src/pip/_vendor/nab_reso
      nab_resolver.errors     ResolutionError, ResolutionInvariantError,
                              ResolutionLimitError,
                              ResolutionStalledError, ResolutionTerminatedError
++    nab_resolver.keyed_ranges KeyedRange
 +    nab_resolver.priority   CONFLICT_THRESHOLD, CULPRIT_DEMOTE_THRESHOLD,
 +                            MAX_PRECHECK_BACKTRACKS, PRECHECK_REJECTION_THRESHOLD,
 +                            TIER_AFFECTED, TIER_CULPRIT, TIER_NORMAL,
 +                            compute_tier, is_dominant_culprit
++    nab_resolver.proofs     DependencyCause, dependency_terms, external_clauses,
++                            select_dependency_causes
      nab_resolver.ranges     Range
      nab_resolver.resolver   BaseProvider, DEFAULT_MAX_ITERATIONS, Resolver,
                              ResolverObserver, ResolverProvider, Solution
++    nab_resolver.result     IncompleteSelectionError, walk_selected
      nab_resolver.root       ROOT
 +    nab_resolver.testing    ProviderScenario, check_provider,
 +                            check_provider_scenarios
      nab_resolver.types      Incompatibility, IncompatibilityCause,
                              RangeProtocol, RootRequirement, Term
++    nab_resolver.values     FrozenValue, SlottedValue
++    nab_resolver.version_spans OrderedVersion, cached_dependency_span
  
-diff --git a/src/pip/_vendor/nab_resolver/_compat.py b/src/pip/_vendor/nab_resolver/_compat.py
---- a/src/pip/_vendor/nab_resolver/_compat.py
-+++ b/src/pip/_vendor/nab_resolver/_compat.py
-@@ -17,6 +17,6 @@
- ]
- 
- if TYPE_CHECKING:
--    from typing_extensions import override
-+    from pip._vendor.typing_extensions import override
- else:
-     override = getattr(typing, "override", lambda method: method)
+ The package root binds no names, so importing ``nab_resolver`` pulls in no
+ submodules and a caller loads only what it imports.
 diff --git a/src/pip/_vendor/nab_resolver/candidate_provider.py b/src/pip/_vendor/nab_resolver/candidate_provider.py
 new file mode 100644
 --- /dev/null
@@ -988,6 +987,213 @@ diff --git a/src/pip/_vendor/nab_resolver/errors.py b/src/pip/_vendor/nab_resolv
  
      ``verbose_message`` is the same report at more depth, set by whatever
      augments the error with what the resolve knows beyond the derivation.
+diff --git a/src/pip/_vendor/nab_resolver/keyed_ranges.py b/src/pip/_vendor/nab_resolver/keyed_ranges.py
+new file mode 100644
+--- /dev/null
++++ b/src/pip/_vendor/nab_resolver/keyed_ranges.py
+@@ -0,0 +1,202 @@
++"""Range algebra over an unbounded key domain with finite exceptions."""
++
++from __future__ import annotations
++
++from collections.abc import Hashable
++from typing import TYPE_CHECKING, Any, Generic, TypeVar
++
++from ._compat import override
++from .types import RangeProtocol, RangeRelation
++from .values import FrozenValue
++
++if TYPE_CHECKING:
++    from collections.abc import Callable, Iterable, Iterator, Mapping
++
++    from typing_extensions import Self
++
++__all__ = ["KeyedRange"]
++
++KeyType = TypeVar("KeyType", bound=Hashable)
++ValueType = TypeVar("ValueType", bound=Hashable)
++
++
++class KeyedRange(FrozenValue, Generic[KeyType, ValueType]):
++    """A default range and finite replacements for particular keys.
++
++    Keys need equality and hashing, but need not be ordered or enumerable.
++    Coordinate ranges must obey :class:`RangeProtocol` with one shared policy.
++    A domain-specific subclass supplies its scalar factories and membership.
++    Binary operations retain that subclass and call its constructor.
++    """
++
++    __slots__ = __match_args__ = ("default", "overrides", "_hash")
++
++    default: RangeProtocol[ValueType]
++    overrides: tuple[tuple[KeyType, RangeProtocol[ValueType]], ...]
++    _hash: int
++
++    def __init__(
++        self,
++        default: RangeProtocol[ValueType],
++        overrides: Mapping[KeyType, RangeProtocol[ValueType]]
++        | Iterable[tuple[KeyType, RangeProtocol[ValueType]]] = (),
++    ) -> None:
++        """Snapshot replacements, keeping the last range for repeated keys."""
++        normalized = tuple(
++            (key, value) for key, value in dict(overrides).items() if value != default
++        )
++
++        object.__setattr__(self, "default", default)
++        object.__setattr__(self, "overrides", normalized)
++        object.__setattr__(self, "_hash", hash((default, frozenset(normalized))))
++
++    def for_key(self, key: KeyType) -> RangeProtocol[ValueType]:
++        """Return the coordinate applying to a key, including an unseen key."""
++        for stored, value in self.overrides:
++            if stored == key:
++                return value
++        return self.default
++
++    def contains(self, key: KeyType, value: ValueType) -> bool:
++        """Test a value in its key's coordinate."""
++        return value in self.for_key(key)
++
++    @property
++    def is_empty(self) -> bool:
++        """Whether every coordinate is empty."""
++        return self.default.is_empty and all(
++            value.is_empty for _, value in self.overrides
++        )
++
++    def _combine(
++        self,
++        other: Self,
++        operation: Callable[
++            [RangeProtocol[ValueType], RangeProtocol[ValueType]],
++            RangeProtocol[ValueType],
++        ],
++    ) -> Self:
++        """Apply an operation to the default and each exceptional coordinate."""
++        default = operation(self.default, other.default)
++
++        # The default represents every key outside these finite exceptions.
++        return type(self)(
++            default,
++            (
++                (key, operation(left, right))
++                for key, left, right in self._coordinate_pairs(other)
++            ),
++        )
++
++    def _coordinate_pairs(
++        self, other: Self
++    ) -> Iterator[tuple[KeyType, RangeProtocol[ValueType], RangeProtocol[ValueType]]]:
++        """Pair exceptional coordinates without repeated scans of either tuple."""
++        left = dict(self.overrides)
++        right = dict(other.overrides)
++        for key in left.keys() | right.keys():
++            yield key, left.get(key, self.default), right.get(key, other.default)
++
++    def __and__(self, other: object) -> Self:
++        """Intersect each key's range."""
++        if not isinstance(other, type(self)):
++            # Zuban does not allow the standard operator fallback for Self.
++            return NotImplemented  # zuban: ignore[return-value]
++
++        return self._combine(other, lambda left, right: left & right)
++
++    def __or__(self, other: object) -> Self:
++        """Union each key's range."""
++        if not isinstance(other, type(self)):
++            # Zuban does not allow the standard operator fallback for Self.
++            return NotImplemented  # zuban: ignore[return-value]
++
++        return self._combine(other, lambda left, right: left | right)
++
++    def __sub__(self, other: object) -> Self:
++        """Remove the other range at each key."""
++        if not isinstance(other, type(self)):
++            # Zuban does not allow the standard operator fallback for Self.
++            return NotImplemented  # zuban: ignore[return-value]
++
++        return self._combine(other, lambda left, right: left - right)
++
++    def __invert__(self) -> Self:
++        """Complement every coordinate, including keys not yet encountered."""
++        return type(self)(
++            ~self.default, ((key, ~value) for key, value in self.overrides)
++        )
++
++    def is_subset(self, other: Self) -> bool:
++        """Whether every admitted keyed value is also admitted by the other."""
++        return self.relation(other).is_subset
++
++    def is_superset(self, other: Self) -> bool:
++        """Whether every keyed value in the other range is admitted here."""
++        return other.is_subset(self)
++
++    def is_disjoint(self, other: Self) -> bool:
++        """Whether the ranges share no keyed value."""
++        return self.relation(other).is_disjoint
++
++    def relation(self, other: Self) -> RangeRelation:
++        """Combine the scalar relation over the default and finite exceptions."""
++        relation = self.default.relation(other.default)
++        subset = relation.is_subset
++        disjoint = relation.is_disjoint
++        for _, left, right in self._coordinate_pairs(other):
++            relation = left.relation(right)
++            subset &= relation.is_subset
++            disjoint &= relation.is_disjoint
++
++        if subset:
++            return RangeRelation.EMPTY if disjoint else RangeRelation.SUBSET
++        return RangeRelation.DISJOINT if disjoint else RangeRelation.OVERLAPPING
++
++    @override
++    def identity(self) -> tuple[object, ...]:
++        """Compare coordinates independently of the cached hash."""
++        return self.default, frozenset(self.overrides)
++
++    @override
++    def __eq__(self, other: object) -> bool:
++        """Compare keyed coordinates without retaining a second lookup table."""
++        if not isinstance(other, type(self)):
++            return NotImplemented
++        if self.default != other.default:
++            return False
++        if self.overrides == other.overrides:
++            return True
++        if len(self.overrides) != len(other.overrides):
++            return False
++
++        # Coordinate order does not change the admitted set.
++        return dict(self.overrides) == dict(other.overrides)
++
++    @override
++    def __hash__(self) -> int:
++        """Return the hash of the snapshotted coordinates."""
++        return self._hash
++
++    @override
++    def __getstate__(
++        self,
++    ) -> dict[str, Any] | tuple[dict[str, Any], dict[str, Any]]:
++        """Omit the process-specific hash when copying or serializing."""
++        state = super().__getstate__()
++        dictionary = state[0] if isinstance(state, tuple) else state
++        del dictionary["_hash"]
++        return state
++
++    @override
++    def __setstate__(
++        self, state: dict[str, Any] | tuple[dict[str, Any], dict[str, Any]]
++    ) -> None:
++        """Restore fields, then compute the hash in the receiving process."""
++        super().__setstate__(state)
++        object.__setattr__(self, "_hash", hash(self.identity()))
++
++    @override
++    def __str__(self) -> str:
++        """Render the default and exceptional coordinates."""
++        return f"{self.default!r}; keys={self.overrides!r}"
 diff --git a/src/pip/_vendor/nab_resolver/priority.py b/src/pip/_vendor/nab_resolver/priority.py
 new file mode 100644
 --- /dev/null
@@ -1061,10 +1267,205 @@ new file mode 100644
 +        default=0,
 +    )
 +    return package_count - second_highest >= CULPRIT_DEMOTE_THRESHOLD
+diff --git a/src/pip/_vendor/nab_resolver/proofs.py b/src/pip/_vendor/nab_resolver/proofs.py
+new file mode 100644
+--- /dev/null
++++ b/src/pip/_vendor/nab_resolver/proofs.py
+@@ -0,0 +1,182 @@
++"""Recover original dependency requests from a PubGrub failure proof."""
++
++from __future__ import annotations
++
++from collections import Counter
++from collections.abc import Hashable, Sequence
++from typing import Generic, TypeVar
++
++from .root import ROOT
++from .types import Incompatibility, IncompatibilityCause, RangeProtocol, Term
++
++__all__ = [
++    "DependencyCause",
++    "dependency_terms",
++    "external_clauses",
++    "select_dependency_causes",
++]
++
++PackageType = TypeVar("PackageType", bound=Hashable)
++VersionType = TypeVar("VersionType", bound=Hashable)
++
++
++class DependencyCause(Generic[PackageType, VersionType]):
++    """An original request and the parent versions responsible for it."""
++
++    parent: PackageType | None
++    package: PackageType
++    parent_range: RangeProtocol[VersionType] | None
++    constraint: RangeProtocol[VersionType]
++
++    __slots__ = ("constraint", "package", "parent", "parent_range")
++
++    def __init__(
++        self,
++        parent: PackageType | None,
++        package: PackageType,
++        parent_range: RangeProtocol[VersionType] | None,
++        constraint: RangeProtocol[VersionType],
++    ) -> None:
++        """Retain one original request without changing its ranges."""
++        self.parent = parent
++        self.package = package
++        self.parent_range = parent_range
++        self.constraint = constraint
++
++
++_DEPENDENCY_TERMS = 2
++
++
++def external_clauses(
++    derivation: Incompatibility[PackageType, VersionType] | None,
++    *,
++    left_first: bool = True,
++) -> list[Incompatibility[PackageType, VersionType]]:
++    """Return original facts once in the caller's chosen proof order."""
++    if derivation is None:
++        return []
++
++    return [
++        clause
++        for clause in derivation.walk(left_first=left_first)
++        if clause.cause is not IncompatibilityCause.DERIVED
++    ]
++
++
++def dependency_terms(
++    clause: Incompatibility[PackageType, VersionType],
++    terms: Sequence[Term[PackageType, VersionType]] | None = None,
++) -> tuple[Term[PackageType, VersionType], Term[PackageType, VersionType]] | None:
++    """Recover dependency sides, including merged self-dependency terms."""
++    if clause.cause is not IncompatibilityCause.DEPENDENCY:
++        return None
++
++    terms = clause.terms if terms is None else terms
++    if len(terms) == _DEPENDENCY_TERMS:
++        return terms[0], terms[1]
++
++    if len(terms) != 1 or clause.dependency_range is None:
++        return None
++
++    parent = terms[0]
++    return parent, Term(parent.package, clause.dependency_range, positive=False)
++
++
++def _requested_cause(
++    clause: Incompatibility[PackageType, VersionType],
++) -> DependencyCause[PackageType, VersionType] | None:
++    """Read a root or dependency clause without treating guards as requests."""
++    positive = [term for term in clause.terms if term.is_positive()]
++    negative = [term for term in clause.terms if not term.is_positive()]
++
++    # A merged self-dependency keeps its requested range on the clause.
++    if len(positive) == 1 and clause.dependency_range is not None:
++        parent = positive[0]
++        return DependencyCause(
++            parent.package, parent.package, parent.constraint, clause.dependency_range
++        )
++
++    if len(positive) != 1 or len(negative) != 1:
++        return None
++
++    parent, requested = positive[0], negative[0]
++    return DependencyCause(
++        None if parent.package is ROOT else parent.package,
++        requested.package,
++        None if parent.package is ROOT else parent.constraint,
++        requested.constraint,
++    )
++
++
++def _unavailable_ranges(
++    clauses: Sequence[Incompatibility[PackageType, VersionType]],
++) -> tuple[set[PackageType], dict[PackageType, RangeProtocol[VersionType]]]:
++    """Collect blamed packages and proven absence domains."""
++    unavailable: dict[PackageType, RangeProtocol[VersionType]] = {}
++    blamed: set[PackageType] = set()
++    for clause in clauses:
++        # Contextual absence names its unavailable package before its guards.
++        if clause.cause is IncompatibilityCause.CONTEXTUAL_NO_VERSIONS:
++            package = clause.terms[0].package
++        else:
++            positive = [term for term in clause.terms if term.is_positive()]
++            if len(positive) != 1:
++                continue
++            package = positive[0].package
++
++        if clause.cause is IncompatibilityCause.CONSTRAINT:
++            blamed.add(package)
++        elif clause.cause in {
++            IncompatibilityCause.NO_VERSIONS,
++            IncompatibilityCause.CONTEXTUAL_NO_VERSIONS,
++        }:
++            bounds = clause.terms[0].constraint
++            previous = unavailable.get(package)
++            unavailable[package] = bounds if previous is None else previous | bounds
++
++    return blamed, unavailable
++
++
++def select_dependency_causes(
++    clauses: Sequence[Incompatibility[PackageType, VersionType]],
++) -> list[DependencyCause[PackageType, VersionType]]:
++    """Attribute absence and contradictory requests to original dependency edges."""
++    blamed, unavailable = _unavailable_ranges(clauses)
++    requested: list[DependencyCause[PackageType, VersionType]] = []
++    impossible: set[
++        tuple[PackageType | None, PackageType, RangeProtocol[VersionType] | None]
++    ] = set()
++
++    for clause in clauses:
++        if clause.cause not in {
++            IncompatibilityCause.ROOT,
++            IncompatibilityCause.DEPENDENCY,
++        }:
++            continue
++        cause = _requested_cause(clause)
++        if cause is None:
++            continue
++        requested.append(cause)
++        if clause.cause is IncompatibilityCause.DEPENDENCY and any(
++            not term.is_positive() and term.constraint.is_empty for term in clause.terms
++        ):
++            impossible.add((cause.parent, cause.package, cause.parent_range))
++
++        absent = unavailable.get(cause.package)
++        if absent is not None and cause.constraint.is_subset(absent):
++            blamed.add(cause.package)
++
++    # An impossible dependency already explains why its parent cannot be selected.
++    upstream = {parent for parent, package, _ in impossible if parent != package}
++    selected = [
++        cause
++        for cause in requested
++        if (cause.parent, cause.package, cause.parent_range) in impossible
++        or (cause.package in blamed and cause.package not in upstream)
++    ]
++    if selected or not requested:
++        return selected
++
++    counts = Counter(cause.package for cause in requested)
++    most_requested = max(counts.values())
++    return [cause for cause in requested if counts[cause.package] == most_requested]
 diff --git a/src/pip/_vendor/nab_resolver/report.py b/src/pip/_vendor/nab_resolver/report.py
 --- a/src/pip/_vendor/nab_resolver/report.py
 +++ b/src/pip/_vendor/nab_resolver/report.py
-@@ -129,7 +129,10 @@
+@@ -13,6 +13,7 @@
+ 
+ from typing import TYPE_CHECKING, Any, TypeAlias
+ 
++from .proofs import dependency_terms
+ from .root import ROOT
+ from .types import IncompatibilityCause, PackageType, Term, VersionType
+ 
+@@ -129,7 +130,10 @@
      The comparison runs on exactly what the reader sees, so a requirement is
      read as printed, un-narrowed, the way the line states it.
      """
@@ -1076,7 +1477,39 @@ diff --git a/src/pip/_vendor/nab_resolver/report.py b/src/pip/_vendor/nab_resolv
          return {term.package: term for term in incompatibility.terms}
      return {
          term.package: _narrow_positive(term, narrow) for term in incompatibility.terms
-@@ -276,8 +279,14 @@
+@@ -241,31 +245,6 @@
+     return found
+ 
+ 
+-def _dependency_pair(
+-    incompatibility: Incompatibility[Any, Any], terms: Sequence[Term[Any, Any]]
+-) -> tuple[Term[Any, Any], Term[Any, Any]] | None:
+-    """Return the parent and dependency terms of a DEPENDENCY clause, else None.
+-
+-    ``terms`` are the clause's terms as the line renders them, which is not
+-    ``incompatibility.terms`` once narrowing has been applied.  A package
+-    depending on itself merges the two terms into one, so the dependency side
+-    is rebuilt from the range the clause carries.
+-    """
+-    if incompatibility.cause is not IncompatibilityCause.DEPENDENCY:
+-        return None
+-
+-    if len(terms) == _ATTRIBUTION_CLAUSE_TERMS:
+-        parent, dependency = terms
+-        return parent, dependency
+-
+-    dependency_range = incompatibility.dependency_range
+-    if len(terms) != 1 or dependency_range is None:
+-        return None
+-
+-    (parent,) = terms
+-    return parent, Term(parent.package, dependency_range, positive=False)
+-
+-
+ def _render_line(
+     incompatibility: Incompatibility[Any, Any],
+     narrow: _NarrowFn | None,
+@@ -276,10 +255,16 @@
      terms = incompatibility.terms
      # An availability line renders its own range: narrowing it onto the listing
      # is what let it stop covering the requirement it closes against.
@@ -1086,13 +1519,16 @@ diff --git a/src/pip/_vendor/nab_resolver/report.py b/src/pip/_vendor/nab_resolv
 +        IncompatibilityCause.CONTEXTUAL_NO_VERSIONS,
 +    }:
          terms = [_narrow_positive(term, narrow) for term in terms]
-+
+ 
+-    attributed = _dependency_pair(incompatibility, terms)
 +    if cause is IncompatibilityCause.CONTEXTUAL_NO_VERSIONS:
 +        return _render_contextual_no_versions(incompatibility, format_range)
- 
-     attributed = _dependency_pair(incompatibility, terms)
++
++    attributed = dependency_terms(incompatibility, terms)
      if attributed is not None:
-@@ -308,6 +317,21 @@
+         parent, dep = attributed
+         plural = _is_full(parent)
+@@ -308,6 +293,21 @@
          return f"because the user constrained {subject}"
  
      return _render_prefix_line(cause, terms, format_range)
@@ -1125,15 +1561,6 @@ diff --git a/src/pip/_vendor/nab_resolver/resolver.py b/src/pip/_vendor/nab_reso
  from .errors import ResolutionError, ResolutionLimitError
  from .partial_solution import PartialSolution
  from .ranges import Range
-@@ -56,7 +57,7 @@
- )
- 
- if TYPE_CHECKING:
--    from typing_extensions import TypeIs
-+    from pip._vendor.typing_extensions import TypeIs
- 
- __all__ = [
-     "DEFAULT_MAX_ITERATIONS",
 @@ -267,8 +268,9 @@
      ) -> None:
          """Accept a snapshot of positive ranges and decisions.
@@ -1413,6 +1840,106 @@ diff --git a/src/pip/_vendor/nab_resolver/resolver.py b/src/pip/_vendor/nab_reso
  
      def _add_root_requirements(
          self, requirements: Sequence[RootRequirement[PackageType, VersionType]]
+diff --git a/src/pip/_vendor/nab_resolver/result.py b/src/pip/_vendor/nab_resolver/result.py
+--- a/src/pip/_vendor/nab_resolver/result.py
++++ b/src/pip/_vendor/nab_resolver/result.py
+@@ -17,16 +17,61 @@
+ )
+ 
+ from collections import deque
+-from typing import TYPE_CHECKING, Any
++from typing import TYPE_CHECKING, Any, TypeVar
+ 
+ from .types import IncompatibilityCause, PackageType, VersionType
+ 
+ if TYPE_CHECKING:
+-    from collections.abc import Callable, Iterable, Mapping
++    from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
+ 
+     from .types import Incompatibility, RangeProtocol
+ 
+-__all__ = ["build_solution_data"]
++__all__ = ["IncompleteSelectionError", "build_solution_data", "walk_selected"]
++
++SelectedCandidateType = TypeVar("SelectedCandidateType")
++
++
++class IncompleteSelectionError(Exception):
++    """A reachable package lacks a selected candidate or readable dependencies."""
++
++    def __init__(self, package: object) -> None:
++        """Retain the first incomplete package in traversal order."""
++        self.package = package
++        super().__init__(f"Incomplete selected metadata for {package!r}")
++
++
++def walk_selected(
++    roots: Iterable[PackageType],
++    selected: Mapping[PackageType, SelectedCandidateType],
++    dependency_names: Callable[
++        [PackageType, SelectedCandidateType], Collection[PackageType] | None
++    ],
++    *,
++    depth_first: bool = False,
++) -> Iterator[tuple[PackageType, SelectedCandidateType, Collection[PackageType]]]:
++    """Visit the selected reachable graph once using the caller's metadata policy.
++
++    None from ``dependency_names`` means unread metadata; callback exceptions propagate.
++    """
++    seen: set[PackageType] = set()
++    pending: deque[PackageType] = deque(roots)
++    while pending:
++        package = pending.pop() if depth_first else pending.popleft()
++        if package in seen:
++            continue
++
++        candidate = selected.get(package)
++        if candidate is None:
++            raise IncompleteSelectionError(package)
++
++        dependencies = dependency_names(package, candidate)
++        if dependencies is None:
++            raise IncompleteSelectionError(package)
++
++        # Revisit suppression applies only after the caller has supplied metadata.
++        seen.add(package)
++        yield package, candidate, dependencies
++        pending.extend(child for child in dependencies if child not in seen)
+ 
+ 
+ def build_solution_data(
+@@ -66,22 +111,15 @@
+     # recording each dependency crossed on the way.
+     edges: list[tuple[PackageType, PackageType]] = []
+     reachable: set[PackageType] = set()
+-    queue: deque[PackageType] = deque(root_required)
+-    while queue:
+-        package = queue.popleft()
+-        if package in reachable:
+-            continue
+-        reachable.add(package)
+-
+-        version = all_decisions.get(package)
+-        if version is None:  # pragma: no cover
+-            unreachable = f"Bug: reachable package {package!r} has no decision"
+-            raise RuntimeError(unreachable)
+-
+-        for dep_package in get_dependencies(package, version):
+-            edges.append((package, dep_package))
+-            if dep_package not in reachable:
+-                queue.append(dep_package)
++    try:
++        for package, _, dependencies in walk_selected(
++            root_required, all_decisions, get_dependencies
++        ):
++            reachable.add(package)
++            edges.extend((package, child) for child in dependencies)
++    except IncompleteSelectionError as error:
++        unreachable = f"Bug: reachable package {error.package!r} has no decision"
++        raise RuntimeError(unreachable) from error
+ 
+     return (
+         {
 diff --git a/src/pip/_vendor/nab_resolver/testing.py b/src/pip/_vendor/nab_resolver/testing.py
 new file mode 100644
 --- /dev/null
@@ -2294,15 +2821,6 @@ new file mode 100644
 diff --git a/src/pip/_vendor/nab_resolver/types.py b/src/pip/_vendor/nab_resolver/types.py
 --- a/src/pip/_vendor/nab_resolver/types.py
 +++ b/src/pip/_vendor/nab_resolver/types.py
-@@ -20,7 +20,7 @@
- if TYPE_CHECKING:
-     from collections.abc import Iterator
- 
--    from typing_extensions import Self
-+    from pip._vendor.typing_extensions import Self
- 
- __all__ = [
-     "Incompatibility",
 @@ -379,6 +379,9 @@
      """Derived from two other incompatibilities via resolution.
      See: https://github.com/dart-lang/pub/blob/master/doc/solver.md#conflict-resolution
@@ -2313,17 +2831,238 @@ diff --git a/src/pip/_vendor/nab_resolver/types.py b/src/pip/_vendor/nab_resolve
  
  
  class Incompatibility(Generic[PackageType, VersionType]):
-@@ -453,6 +456,13 @@
-             if node.cause_left is not None:
-                 pending.append(node.cause_left)
+@@ -437,8 +440,10 @@
+         self.origin = origin
+         self.dependency_range = dependency_range
  
+-    def walk(self) -> Iterator[Incompatibility[PackageType, VersionType]]:
+-        """Visit each derivation node once, with left causes before right causes."""
++    def walk(
++        self, *, left_first: bool = True
++    ) -> Iterator[Incompatibility[PackageType, VersionType]]:
++        """Visit each derivation node once in the chosen cause order."""
+         pending: list[Incompatibility[PackageType, VersionType]] = [self]
+         seen: set[int] = set()
+         while pending:
+@@ -448,10 +453,22 @@
+             seen.add(id(node))
+             yield node
+ 
+-            if node.cause_right is not None:
+-                pending.append(node.cause_right)
+-            if node.cause_left is not None:
+-                pending.append(node.cause_left)
++            first, second = (
++                (node.cause_left, node.cause_right)
++                if left_first
++                else (node.cause_right, node.cause_left)
++            )
++            if second is not None:
++                pending.append(second)
++            if first is not None:
++                pending.append(first)
++
 +    @property
 +    def unavailable_package(self) -> PackageType | None:
 +        """The package whose availability a contextual absence clause describes."""
 +        if self.cause is IncompatibilityCause.CONTEXTUAL_NO_VERSIONS:
 +            return self.terms[0].package
 +        return None
-+
+ 
      @override
      def __repr__(self) -> str:
-         """Return a debug representation."""
+diff --git a/src/pip/_vendor/nab_resolver/values.py b/src/pip/_vendor/nab_resolver/values.py
+new file mode 100644
+--- /dev/null
++++ b/src/pip/_vendor/nab_resolver/values.py
+@@ -0,0 +1,128 @@
++"""Immutable slotted values with explicit field and identity declarations."""
++
++from __future__ import annotations
++
++from types import MemberDescriptorType
++from typing import Any, ClassVar
++
++from ._compat import override
++
++__all__ = ["FrozenValue", "SlottedValue"]
++
++
++class SlottedValue:
++    """Equality, hashing and repr over a subclass's declared immutable identity.
++
++    ``__match_args__`` declares field order. Override :meth:`identity` to refine
++    field equality. This class installs no runtime write guard.
++    """
++
++    __slots__ = ()
++    __match_args__: ClassVar[tuple[str, ...]]
++
++    def identity(self) -> tuple[object, ...]:
++        """Return the immutable values used for equality and hashing."""
++        return tuple(getattr(self, name) for name in self.__match_args__)
++
++    @override
++    def __eq__(self, other: object) -> bool:
++        """Compare identities within the exact value class."""
++        if not isinstance(other, SlottedValue) or type(other) is not type(self):
++            return NotImplemented
++
++        return self.identity() == other.identity()
++
++    @override
++    def __hash__(self) -> int:
++        """Hash the identity used by equality."""
++        return hash(self.identity())
++
++    @override
++    def __repr__(self) -> str:
++        """Render the declared fields in their construction order."""
++        fields = ", ".join(
++            f"{name}={getattr(self, name)!r}" for name in self.__match_args__
++        )
++        return f"{type(self).__qualname__}({fields})"
++
++
++class FrozenValue(SlottedValue):
++    """Snapshot fields named by ``__match_args__`` for hashable value semantics.
++
++    Constructors initialize their own slots with ``object.__setattr__``.
++    Override :meth:`identity` when field equality alone loses a domain identity.
++    Subclasses that inherit the fields may retain additional mutable state.
++    """
++
++    __slots__ = ("__weakref__",)
++    __match_args__: ClassVar[tuple[str, ...]]
++
++    @override
++    def __setattr__(self, name: str, value: object) -> None:
++        """Refuse changes to the declared identity fields."""
++        if "__match_args__" in type(self).__dict__ or name in self.__match_args__:
++            message = f"cannot assign to field {name!r}"
++            raise AttributeError(message)
++        object.__setattr__(self, name, value)
++
++    @override
++    def __delattr__(self, name: str) -> None:
++        """Refuse deletion of the declared identity fields."""
++        if "__match_args__" in type(self).__dict__ or name in self.__match_args__:
++            message = f"cannot delete field {name!r}"
++            raise AttributeError(message)
++        object.__delattr__(self, name)
++
++    def __getstate__(
++        self,
++    ) -> dict[str, Any] | tuple[dict[str, Any], dict[str, Any]]:
++        """Collect fields and subclass state without copying contained values."""
++        dictionary = getattr(self, "__dict__", {}).copy()
++        slots: dict[str, Any] = {}
++        seen = set()
++
++        for cls in type(self).__mro__:
++            for name, descriptor in cls.__dict__.items():
++                if not isinstance(descriptor, MemberDescriptorType) or name in seen:
++                    continue
++
++                # Read slot storage without invoking subclass properties.
++                try:
++                    value = descriptor.__get__(self)
++                except AttributeError:
++                    continue
++
++                seen.add(name)
++                if name in self.__match_args__:
++                    dictionary[name] = value
++                else:
++                    slots[name] = value
++
++        return (dictionary, slots) if slots else dictionary
++
++    def __setstate__(
++        self, state: dict[str, Any] | tuple[dict[str, Any], dict[str, Any]]
++    ) -> None:
++        """Restore fields and subclass state without running their constructors."""
++        dictionary, slots = state if isinstance(state, tuple) else (state, {})
++        extra = dictionary.copy()
++
++        for name in self.__match_args__:
++            if name in extra and name not in slots:
++                descriptor = _attribute_slot(type(self), name)
++                if descriptor is not None:
++                    descriptor.__set__(self, extra.pop(name))
++
++        if extra:
++            self.__dict__.update(extra)
++
++        for name, value in slots.items():
++            setattr(self, name, value)
++
++
++def _attribute_slot(cls: type, name: str) -> MemberDescriptorType | None:
++    """Find the visible slot without invoking a subclass property."""
++    descriptor = next(
++        base.__dict__[name] for base in cls.__mro__ if name in base.__dict__
++    )
++    return descriptor if isinstance(descriptor, MemberDescriptorType) else None
+diff --git a/src/pip/_vendor/nab_resolver/version_spans.py b/src/pip/_vendor/nab_resolver/version_spans.py
+new file mode 100644
+--- /dev/null
++++ b/src/pip/_vendor/nab_resolver/version_spans.py
+@@ -0,0 +1,57 @@
++"""Cache-only dependency equivalence over a fixed ordered version listing."""
++
++from __future__ import annotations
++
++from bisect import bisect_left, bisect_right
++from typing import TYPE_CHECKING, Protocol, TypeVar
++
++if TYPE_CHECKING:
++    from collections.abc import Callable, Sequence
++
++    from typing_extensions import Self
++
++__all__ = ["OrderedVersion", "cached_dependency_span"]
++
++
++class OrderedVersion(Protocol):
++    """A version value that can be bisected within its own ordered domain."""
++
++    def __lt__(self, other: Self, /) -> bool:
++        """Compare versions from the same listing."""
++        ...
++
++
++VersionType = TypeVar("VersionType", bound=OrderedVersion)
++
++
++def cached_dependency_span(
++    version: VersionType,
++    universe: Sequence[VersionType],
++    dependency_at: Callable[[VersionType], object | None],
++    *,
++    expand_higher: bool = True,
++) -> tuple[VersionType | None, VersionType | None]:
++    """Return open bounds around cached equivalents without reading metadata.
++
++    ``universe`` must be sorted ascending and remain fixed for the resolution.
++    ``dependency_at`` returns a cached dependency value, or None for unread metadata.
++    """
++    below = bisect_left(universe, version)
++    above = bisect_right(universe, version)
++    dependencies = dependency_at(version)
++
++    # Unknown metadata fences a span even when both cache lookups are missing.
++    if dependencies is not None:
++        while below and dependency_at(universe[below - 1]) == dependencies:
++            below -= 1
++
++        if expand_higher:
++            while (
++                above < len(universe) and dependency_at(universe[above]) == dependencies
++            ):
++                above += 1
++
++    return (
++        universe[below - 1] if below else None,
++        universe[above] if above < len(universe) else None,
++    )

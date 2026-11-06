@@ -20,7 +20,7 @@ from ._compat import override
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-    from pip._vendor.typing_extensions import Self
+    from typing_extensions import Self
 
 __all__ = [
     "Incompatibility",
@@ -440,8 +440,10 @@ class Incompatibility(Generic[PackageType, VersionType]):
         self.origin = origin
         self.dependency_range = dependency_range
 
-    def walk(self) -> Iterator[Incompatibility[PackageType, VersionType]]:
-        """Visit each derivation node once, with left causes before right causes."""
+    def walk(
+        self, *, left_first: bool = True
+    ) -> Iterator[Incompatibility[PackageType, VersionType]]:
+        """Visit each derivation node once in the chosen cause order."""
         pending: list[Incompatibility[PackageType, VersionType]] = [self]
         seen: set[int] = set()
         while pending:
@@ -451,10 +453,15 @@ class Incompatibility(Generic[PackageType, VersionType]):
             seen.add(id(node))
             yield node
 
-            if node.cause_right is not None:
-                pending.append(node.cause_right)
-            if node.cause_left is not None:
-                pending.append(node.cause_left)
+            first, second = (
+                (node.cause_left, node.cause_right)
+                if left_first
+                else (node.cause_right, node.cause_left)
+            )
+            if second is not None:
+                pending.append(second)
+            if first is not None:
+                pending.append(first)
 
     @property
     def unavailable_package(self) -> PackageType | None:
