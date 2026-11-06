@@ -28,6 +28,8 @@ class SpinnerInterface:
 
 
 class InteractiveSpinner(SpinnerInterface):
+    """Animate an operation until finish() releases its live line."""
+
     def __init__(
         self,
         message: str,
@@ -35,23 +37,71 @@ class InteractiveSpinner(SpinnerInterface):
         spin_chars: str = SPINNER_CHARS,
         # Empirically, 8 updates/second looks nice
         min_update_interval_seconds: float = 1 / SPINS_PER_SECOND,
+        *,
+        console: Terminal | None = None,
     ):
-        self._message = message
-        self._console = (
-            get_console() if file is None or file is sys.stdout else Terminal(file)
-        )
+        if console is None:
+            console = (
+                get_console() if file is None or file is sys.stdout else Terminal(file)
+            )
+
+        self._console = console
         self._line = LiveLine(self._console)
-        self._line.__enter__()
         self._rate_limiter = RateLimiter(min_update_interval_seconds)
+        self._interval = min_update_interval_seconds
         self._finished = False
         self._spin_cycle = itertools.cycle(spin_chars)
-        self._prefix = " " * get_indentation() + self._message + " ... "
-        self._line.update(self._prefix + next(self._spin_cycle))
+        self._prefix = " " * get_indentation() + message + " ... "
+        self._stopped = threading.Event()
+        self._thread: threading.Thread | None = None
+
+        self._next_update = time.monotonic() + self._interval
+        self._line.__enter__()
+        try:
+            self._line.update(self._prefix + next(self._spin_cycle))
+        except BaseException:
+            self._line.__exit__()
+            raise
+
+        self._rate_limiter.reset()
+
+        # A silent backend blocks readline(), so animation needs its own clock.
+        # Prior art: https://rich.readthedocs.io/en/stable/live.html#auto-refresh
+        if self._console.interactive:
+            thread = threading.Thread(
+                target=self._repaint, name="pip-spinner", daemon=True
+            )
+            try:
+                thread.start()
+            except RuntimeError:
+                # Keep callback updates when the OS cannot create a worker.
+                pass
+            else:
+                self._thread = thread
+
+    def _repaint(self) -> None:
+        """Advance frames at monotonic deadlines without accumulating draw time."""
+        # https://docs.python.org/3/library/time.html#time.monotonic
+        deadline = self._next_update
+
+        while not self._stopped.wait(max(deadline - time.monotonic(), 0)):
+            try:
+                self._line.update(self._prefix + next(self._spin_cycle))
+            except OSError:
+                # Leave the final output attempt to the calling thread.
+                return
+
+            deadline += self._interval
+            now = time.monotonic()
+            if deadline <= now:
+                # A stalled terminal must not trigger a burst of overdue frames.
+                deadline = now + self._interval
 
     @override
     def spin(self) -> None:
-        if self._finished or not self._rate_limiter.ready():
+        if self._finished or self._thread is not None or not self._rate_limiter.ready():
             return
+
         self._line.update(self._prefix + next(self._spin_cycle))
         self._rate_limiter.reset()
 
@@ -59,6 +109,13 @@ class InteractiveSpinner(SpinnerInterface):
     def finish(self, final_status: str) -> None:
         if self._finished:
             return
+
+        # Stop the worker before releasing its line or printing the final status.
+        # https://docs.python.org/3/library/threading.html#threading.Thread.join
+        self._stopped.set()
+        if self._thread is not None:
+            self._thread.join()
+
         self._line.__exit__()
         self._console.print(Text(self._prefix + final_status))
         self._finished = True
@@ -140,50 +197,16 @@ def open_auto_spinner(label: str, console: Terminal | None = None) -> Generator[
         yield
         return
 
-    if console is None:
-        console = get_console()
-
-    prefix = " " * get_indentation() + label + " ... "
-    stopped = threading.Event()
+    spinner = InteractiveSpinner(label, console=console)
     status = "done"
+
     try:
-        with LiveLine(console) as line:
-
-            def repaint() -> None:
-                for frame in itertools.cycle(SPINNER_CHARS):
-                    if stopped.wait(1 / SPINS_PER_SECOND):
-                        return
-                    try:
-                        line.update(prefix + frame)
-                    except OSError:
-                        # Leave the final output attempt to the calling thread.
-                        return
-
-            thread = None
-            if console.interactive:
-                line.update(prefix + SPINNER_CHARS[0])
-                thread = threading.Thread(
-                    target=repaint, name="pip-spinner", daemon=True
-                )
-                try:
-                    thread.start()
-                except RuntimeError:
-                    # Animation must not prevent work when threads are unavailable.
-                    thread = None
-
-            try:
-                yield
-            except KeyboardInterrupt:
-                status = "canceled"
-                raise
-            except BaseException:
-                status = "error"
-                raise
-            finally:
-                # Stop the worker before releasing its live line.
-                # https://docs.python.org/3/library/threading.html#threading.Thread.join
-                stopped.set()
-                if thread is not None:
-                    thread.join()
+        yield
+    except KeyboardInterrupt:
+        status = "canceled"
+        raise
+    except BaseException:
+        status = "error"
+        raise
     finally:
-        console.print(Text(prefix + status))
+        spinner.finish(status)

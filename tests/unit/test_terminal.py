@@ -165,6 +165,23 @@ def test_nested_progress_and_logging() -> None:
     )
 
 
+def test_hidden_progress_updates_do_not_repaint_inner_line() -> None:
+    stream = TtyStream()
+    output = Terminal(stream, color=False)
+    with LiveLine(output) as outer:
+        outer.update("outer")
+        with LiveLine(output) as inner:
+            inner.update("inner")
+            visible = stream.getvalue()
+
+            outer.update("latest outer")
+            assert stream.getvalue() == visible
+
+        assert stream.getvalue().endswith("\rlatest outer")
+
+    assert stream.getvalue().endswith("\rlatest outer\r\x1b[K")
+
+
 def test_progress_cleanup_on_failure() -> None:
     stream = TtyStream()
     output = Terminal(stream, color=False)

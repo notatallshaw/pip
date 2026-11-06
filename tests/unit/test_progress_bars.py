@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 from io import StringIO
 
 import pytest
 
-from pip._internal.cli import progress_bars
+from pip._internal.cli import progress_bars, spinners
 from pip._internal.cli.progress_bars import (
     get_download_progress_renderer,
     get_install_progress_renderer,
@@ -125,3 +126,32 @@ def test_narrow_download_shows_byte_counts(monkeypatch: pytest.MonkeyPatch) -> N
     assert list(render([b"a" * 2000, b"b" * 2000]))
     first_frame = stream.getvalue().split("\r")[1]
     assert first_frame == "  2.0 kB/4.0 kB"
+
+
+@pytest.mark.parametrize("inner", ["spinner", "download"])
+def test_install_progress_restored_after_nested_operation(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, inner: str
+) -> None:
+    """A nested operation and its summary must preserve the current install line."""
+    stream = StringIO()
+    console = Terminal(stream, color=False)
+    console.interactive = True
+    monkeypatch.setattr(progress_bars, "get_console", lambda: console)
+    monkeypatch.setattr(spinners, "get_console", lambda: console)
+    caplog.set_level(logging.INFO, logger=spinners.__name__)
+    requirements = [install_req_from_line("demo==1"), install_req_from_line("other==2")]
+    renderer = get_install_progress_renderer(bar_type="on", total=2)
+
+    for _requirement in renderer(requirements):
+        if inner == "spinner":
+            with spinners.open_auto_spinner("nested build", console):
+                console.print("nested notice")
+        else:
+            download = get_download_progress_renderer(bar_type="on", size=2000)
+            assert list(download([b"a" * 2000])) == [b"a" * 2000]
+
+        assert stream.getvalue().rsplit("\r", 1)[-1].startswith("0/2 [demo]")
+
+    console.print("finished")
+    assert stream.getvalue().endswith("\r\x1b[Kfinished\n")
+    assert not console.display.lines
