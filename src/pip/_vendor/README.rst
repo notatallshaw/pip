@@ -99,6 +99,8 @@ Modifications
   rather than ``appdirs``.
 * ``packaging`` has been modified to import its dependencies from
   ``pip._vendor``.
+  The nab prototype also carries a snapshot patch for version-range operations
+  and prepared marker evaluation; see ``packaging/PROVENANCE.md``.
 * ``nab-resolver`` carries a current-source snapshot and the candidate-provider,
   deferred-query and scheduling APIs used by the prototype. Its patch is based
   on release 0.0.26; see ``nab_resolver/PROVENANCE.md`` for the exact source.
