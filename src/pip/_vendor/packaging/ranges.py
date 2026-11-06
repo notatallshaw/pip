@@ -12,13 +12,14 @@ exists.
 
 .. testsetup::
 
-    from pip._vendor.packaging.ranges import VersionRange
+    from pip._vendor.packaging.ranges import RangeRelation, VersionRange
     from pip._vendor.packaging.specifiers import SpecifierSet
     from pip._vendor.packaging.version import Version
 """
 
 from __future__ import annotations
 
+import bisect
 import enum
 import typing
 from typing import (
@@ -42,6 +43,7 @@ from ._ranges import (
     least_version_above,
     matches_bounds_only,
     range_is_empty,
+    ranges_are_disjoint,
     ranges_are_prerelease_only,
     trim_release,
 )
@@ -62,32 +64,37 @@ UnparsedVersionVar = TypeVar("UnparsedVersionVar", bound=UnparsedVersion)
 
 
 class RangeRelation(enum.Enum):
-    """How one range's members sit against another's.
+    """Result of :meth:`VersionRange.relation` with subset and disjointness flags.
 
-    The four members partition the ``(is_subset, is_disjoint)`` space: both
-    hold together only for an empty range, which is a subset of everything
-    and shares a member with nothing.
+    .. versionadded:: 26.4
     """
 
-    EMPTY = (True, True)
-    SUBSET = (True, False)
-    DISJOINT = (False, True)
-    OVERLAPPING = (False, False)
+    #: ``self`` has no members.
+    EMPTY = enum.auto()
 
-    def __init__(self, is_subset: bool, is_disjoint: bool) -> None:
-        self.is_subset = is_subset
-        self.is_disjoint = is_disjoint
+    #: ``self`` has members and every one of them is in ``other``.
+    SUBSET = enum.auto()
+
+    #: ``self`` has members and none of them is in ``other``.
+    DISJOINT = enum.auto()
+
+    #: The two share a member, and ``self`` has one ``other`` lacks.
+    OVERLAPPING = enum.auto()
+
+    @property
+    def is_subset(self) -> bool:
+        """Whether every member of ``self`` is also a member of ``other``."""
+        return self is RangeRelation.EMPTY or self is RangeRelation.SUBSET
+
+    @property
+    def is_disjoint(self) -> bool:
+        """Whether ``self`` and ``other`` share no member."""
+        return self is RangeRelation.EMPTY or self is RangeRelation.DISJOINT
 
     def __repr__(self) -> str:
-        return f"RangeRelation.{self.name}"
+        """Return the qualified member name."""
+        return f"{type(self).__name__}.{self.name}"
 
-
-# Bound once so the hot return paths load a module global instead of a class
-# attribute.
-_EMPTY_REL = RangeRelation.EMPTY
-_SUBSET_REL = RangeRelation.SUBSET
-_DISJOINT_REL = RangeRelation.DISJOINT
-_OVERLAPPING_REL = RangeRelation.OVERLAPPING
 
 #: The most ``!=`` exclusion fragments (``!=V`` points or ``!=P.*`` prefixes)
 #: that :meth:`VersionRange.to_specifier_set` will materialize to spell a
@@ -112,16 +119,16 @@ def __dir__() -> list[str]:
     return __all__
 
 
-# Range algebra: intersection and the empty-interval test live in the engine
-# (``intersect_ranges`` / ``range_is_empty``); union and complement are only
-# needed here, so they live in this module.
+# Range algebra: intersection, disjointness and the empty-interval test live
+# in the engine; union, complement and difference are only needed here, so
+# they live in this module.
 
 
 def _union_ranges(
     left: Sequence[Interval],
     right: Sequence[Interval],
 ) -> list[Interval]:
-    """Union two sorted, non-overlapping interval lists.
+    """Union two sorted, non-overlapping lists of non-empty intervals.
 
     A linear merge over the two pre-sorted inputs followed by a single
     coalescing pass: adjacent or overlapping intervals collapse so the result
@@ -172,99 +179,8 @@ def _union_ranges(
     return merged
 
 
-def _relate_bounds(
-    left: Sequence[Interval],
-    right: Sequence[Interval],
-) -> RangeRelation:
-    """Return the :class:`RangeRelation` for two sorted interval lists.
-
-    One two-pointer merge answers both without building the intersection or the
-    complement. The lists are canonical (sorted, non-overlapping, and
-    non-touching, since :func:`_union_ranges` merges across empty gaps), so a
-    covered left interval sits wholly inside one right interval rather than
-    spanning two: ``left`` is a subset when every one of its intervals is
-    covered, and the two are disjoint when no overlap is found at all. A partial
-    overlap rules out both, so the walk stops there.
-    """
-    matched = 0
-    left_index = right_index = 0
-    disjoint = True
-    while left_index < len(left) and right_index < len(right):
-        left_lower, left_upper = left[left_index]
-        right_lower, right_upper = right[right_index]
-
-        # ``max`` and ``min`` return their first argument on a tie, so both cuts
-        # are the left ones exactly when the overlap is the whole left interval.
-        lower = max(left_lower, right_lower)
-        upper = min(left_upper, right_upper)
-
-        if not range_is_empty(lower, upper):
-            if lower is left_lower and upper is left_upper:
-                matched += 1
-            else:
-                return _OVERLAPPING_REL
-            disjoint = False
-
-        # Advance whichever side has the smaller upper bound.
-        if left_upper < right_upper:
-            left_index += 1
-        else:
-            right_index += 1
-
-    if matched == len(left):
-        return _EMPTY_REL if disjoint else _SUBSET_REL
-    return _DISJOINT_REL if disjoint else _OVERLAPPING_REL
-
-
-def _subset_bounds(left: Sequence[Interval], right: Sequence[Interval]) -> bool:
-    """Return whether every version in ``left`` is also in ``right``.
-
-    The canonical lists let one two-pointer walk decide containment: skip the
-    right intervals that end too early, then check that the surviving one starts
-    early enough.
-    """
-    right_index = 0
-    right_len = len(right)
-    for left_lower, left_upper in left:
-        # A right interval ending below this one cannot cover it, and the left
-        # list ascends, so it cannot cover any later one either.
-        while right_index < right_len and right[right_index][1] < left_upper:
-            right_index += 1
-        if right_index == right_len:
-            return False
-        if right[right_index][0] > left_lower:
-            return False
-    return True
-
-
-def _disjoint_bounds(left: Sequence[Interval], right: Sequence[Interval]) -> bool:
-    """Return whether no version lies in both ``left`` and ``right``.
-
-    A two-pointer merge that stops at the first overlap.
-    """
-    left_index = right_index = 0
-    left_len = len(left)
-    right_len = len(right)
-    while left_index < left_len and right_index < right_len:
-        left_lower, left_upper = left[left_index]
-        right_lower, right_upper = right[right_index]
-
-        lower = max(left_lower, right_lower)
-        upper = min(left_upper, right_upper)
-        if not range_is_empty(lower, upper):
-            return False
-
-        # Advance whichever side has the smaller upper bound.
-        if left_upper < right_upper:
-            left_index += 1
-        else:
-            right_index += 1
-
-    return True
-
-
 def _complement_ranges(ranges: Sequence[Interval]) -> list[Interval]:
-    """Complement a sorted, non-overlapping interval list.
+    """Complement a sorted, disjoint, non-touching list of non-empty intervals.
 
     Yields the gaps between intervals plus a leading gap before the first and
     a trailing gap after the last. Bound inclusivity flips so that
@@ -304,35 +220,82 @@ def _complement_ranges(ranges: Sequence[Interval]) -> list[Interval]:
 
 
 def _difference_ranges(
-    left: Sequence[Interval], right: Sequence[Interval]
-) -> tuple[Interval, ...]:
-    """Subtract sorted intervals without constructing the right-hand complement."""
-    result: list[Interval] = []
+    left: tuple[Interval, ...], right: tuple[Interval, ...]
+) -> Iterator[Interval]:
+    """Subtract right from left. Both must be sorted, disjoint and non-touching.
+
+    Right's intervals must be non-empty; empty intervals in left are dropped.
+    """
+    if right == FULL_RANGE:
+        return
+
     right_index = 0
-    for lower, upper in left:
+    for left_lower, upper in left:
+        lower = left_lower
+        unconsumed = True
         while right_index < len(right):
             right_lower, right_upper = right[right_index]
             if range_is_empty(lower, right_upper):
                 right_index += 1
                 continue
             if range_is_empty(right_lower, upper):
-                if not range_is_empty(lower, upper):
-                    result.append((lower, upper))
                 break
 
             if lower < right_lower:
                 gap_upper = UpperBound(right_lower.version, not right_lower.inclusive)
                 if not range_is_empty(lower, gap_upper):
-                    result.append((lower, gap_upper))
+                    yield lower, gap_upper
             if right_upper >= upper:
+                # Keep this exclusion for any later left intervals it overlaps.
+                unconsumed = False
                 break
 
             lower = LowerBound(right_upper.version, not right_upper.inclusive)
             right_index += 1
+
+        if unconsumed and not range_is_empty(lower, upper):
+            yield lower, upper
+
+
+def _relate_bounds(
+    left: tuple[Interval, ...], right: tuple[Interval, ...]
+) -> RangeRelation:
+    """Relate two sorted, disjoint, non-touching interval tuples.
+
+    Each interval must contain at least one version; empty tuples are allowed.
+    """
+    if not left:
+        return RangeRelation.EMPTY
+
+    covered = 0
+    left_index = right_index = 0
+    left_len, right_len = len(left), len(right)
+    while left_index < left_len and right_index < right_len:
+        left_lower, left_upper = left[left_index]
+        right_lower, right_upper = right[right_index]
+
+        contained = not left_lower < right_lower
+        lower = left_lower if contained else right_lower
+
+        if right_upper < left_upper:
+            upper = right_upper
+            right_index += 1
+            contained = False
         else:
-            if not range_is_empty(lower, upper):
-                result.append((lower, upper))
-    return tuple(result)
+            upper = left_upper
+            left_index += 1
+
+        if not range_is_empty(lower, upper):
+            if not contained:
+                return RangeRelation.OVERLAPPING
+            covered += 1
+
+    if covered == left_len:
+        return RangeRelation.SUBSET
+
+    # An overlap that was not a covered interval returned above, so nothing
+    # covered means nothing shared.
+    return RangeRelation.OVERLAPPING if covered else RangeRelation.DISJOINT
 
 
 def _canonical_floor(bounds: tuple[Interval, ...]) -> tuple[Interval, ...]:
@@ -444,70 +407,21 @@ def _struct_admits(
     return matches_bounds_only(bounds, parsed)
 
 
-def _bisect_predicate(
-    items: Sequence[Version], predicate: Callable[[Version], bool]
-) -> int:
-    """Return the first true position of a monotone predicate over versions."""
-    low, high = 0, len(items)
-    while low < high:
-        mid = (low + high) // 2
-        if predicate(items[mid]):
-            high = mid
-        else:
-            low = mid + 1
-    return low
-
-
-def _partition_indexes(
-    items: Sequence[Version], lower: LowerBound, upper: UpperBound
+def _interval_slice(
+    versions: Sequence[Version], lower: LowerBound, upper: UpperBound
 ) -> tuple[int, int]:
-    """Locate an interval's half-open slice in an ascending version list."""
-    above, below = lower._above, upper._below
-    start = 0 if above is None else _bisect_predicate(items, above)
-    stop = (
-        len(items)
-        if below is None
-        else _bisect_predicate(items, lambda version: not below(version))
-    )
+    """Return slice indices for an interval in an ascending version list."""
+    opens = lower._above
+    closes = upper._below
+
+    start = 0 if opens is None else bisect.bisect_left(versions, True, key=opens)
+
+    if closes is None:
+        stop = len(versions)
+    else:
+        stop = bisect.bisect_left(versions, True, key=lambda v: not closes(v))
+
     return start, stop
-
-
-def _lattice_release(version: Version, parts: int, *, above: bool) -> Version:
-    """The nearest ``parts``-component release to ``version`` on the lattice.
-
-    Truncates ``version``'s release to ``parts`` components, padding a shorter
-    release with zeros, to land on a lattice point at or below it. With
-    ``above`` the result must be strictly greater than ``version``, so a
-    truncation that lands at or below it is rounded up by one; otherwise a
-    truncation equal to ``version`` is kept and only a strictly smaller one is
-    rounded up.
-    """
-    release = version.release[:parts]
-    padded = (*release, *((0,) * (parts - len(release))))
-    candidate = Version.from_parts(epoch=version.epoch, release=padded)
-    if candidate > version or (not above and candidate == version):
-        return candidate
-    bumped = (*padded[:-1], padded[-1] + 1)
-    return Version.from_parts(epoch=version.epoch, release=bumped)
-
-
-def _release_boundary_point(
-    value: BoundaryVersion | Version | None, parts: int
-) -> Version | None:
-    """The lattice release one interval edge transitions membership at.
-
-    ``None`` for an unbounded (``-inf`` / ``+inf``) edge. A boundary sentinel
-    reports the smallest lattice release strictly above the version it sits
-    over (its final release when that version is a pre-release). A plain
-    version reports its own release projected onto the lattice: the release
-    itself when it is a lattice point, otherwise the smallest lattice release
-    above it.
-    """
-    if value is None:
-        return None
-    if isinstance(value, BoundaryVersion):
-        return _lattice_release(value.version, parts, above=True)
-    return _lattice_release(Version(value.base_version), parts, above=False)
 
 
 # Repr helpers:
@@ -1129,6 +1043,7 @@ class VersionRange:
     membership with ``in`` or :meth:`contains`, filter an iterable with
     :meth:`filter`, and convert back to a
     :class:`~packaging.specifiers.SpecifierSet` with :meth:`to_specifier_set`.
+    Use :meth:`relation` to obtain subset and disjointness results together.
 
     The configured pre-release policy of the originating specifier set carries
     onto the range and controls whether pre-releases are admitted under ``in``,
@@ -1291,9 +1206,7 @@ class VersionRange:
         return self._admit_arbitrary and self._bounds == FULL_RANGE
 
     def _is_plain(self) -> bool:
-        """True when membership is decided by ``_bounds`` alone, enabling the
-        bounds-only fast paths in :meth:`is_subset` and :meth:`is_disjoint`.
-        """
+        """True when ``_bounds`` alone decides membership."""
         return (
             not self._has_literals()
             and not self._admit_arbitrary
@@ -1419,44 +1332,27 @@ class VersionRange:
         include_upper: bool = True,
         prereleases: bool | None = None,
     ) -> VersionRange:
-        """Return the raw version-order interval from ``lower`` to ``upper``.
+        """Construct an interval using PEP 440 version ordering.
 
-        A single interval in the PEP 440 total order. The bounds are pure order
-        cuts, not specifier semantics: ``None`` on a side is unbounded there.
-        Both ends are inclusive by default, so ``from_bounds(v, v)`` is
-        :meth:`singleton`; pass ``include_lower=False`` or ``include_upper=False``
-        for a half-open interval.
+        Bounds are inclusive by default; ``None`` means unbounded and ignores
+        its inclusion flag. With no bounds, the default policy gives
+        ``full(admit_arbitrary=False)``. Inverted bounds, or equal bounds with
+        either endpoint excluded, give an empty range. Specifier-specific
+        exclusions do not apply.
 
-        >>> "2.0" in VersionRange.from_bounds("1.0", "2.0")
-        True
-        >>> "2.0" in VersionRange.from_bounds("1.0", "2.0", include_upper=False)
-        False
-        >>> VersionRange.from_bounds("1.5", "1.5") == VersionRange.singleton("1.5")
-        True
+        At the default policy, a pre-release bound does not opt in
+        :meth:`filter`; :meth:`contains` still checks its membership.
 
-        Membership is decided by the bounds alone, so pre-releases, post-releases,
-        and locals inside them are members even where the matching specifier
-        would exclude them:
+        :param lower: the lower version, or ``None`` for no lower bound.
+        :param upper: the upper version, or ``None`` for no upper bound.
+        :param include_lower: whether to include the lower endpoint.
+        :param include_upper: whether to include the upper endpoint.
+        :param prereleases: the configured pre-release policy. ``None`` leaves
+            it unset; ``True`` admits and ``False`` excludes pre-releases.
+        :raises packaging.version.InvalidVersion: if a bound is an invalid
+            version string.
 
-        >>> "1.0.post1" in VersionRange.from_bounds("1.0", "2.0", include_lower=False)
-        True
-        >>> "1.0.post1" in SpecifierSet(">1.0,<2.0").to_range()
-        False
-        >>> "2.0rc1" in VersionRange.from_bounds("1.0", "2.0")
-        True
-        >>> "2.0rc1" in SpecifierSet(">=1.0,<2.0").to_range()
-        False
-
-        An inverted pair, or an equal pair with either end exclusive, is the
-        empty range; an unbounded pair is the versions-only full range.
-
-        >>> VersionRange.from_bounds("2.0", "1.0").is_empty
-        True
-        >>> VersionRange.from_bounds() == VersionRange.full(admit_arbitrary=False)
-        True
-
-        :raises packaging.version.InvalidVersion: if ``lower`` or ``upper`` is a
-            string that does not parse as a PEP 440 version.
+        .. versionadded:: 26.4
         """
         if lower is not None and not isinstance(lower, Version):
             lower = Version(lower)
@@ -1627,7 +1523,7 @@ class VersionRange:
         if not other._bounds and not other._admit:
             return self
 
-        new_bounds = _difference_ranges(self._bounds, other._bounds)
+        new_bounds = tuple(_difference_ranges(self._bounds, other._bounds))
 
         # Match ``self & ~other`` on the opt-in region: a complement carries no
         # opt-in, so only ``self``'s region survives. ``other`` acts as a
@@ -1752,15 +1648,6 @@ class VersionRange:
         False
         >>> VersionRange.empty().is_subset(outer)
         True
-
-        A range with an exclusion is a subset of its span, but the span is not a
-        subset of it:
-
-        >>> punctured = SpecifierSet(">=1.0,<2.0,!=1.5").to_range()
-        >>> punctured.is_subset(outer)
-        True
-        >>> outer.is_subset(punctured)
-        False
         """
         self._check_policy_compat(other)
 
@@ -1771,54 +1658,11 @@ class VersionRange:
 
         # Plain ranges: subset reduces to bounds containment, no algebra needed.
         if self._is_plain() and other._is_plain():
-            return _subset_bounds(self._bounds, other._bounds)
+            return next(_difference_ranges(self._bounds, other._bounds), None) is None
 
         # difference (unlike intersection with the one-way complement) resolves
         # ``===`` literals against both operands, so it stays correct for them.
         return self.difference(other).is_empty
-
-    def relation(self, other: VersionRange) -> RangeRelation:
-        """Return the :class:`RangeRelation` of ``self`` against ``other``.
-
-        :attr:`~RangeRelation.SUBSET` is containment,
-        :attr:`~RangeRelation.DISJOINT` is separation,
-        :attr:`~RangeRelation.OVERLAPPING` is neither, and
-        :attr:`~RangeRelation.EMPTY` is an empty ``self``, which is a subset
-        of everything and shares a member with nothing.
-
-        Both operands must share the same configured pre-release policy;
-        otherwise :exc:`ValueError` is raised.
-
-        >>> inner = SpecifierSet(">=1.5,<1.8").to_range()
-        >>> outer = SpecifierSet(">=1.0,<2.0").to_range()
-        >>> inner.relation(outer)
-        RangeRelation.SUBSET
-        >>> outer.relation(SpecifierSet(">=5.0").to_range())
-        RangeRelation.DISJOINT
-        >>> VersionRange.empty().relation(outer)
-        RangeRelation.EMPTY
-        """
-        # Identity settles both answers and the policy check with it.
-        if self is other:
-            return _EMPTY_REL if self.is_empty else _SUBSET_REL
-
-        self._check_policy_compat(other)
-
-        if self._is_plain() and other._is_plain():
-            # On plain ranges the bounds decide membership, so equal bounds
-            # settle both answers without a walk.
-            if self._bounds == other._bounds:
-                return _SUBSET_REL if self._bounds else _EMPTY_REL
-            return _relate_bounds(self._bounds, other._bounds)
-
-        subset = (
-            not (self._arbitrary_active() and not other._arbitrary_active())
-            and self.difference(other).is_empty
-        )
-        disjoint = self.intersection(other).is_empty
-        if subset:
-            return _EMPTY_REL if disjoint else _SUBSET_REL
-        return _DISJOINT_REL if disjoint else _OVERLAPPING_REL
 
     def is_superset(self, other: VersionRange) -> bool:
         """Return whether every member of other is also a member of self.
@@ -1850,20 +1694,42 @@ class VersionRange:
         True
         >>> a.is_disjoint(SpecifierSet(">=1.5,<2.5").to_range())
         False
-
-        A range pinned to a version the other excludes is disjoint from it:
-
-        >>> SpecifierSet("==1.5").to_range().is_disjoint(
-        ...     SpecifierSet(">=1.0,<2.0,!=1.5").to_range()
-        ... )
-        True
         """
         self._check_policy_compat(other)
 
-        # Plain ranges: disjointness is an empty bounds intersection.
+        # Plain ranges: stop as soon as the bounds overlap.
         if self._is_plain() and other._is_plain():
-            return _disjoint_bounds(self._bounds, other._bounds)
+            return ranges_are_disjoint(self._bounds, other._bounds)
         return self.intersection(other).is_empty
+
+    def relation(self, other: VersionRange) -> RangeRelation:
+        """Return combined subset and disjointness results.
+
+        The result's flags agree with :meth:`is_subset` and :meth:`is_disjoint`.
+        Both operands must share the same configured pre-release policy;
+        otherwise :exc:`ValueError` is raised.
+
+        .. versionadded:: 26.4
+        """
+        if self is other:
+            return RangeRelation.EMPTY if self.is_empty else RangeRelation.SUBSET
+
+        self._check_policy_compat(other)
+
+        # Plain ranges: one walk over the bounds settles both answers.
+        if self._is_plain() and other._is_plain():
+            if self._bounds == other._bounds:
+                return RangeRelation.SUBSET if self._bounds else RangeRelation.EMPTY
+            return _relate_bounds(self._bounds, other._bounds)
+
+        subset = (
+            not (self._arbitrary_active() and not other._arbitrary_active())
+            and self.difference(other).is_empty
+        )
+        disjoint = self.intersection(other).is_empty
+        if subset:
+            return RangeRelation.EMPTY if disjoint else RangeRelation.SUBSET
+        return RangeRelation.DISJOINT if disjoint else RangeRelation.OVERLAPPING
 
     def _same_releases(self, other: VersionRange) -> bool:
         """Whether self and other admit the same non-pre-release versions.
@@ -2021,62 +1887,42 @@ class VersionRange:
             yield from all_nonfinal
 
     def snap_bounds(self, versions: Iterable[Version | str]) -> VersionRange:
-        """Snap each finite bound inward onto the given versions.
+        """Narrow finite bounds using the supplied versions.
 
-        Returns a subset of self that agrees with self on membership of every
-        given version: each finite segment end moves inward onto the outermost
-        given version its segment contains, and a bound with no given version
-        to land on is unchanged, as are unbounded ends.
+        The result never adds versions. ``contains`` and ``filter`` give the
+        same results for the supplied versions. Pre-release settings and
+        ``===`` rules still apply, but do not affect the choice of bounds.
+        Unbounded ends and intervals containing no supplied version stay
+        unchanged. Calling this again with the same versions leaves the result
+        unchanged.
 
-        Solver arithmetic and set algebra leave bounds at versions nobody
-        released; snapping them onto real versions yields the range a human
-        would write, and the subset guarantee means the snapped range never
-        admits a version the original excluded, even if the given list was
-        stale.
+        Callers can use the result in messages. Keep the original range during
+        solving: versions outside the supplied list can affect range comparisons.
 
-        ``versions`` may be any iterable of versions or version strings, in any
-        order; it is sorted internally. ``snap_bounds([])`` returns an equal
-        range.
-
-        >>> r = SpecifierSet(">=1.0,<2.0").to_range()
-        >>> r.snap_bounds(["1.2", "1.5", "1.8"])
-        <VersionRange '[1.2, 1.8]'>
-        >>> SpecifierSet(">=1.0").to_range().snap_bounds(["1.2", "1.5"])
-        <VersionRange '[1.2, +inf)'>
-        >>> r.snap_bounds([]) == r
-        True
-
-        A version-order gap round-trips to the singleton it surrounds:
-
-        >>> versions = [Version("1.0"), Version("2.0"), Version("3.0")]
-        >>> gap = VersionRange.from_bounds(
-        ...     "1.0", "3.0", include_lower=False, include_upper=False
-        ... )
-        >>> gap.snap_bounds(versions) == VersionRange.singleton("2.0")
-        True
-
-        :raises packaging.version.InvalidVersion: if a string does not parse as a
+        :param versions: versions or version strings, in any order.
+        :raises packaging.version.InvalidVersion: if a string is not a valid
             PEP 440 version.
+
+        .. versionadded:: 26.4
         """
-        anchors = sorted(v if isinstance(v, Version) else Version(v) for v in versions)
+        # Parsed ahead of the early return, so an unparsable version is
+        # rejected whatever the range holds.
+        ordered = sorted(v if isinstance(v, Version) else Version(v) for v in versions)
         if not self._bounds:
             return self
 
         simplified: list[Interval] = []
         for lower, upper in self._bounds:
-            first_inside, first_above = _partition_indexes(anchors, lower, upper)
-            if first_inside >= first_above:
+            start, stop = _interval_slice(ordered, lower, upper)
+            if start >= stop:
                 simplified.append((lower, upper))
                 continue
+
             new_lower = (
-                lower
-                if lower.version is None
-                else LowerBound(anchors[first_inside], True)
+                lower if lower.version is None else LowerBound(ordered[start], True)
             )
             new_upper = (
-                upper
-                if upper.version is None
-                else UpperBound(anchors[first_above - 1], True)
+                upper if upper.version is None else UpperBound(ordered[stop - 1], True)
             )
             simplified.append((new_lower, new_upper))
 
@@ -2088,54 +1934,6 @@ class VersionRange:
             pre_region=self._pre_region,
             prereleases_configured=self._prereleases_configured,
         )
-
-    def release_intervals(
-        self, parts: int
-    ) -> tuple[tuple[Version | None, Version | None], ...]:
-        """The half-open release intervals on which this range is satisfied.
-
-        Projects the range onto the lattice of releases with ``parts`` numeric
-        components and returns the maximal ``[lower, upper)`` intervals it covers,
-        as ``(lower, upper)`` release pairs. ``None`` on a side is unbounded there.
-        Structure finer than the lattice, such as prereleases or posts between two
-        releases, is not represented.
-
-        >>> SpecifierSet(">=3.11.4").to_range().release_intervals(3)
-        ((<Version('3.11.4')>, None),)
-        >>> SpecifierSet("==3.11.4").to_range().release_intervals(3)
-        ((<Version('3.11.4')>, <Version('3.11.5')>),)
-
-        :raises ValueError: if ``parts`` is less than 1.
-        """
-        if parts < 1:
-            raise ValueError(f"parts must be at least 1, got {parts}")
-
-        intervals: list[tuple[Version | None, Version | None]] = []
-        for lower, upper in self._bounds:
-            lower_point = _release_boundary_point(lower.version, parts)
-            upper_point = _release_boundary_point(upper.version, parts)
-            if (
-                lower_point is not None
-                and upper_point is not None
-                and lower_point >= upper_point
-            ):
-                continue
-            if intervals:
-                prev_lower, prev_upper = intervals[-1]
-                if (
-                    prev_upper is not None
-                    and lower_point is not None
-                    and prev_upper >= lower_point
-                ):
-                    merged_upper = (
-                        None
-                        if upper_point is None
-                        else max(prev_upper, upper_point)
-                    )
-                    intervals[-1] = (prev_lower, merged_upper)
-                    continue
-            intervals.append((lower_point, upper_point))
-        return tuple(intervals)
 
     @classmethod
     def _from_specifier_set(cls, specifier_set: SpecifierSet) -> VersionRange:
@@ -2189,7 +1987,9 @@ class VersionRange:
         PEP 440 has no syntax for the strict singleton ``{V}`` (an exclusive
         plain-version bound), a disjoint union of two or more intervals, or a
         partial pre-release opt-in region, so ranges built by set algebra often
-        return ``None``. A gap that takes more than ``_MAX_EXCLUSION_RUN``
+        return ``None``. Raw bounds can also return ``None``: ``<=2.0`` admits
+        ``2.0+local``, ``>1.0`` excludes ``1.0.post1``, and ``>=1.0a1`` opts
+        in pre-releases. A gap that takes more than ``_MAX_EXCLUSION_RUN``
         contiguous ``!=`` exclusions to spell returns ``None`` too,
         rather than a pathologically long chain; reaching that cap takes either
         set algebra or a specifier set that already spells the gap out with

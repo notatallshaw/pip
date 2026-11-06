@@ -186,10 +186,6 @@ _LIST_FIELDS = {
     "import_namespaces",
 }
 
-_DICT_FIELDS = {
-    "project_urls",
-}
-
 
 def _parse_keywords(data: str) -> list[str]:
     """Split a string of comma-separated keywords into a list of keywords."""
@@ -539,9 +535,6 @@ def parse_email(data: bytes | str) -> tuple[RawMetadata, dict[str, list[str]]]:
     return cast("RawMetadata", raw), unparsed
 
 
-_NOT_FOUND = object()
-
-
 # Keep the two values in sync.
 _VALID_METADATA_VERSIONS = [
     "1.0",
@@ -775,6 +768,7 @@ class _Validator(Generic[T]):
             if (
                 pathlib.PurePosixPath(path).is_absolute()
                 or pathlib.PureWindowsPath(path).is_absolute()
+                or pathlib.PureWindowsPath(path).drive
             ):
                 raise self._invalid_metadata(
                     f"{path!r} is invalid for {self.raw_name!r}, paths must be relative"

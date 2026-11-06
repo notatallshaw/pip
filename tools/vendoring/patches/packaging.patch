@@ -1,25 +1,19 @@
 diff --git a/src/pip/_vendor/packaging/PROVENANCE.md b/src/pip/_vendor/packaging/PROVENANCE.md
 new file mode 100644
-index 0000000..b5b17ba
 --- /dev/null
 +++ b/src/pip/_vendor/packaging/PROVENANCE.md
-@@ -0,0 +1,11 @@
-+# Packaging snapshot used by the nab integration
+@@ -0,0 +1,7 @@
++# Packaging upstream snapshot
 +
-+The base distribution is packaging 26.3. `tools/vendoring/patches/packaging.patch` reproduces the integration's patched snapshot through pip's normal vendoring command. This is a prototype bridge, not an unmodified packaging release.
++The base distribution is packaging 26.3. The prototype's vendoring patch replaces its source with upstream packaging commit `713d0d78924ab2686c513dde058ce6aafc63e766`. The module version stays at 26.3 to agree with the released distribution in pip's vendor inventory; the selected upstream source identifies itself as 26.4.dev0.
 +
-+The module's version label stays at the base release so pip's vendor inventory and debug output agree.
++The source includes the public version-range API used by the resolver. No Nab-specific packaging features are retained. The only source change from the upstream commit is the inventory version label; pip's vendoring tool applies its normal namespace transformations.
 +
-+The implementation was imported from `nab-provider/src/nab_provider/_vendor/packaging` in notatallshaw/nab at `b88405a017806d8f7362f4c8691b9f3b78a8c26d`. That snapshot includes version-range operations and prepared marker evaluation used by the integration. Its upstream pin, accumulated patch and original provenance are in that nab revision; their task paths refer to nab, not this pip checkout.
-+
-+Keep runtime changes separate from vendoring reproducibility changes. Regenerate the pip patch from pristine vendored packaging 26.3 and the intended snapshot, then run `nox -s vendoring` and verify that it leaves the committed tree unchanged. Do not hand-edit the generated patch or silently replace the snapshot with another revision.
-+
-+The upstream Apache-2.0 and BSD-2-Clause license texts remain alongside the source. Packaging unvendoring is outside this prototype.
++Regenerate `tools/vendoring/patches/packaging.patch` from pristine packaging 26.3 and the selected upstream source, then verify it through `nox -s vendoring`. This unreleased snapshot remains a prototype dependency. The upstream Apache-2.0 and BSD-2-Clause license texts remain beside the source.
 diff --git a/src/pip/_vendor/packaging/_manylinux.py b/src/pip/_vendor/packaging/_manylinux.py
-index 86de1e6..c5edbb7 100644
 --- a/src/pip/_vendor/packaging/_manylinux.py
 +++ b/src/pip/_vendor/packaging/_manylinux.py
-@@ -31,7 +31,7 @@ _ALLOWED_ARCHS = {
+@@ -31,7 +31,7 @@
  
  
  @contextlib.contextmanager
@@ -29,10 +23,9 @@ index 86de1e6..c5edbb7 100644
          with open(path, "rb") as f:
              yield ELFFile(f)
 diff --git a/src/pip/_vendor/packaging/_parser.py b/src/pip/_vendor/packaging/_parser.py
-index 9331b4b..1efb387 100644
 --- a/src/pip/_vendor/packaging/_parser.py
 +++ b/src/pip/_vendor/packaging/_parser.py
-@@ -8,7 +8,7 @@ from __future__ import annotations
+@@ -8,7 +8,7 @@
  
  import ast
  from collections.abc import Sequence
@@ -41,7 +34,7 @@ index 9331b4b..1efb387 100644
  
  from ._tokenizer import DEFAULT_RULES, ParserSyntaxError, Tokenizer
  
-@@ -86,10 +86,10 @@ class Op(Node):
+@@ -86,10 +86,10 @@
  
  
  MarkerLogical = Literal["and", "or"]
@@ -55,29 +48,21 @@ index 9331b4b..1efb387 100644
  
  
  class ParsedRequirement(NamedTuple):
-@@ -394,8 +394,15 @@ def process_env_var(env_var: str) -> Variable:
+@@ -394,6 +394,10 @@
  
  
  def process_python_str(python_str: str) -> Value:
--    value = ast.literal_eval(python_str)
--    return Value(str(value))
-+    # QUOTED_STRING admits no prefix and no embedded delimiter, so an ASCII body
-+    # holding no backslash, line break or NUL is what the literal parse returns.
-+    # The rest keeps that parse, for the escapes it expands and the bodies it rejects.
-+    body = python_str[1:-1]
-+    if body.isascii() and not (
-+        "\\" in body or "\n" in body or "\r" in body or "\0" in body
-+    ):
-+        return Value(body)
-+    return Value(str(ast.literal_eval(python_str)))
++    # The tokenizer guarantees matching delimiters with no embedded delimiter.
++    if "\\" not in python_str and python_str.isprintable():
++        return Value(python_str[1:-1])
++
+     value = ast.literal_eval(python_str)
+     return Value(str(value))
  
- 
- def _parse_marker_op(tokenizer: Tokenizer) -> Op:
 diff --git a/src/pip/_vendor/packaging/_ranges.py b/src/pip/_vendor/packaging/_ranges.py
-index 5370ec8..29c32bc 100644
 --- a/src/pip/_vendor/packaging/_ranges.py
 +++ b/src/pip/_vendor/packaging/_ranges.py
-@@ -17,11 +17,10 @@ from .version import InvalidVersion, Version
+@@ -17,11 +17,10 @@
  
  if TYPE_CHECKING:
      from collections.abc import Callable, Iterable, Iterator, Sequence
@@ -90,18 +75,25 @@ index 5370ec8..29c32bc 100644
      _BoundaryOrderKey = tuple[int, tuple[int, ...], _BoundaryOrderSuffix, float]
  
  __all__ = [
-@@ -83,6 +82,10 @@ class BoundaryVersion:
+@@ -34,6 +33,7 @@
+     "least_version_above",
+     "matches_bounds_only",
+     "range_is_empty",
++    "ranges_are_disjoint",
+     "ranges_are_prerelease_only",
+     "resolve_prereleases",
+     "standard_ranges",
+@@ -83,6 +83,9 @@
          "version",
      )
  
-+    #: A boundary has no PEP 440 comparison key. Bound ordering reads this off
-+    #: either operand type, so a boundary falls back to the version operators.
++    # Synthetic boundaries must use version operators rather than cached keys.
 +    _key_cache: None = None
 +
      def __init__(self, version: Version, kind: BoundaryKind) -> None:
          self.version = version
          self.kind = kind
-@@ -172,7 +175,7 @@ class BoundaryVersion:
+@@ -172,14 +175,15 @@
  
  
  if TYPE_CHECKING:
@@ -110,36 +102,46 @@ index 5370ec8..29c32bc 100644
  
  
  @functools.total_ordering
-@@ -187,6 +190,11 @@ class LowerBound:
+ class LowerBound:
+     """Lower bound of a version range.
+ 
+-    A version *v* of ``None`` means unbounded below (-inf).
++    A version *v* of ``None`` means unbounded below (-inf), with
++    ``inclusive`` forced to ``False``.
+     At equal versions, ``[v`` sorts before ``(v`` because an inclusive
+     bound starts earlier.
+     """
+@@ -187,6 +191,10 @@
      __slots__ = ("_above", "inclusive", "version")
  
      def __init__(self, version: _VersionOrBoundary, inclusive: bool) -> None:
-+        # -inf is not a version, so "inclusive of -inf" has no content;
-+        # canonicalizing it keeps the bound order total.
++        # Two spellings of -inf would sort above each other under total_ordering.
 +        if version is None:
 +            inclusive = False
 +
          self.version = version
          self.inclusive = inclusive
          # Pre-bind a predicate "is parsed at or above this lower
-@@ -219,11 +227,51 @@ class LowerBound:
+@@ -219,10 +227,55 @@
              return other.version is not None
          if other.version is None:
              return False
 -        if self.version != other.version:
-+        # A boundary has no key, and a version's is computed on first use.
+-            return self.version < other.version
++
++        # Use cached keys when both exist; cold versions and boundaries use operators.
 +        self_key = self.version._key_cache
 +        other_key = other.version._key_cache
-+        if self_key is not None and other_key is not None:
-+            if self_key != other_key:
-+                return self_key < other_key
-+        elif self.version != other.version:
-             return self.version < other.version
++        if self_key is None or other_key is None:
++            if self.version != other.version:
++                return self.version < other.version
++        elif self_key != other_key:
++            return self_key < other_key
++
          # [v < (v: inclusive starts earlier.
          return self.inclusive and not other.inclusive
- 
-+    # Written out rather than left to functools.total_ordering, whose shims
-+    # reach the same answer through ``__lt__`` and ``__eq__``.
++
++    # Explicit operators avoid total_ordering's repeated comparison dispatch.
 +    def __gt__(self, other: LowerBound) -> bool:
 +        if not isinstance(other, LowerBound):
 +            return NotImplemented
@@ -147,13 +149,15 @@ index 5370ec8..29c32bc 100644
 +            return False
 +        if other.version is None:
 +            return True
++
 +        self_key = self.version._key_cache
 +        other_key = other.version._key_cache
-+        if self_key is not None and other_key is not None:
-+            if self_key != other_key:
-+                return not self_key < other_key
-+        elif self.version != other.version:
-+            return not self.version < other.version
++        if self_key is None or other_key is None:
++            if self.version != other.version:
++                return other.version < self.version
++        elif self_key != other_key:
++            return other_key < self_key
++
 +        return other.inclusive and not self.inclusive
 +
 +    def __le__(self, other: LowerBound) -> bool:
@@ -163,46 +167,65 @@ index 5370ec8..29c32bc 100644
 +            return True
 +        if other.version is None:
 +            return False
++
 +        self_key = self.version._key_cache
 +        other_key = other.version._key_cache
-+        if self_key is not None and other_key is not None:
-+            if self_key != other_key:
-+                return self_key < other_key
-+        elif self.version != other.version:
-+            return self.version < other.version
-+        return self.inclusive or not other.inclusive
++        if self_key is None or other_key is None:
++            if self.version != other.version:
++                return self.version < other.version
++        elif self_key != other_key:
++            return self_key < other_key
 +
++        return self.inclusive or not other.inclusive
+ 
      def __hash__(self) -> int:
          return hash((self.version, self.inclusive))
+@@ -236,7 +289,8 @@
+ class UpperBound:
+     """Upper bound of a version range.
  
-@@ -244,6 +292,10 @@ class UpperBound:
+-    A version *v* of ``None`` means unbounded above (+inf).
++    A version *v* of ``None`` means unbounded above (+inf), with
++    ``inclusive`` forced to ``False``.
+     At equal versions, ``v)`` sorts before ``v]`` because an exclusive
+     bound ends earlier.
+     """
+@@ -244,6 +298,10 @@
      __slots__ = ("_below", "inclusive", "version")
  
      def __init__(self, version: _VersionOrBoundary, inclusive: bool) -> None:
-+        # See LowerBound: +inf carries no inclusivity either.
++        # Two spellings of +inf would sort above each other under total_ordering.
 +        if version is None:
 +            inclusive = False
 +
          self.version = version
          self.inclusive = inclusive
          # Pre-bind a predicate "is parsed at or below this upper
-@@ -278,11 +330,34 @@ class UpperBound:
+@@ -273,15 +331,41 @@
+     def __lt__(self, other: UpperBound) -> bool:
+         if not isinstance(other, UpperBound):
+             return NotImplemented
+-        # Nothing < +inf (except +inf itself).
++        # An unbounded upper endpoint does not sort before any endpoint.
+         if self.version is None:
              return False
          if other.version is None:
              return True
 -        if self.version != other.version:
-+        # See LowerBound.__lt__ for why this reads the cached keys.
+-            return self.version < other.version
++
++        # Use cached keys when both exist; cold versions and boundaries use operators.
 +        self_key = self.version._key_cache
 +        other_key = other.version._key_cache
-+        if self_key is not None and other_key is not None:
-+            if self_key != other_key:
-+                return self_key < other_key
-+        elif self.version != other.version:
-             return self.version < other.version
++        if self_key is None or other_key is None:
++            if self.version != other.version:
++                return self.version < other.version
++        elif self_key != other_key:
++            return self_key < other_key
++
          # v) < v]: exclusive ends earlier.
          return not self.inclusive and other.inclusive
- 
-+    # Written out for the same reason as on ``LowerBound``.
++
 +    def __gt__(self, other: UpperBound) -> bool:
 +        if not isinstance(other, UpperBound):
 +            return NotImplemented
@@ -210,23 +233,50 @@ index 5370ec8..29c32bc 100644
 +            return other.version is not None
 +        if other.version is None:
 +            return False
++
 +        self_key = self.version._key_cache
 +        other_key = other.version._key_cache
-+        if self_key is not None and other_key is not None:
-+            if self_key != other_key:
-+                return not self_key < other_key
-+        elif self.version != other.version:
-+            return not self.version < other.version
-+        return self.inclusive and not other.inclusive
++        if self_key is None or other_key is None:
++            if self.version != other.version:
++                return other.version < self.version
++        elif self_key != other_key:
++            return other_key < self_key
 +
++        return self.inclusive and not other.inclusive
+ 
      def __hash__(self) -> int:
          return hash((self.version, self.inclusive))
+@@ -524,6 +608,26 @@
+             right_index += 1
  
+     return result
++
++
++def ranges_are_disjoint(left: Sequence[Interval], right: Sequence[Interval]) -> bool:
++    """Test whether two sorted, non-overlapping interval lists are disjoint.
++
++    Each interval must contain at least one version; empty input lists are allowed.
++    """
++    left_index = right_index = 0
++    while left_index < len(left) and right_index < len(right):
++        left_lower, left_upper = left[left_index]
++        right_lower, right_upper = right[right_index]
++
++        if range_is_empty(left_lower, right_upper):
++            right_index += 1
++        elif range_is_empty(right_lower, left_upper):
++            left_index += 1
++        else:
++            return False
++
++    return True
+ 
+ 
+ def filter_by_ranges(
 diff --git a/src/pip/_vendor/packaging/_tokenizer.py b/src/pip/_vendor/packaging/_tokenizer.py
-index db7cd17..7158421 100644
 --- a/src/pip/_vendor/packaging/_tokenizer.py
 +++ b/src/pip/_vendor/packaging/_tokenizer.py
-@@ -11,10 +11,8 @@ if TYPE_CHECKING:
+@@ -11,10 +11,8 @@
      from collections.abc import Generator, Mapping
  
  
@@ -238,7 +288,16 @@ index db7cd17..7158421 100644
      name: str
      text: str
      position: int
-@@ -179,7 +177,7 @@ class Tokenizer:
+@@ -84,7 +82,7 @@
+         re.VERBOSE | re.IGNORECASE,
+     ),
+     "AT": re.compile(r"\@"),
+-    "URL": re.compile(r"[^ \t]+"),
++    "URL": re.compile(r"\S+"),
+     "IDENTIFIER": re.compile(r"\b[a-zA-Z0-9][a-zA-Z0-9._-]*\b"),
+     "VERSION_PREFIX_TRAIL": re.compile(r"\.\*"),
+     "VERSION_LOCAL_LABEL_TRAIL": re.compile(r"\+[a-z0-9]+(?:[-_\.][a-z0-9]+)*"),
+@@ -179,7 +177,7 @@
      @contextlib.contextmanager
      def enclosing_tokens(
          self, open_token: str, close_token: str, *, around: str
@@ -247,11 +306,158 @@ index db7cd17..7158421 100644
          if self.check(open_token):
              open_position = self.position
              self.read()
+diff --git a/src/pip/_vendor/packaging/dependency_groups.py b/src/pip/_vendor/packaging/dependency_groups.py
+--- a/src/pip/_vendor/packaging/dependency_groups.py
++++ b/src/pip/_vendor/packaging/dependency_groups.py
+@@ -123,8 +123,6 @@
+         self._parsed_groups: dict[
+             str, tuple[Requirement | DependencyGroupInclude, ...]
+         ] = {}
+-        # a map of group names to their ancestors, used for cycle detection
+-        self._include_graph_ancestors: dict[str, tuple[str, ...]] = {}
+         # a cache of completed resolutions to Requirement lists
+         self._resolve_cache: dict[str, tuple[Requirement, ...]] = {}
+ 
+@@ -152,67 +150,64 @@
+         """
+         group = _normalize_name(group)
+ 
+-        with _ErrorCollector().on_exit(
+-            f"[dependency-groups] data for {group!r} was malformed"
+-        ) as errors:
+-            return self._resolve(group, group, errors)
+-
+-    def _resolve(
+-        self, group: str, requested_group: str, errors: _ErrorCollector
+-    ) -> tuple[Requirement, ...]:
+-        """
+-        This is a helper for cached resolution to strings. It preserves the name of the
+-        group which the user initially requested in order to present a clearer error in
+-        the event that a cycle is detected.
+-
+-        :param group: The normalized name of the group to resolve.
++        if group not in self._resolve_cache:
++            with _ErrorCollector().on_exit(
++                f"[dependency-groups] data for {group!r} was malformed"
++            ) as errors:
++                self._validate(group, group, [], set(), errors)
++
++        return self._resolve(group)
++
++    def _validate(
++        self,
++        group: str,
++        requested_group: str,
++        stack: list[str],
++        visited: set[str],
++        errors: _ErrorCollector,
++    ) -> None:
++        """
++        Parse every group reachable from ``group`` exactly once and record parse
++        errors and include cycles in ``errors``.
++
++        :param group: The normalized name of the group to validate.
+         :param requested_group: The group which was used in the original, user-facing
+             request.
+-        """
+-        if group in self._resolve_cache:
+-            return self._resolve_cache[group]
+-
+-        parsed = self._parse_group(group, errors)
+-
+-        resolved_group = []
+-
+-        for item in parsed:
+-            if isinstance(item, Requirement):
+-                resolved_group.append(item)
+-            elif isinstance(item, DependencyGroupInclude):
++        :param stack: The groups on the current include path.
++        :param visited: The groups which were already validated in this call.
++        :param errors: An error collector in active use.
++        """
++        visited.add(group)
++        stack.append(group)
++        for item in self._parse_group(group, errors):
++            if isinstance(item, DependencyGroupInclude):
+                 include_group = _normalize_name(item.include_group)
+-
+-                # if a group is cyclic, record the error
+-                # otherwise, follow the include_group reference
+-                #
+-                # this allows us to examine all includes in a group, even in the
+-                # presence of errors
+-                if include_group in self._include_graph_ancestors.get(group, ()):
++                if include_group in stack:
+                     errors.error(
+                         CyclicDependencyGroup(
+                             requested_group, group, item.include_group
+                         )
+                     )
++                elif include_group not in visited:
++                    self._validate(
++                        include_group, requested_group, stack, visited, errors
++                    )
++        stack.pop()
++
++    def _resolve(self, group: str) -> tuple[Requirement, ...]:
++        """
++        Resolve a group which ``_validate`` accepted, using the cache.
++
++        :param group: The normalized name of the group to resolve.
++        """
++        if group not in self._resolve_cache:
++            resolved: list[Requirement] = []
++            for item in self._parsed_groups[group]:
++                if isinstance(item, Requirement):
++                    resolved.append(item)
+                 else:
+-                    self._include_graph_ancestors[include_group] = (
+-                        *self._include_graph_ancestors.get(group, ()),
+-                        group,
+-                    )
+-                    resolved_group.extend(
+-                        self._resolve(include_group, requested_group, errors)
+-                    )
+-            else:  # pragma: no cover
+-                raise NotImplementedError(
+-                    f"Invalid dependency group item after parse: {item}"
+-                )
+-
+-        # in the event that errors were detected, present the group as empty and do not
+-        # cache the result
+-        # this ensures that repeated access to a cyclic group will raise multiple errors
+-        if errors.errors:
+-            return ()
+-
+-        self._resolve_cache[group] = tuple(resolved_group)
++                    resolved.extend(self._resolve(_normalize_name(item.include_group)))
++            self._resolve_cache[group] = tuple(resolved)
+         return self._resolve_cache[group]
+ 
+     def _parse_group(
+@@ -242,6 +237,7 @@
+             return ()
+ 
+         elements: list[Requirement | DependencyGroupInclude] = []
++        error_count_before_parse = len(errors.errors)
+         for item in raw_group:
+             if isinstance(item, str):
+                 # packaging.requirements.Requirement parsing ensures that this is a
+@@ -271,7 +267,9 @@
+             else:
+                 errors.error(TypeError(f"Invalid dependency group item: {item!r}"))
+ 
+-        if errors.errors:
++        # If errors were detected while parsing this group, present the
++        # group as empty and do not cache the result.
++        if len(errors.errors) > error_count_before_parse:
+             return ()
+ 
+         self._parsed_groups[group] = tuple(elements)
 diff --git a/src/pip/_vendor/packaging/direct_url.py b/src/pip/_vendor/packaging/direct_url.py
-index 4de7acc..ceb6b0e 100644
 --- a/src/pip/_vendor/packaging/direct_url.py
 +++ b/src/pip/_vendor/packaging/direct_url.py
-@@ -152,7 +152,7 @@ class _DirectUrlRequiredKeyError(DirectUrlValidationError):
+@@ -152,24 +152,13 @@
          super().__init__("Missing required value", context=key)
  
  
@@ -260,10 +466,10 @@ index 4de7acc..ceb6b0e 100644
  class VcsInfo:
      """The version control information of a :class:`DirectUrl`."""
  
-@@ -160,17 +160,6 @@ class VcsInfo:
+     vcs: str
      commit_id: str
      requested_revision: str | None = None
- 
+-
 -    def __init__(
 -        self,
 -        *,
@@ -274,11 +480,10 @@ index 4de7acc..ceb6b0e 100644
 -        object.__setattr__(self, "vcs", vcs)
 -        object.__setattr__(self, "commit_id", commit_id)
 -        object.__setattr__(self, "requested_revision", requested_revision)
--
+ 
      @classmethod
      def _from_dict(cls, d: Mapping[str, Any]) -> Self:
-         # We can't validate vcs value because is not closed.
-@@ -181,19 +170,12 @@ class VcsInfo:
+@@ -181,18 +170,11 @@
          )
  
  
@@ -288,18 +493,17 @@ index 4de7acc..ceb6b0e 100644
      """The archive information of a :class:`DirectUrl`."""
  
      hashes: Mapping[str, str] | None = None
- 
+-
 -    def __init__(
 -        self,
 -        *,
 -        hashes: Mapping[str, str] | None = None,
 -    ) -> None:
 -        object.__setattr__(self, "hashes", hashes)
--
+ 
      @classmethod
      def _from_dict(cls, d: Mapping[str, Any]) -> Self:
-         hashes = _get(d, Mapping, "hashes")  # type: ignore[type-abstract]
-@@ -229,19 +211,12 @@ class ArchiveInfo:
+@@ -229,18 +211,11 @@
          return cls(hashes=hashes)
  
  
@@ -309,18 +513,17 @@ index 4de7acc..ceb6b0e 100644
      """The local directory information of a :class:`DirectUrl`."""
  
      editable: bool | None = None
- 
+-
 -    def __init__(
 -        self,
 -        *,
 -        editable: bool | None = None,
 -    ) -> None:
 -        object.__setattr__(self, "editable", editable)
--
+ 
      @classmethod
      def _from_dict(cls, d: Mapping[str, Any]) -> Self:
-         return cls(
-@@ -249,7 +224,7 @@ class DirInfo:
+@@ -249,7 +224,7 @@
          )
  
  
@@ -329,10 +532,11 @@ index 4de7acc..ceb6b0e 100644
  class DirectUrl:
      """A class representing a direct URL.
  
-@@ -262,21 +237,6 @@ class DirectUrl:
+@@ -261,21 +236,6 @@
+     vcs_info: VcsInfo | None = None
      dir_info: DirInfo | None = None
      subdirectory: str | None = None  # XXX Path or str?
- 
+-
 -    def __init__(
 -        self,
 -        *,
@@ -347,15 +551,13 @@ index 4de7acc..ceb6b0e 100644
 -        object.__setattr__(self, "vcs_info", vcs_info)
 -        object.__setattr__(self, "dir_info", dir_info)
 -        object.__setattr__(self, "subdirectory", subdirectory)
--
+ 
      @classmethod
      def _from_dict(cls, d: Mapping[str, Any]) -> Self:
-         direct_url = cls(
 diff --git a/src/pip/_vendor/packaging/errors.py b/src/pip/_vendor/packaging/errors.py
-index d1d47cf..912da38 100644
 --- a/src/pip/_vendor/packaging/errors.py
 +++ b/src/pip/_vendor/packaging/errors.py
-@@ -34,7 +34,7 @@ else:  # pragma: no cover
+@@ -34,7 +34,7 @@
              return f"{self.__class__.__name__}({self.message!r}, {self.exceptions!r})"
  
  
@@ -364,7 +566,7 @@ index d1d47cf..912da38 100644
  class _ErrorCollector:
      """
      Collect errors into ExceptionGroups.
-@@ -62,7 +62,7 @@ class _ErrorCollector:
+@@ -62,7 +62,7 @@
              raise ExceptionGroup(msg, self.errors)
  
      @contextlib.contextmanager
@@ -373,7 +575,7 @@ index d1d47cf..912da38 100644
          """
          Calls finalize if no uncollected errors were present.
  
-@@ -72,7 +72,7 @@ class _ErrorCollector:
+@@ -72,7 +72,7 @@
          self.finalize(msg)
  
      @contextlib.contextmanager
@@ -382,8 +584,31 @@ index d1d47cf..912da38 100644
          """
          Context manager to collect errors into the error list.
  
+diff --git a/src/pip/_vendor/packaging/licenses/__init__.py b/src/pip/_vendor/packaging/licenses/__init__.py
+--- a/src/pip/_vendor/packaging/licenses/__init__.py
++++ b/src/pip/_vendor/packaging/licenses/__init__.py
+@@ -107,11 +107,15 @@
+     # whitespace.
+     license_expression = raw_license_expression.replace("(", " ( ").replace(")", " ) ")
+     licenseref_prefix = "LicenseRef-"
+-    license_refs = {
+-        ref.lower(): "LicenseRef-" + ref[len(licenseref_prefix) :]
+-        for ref in license_expression.split()
+-        if ref.lower().startswith(licenseref_prefix.lower())
+-    }
++
++    # The idstring of a LicenseRef- is case-insensitive in SPDX, so all case
++    # variants of one ref use the spelling of the first occurrence.
++    license_refs: dict[str, str] = {}
++    for ref in license_expression.split():
++        if ref.lower().startswith(licenseref_prefix.lower()):
++            license_refs.setdefault(
++                ref.lower(), licenseref_prefix + ref[len(licenseref_prefix) :]
++            )
+ 
+     # Normalize to lower case so we can look up licenses/exceptions
+     # and so boolean operators are Python-compatible.
 diff --git a/src/pip/_vendor/packaging/licenses/_spdx.py b/src/pip/_vendor/packaging/licenses/_spdx.py
-index a277af2..5f98b80 100644
 --- a/src/pip/_vendor/packaging/licenses/_spdx.py
 +++ b/src/pip/_vendor/packaging/licenses/_spdx.py
 @@ -1,4 +1,3 @@
@@ -392,29 +617,20 @@ index a277af2..5f98b80 100644
  
  from typing import TypedDict
 diff --git a/src/pip/_vendor/packaging/markers.py b/src/pip/_vendor/packaging/markers.py
-index 51b6036..38cf1ae 100644
 --- a/src/pip/_vendor/packaging/markers.py
 +++ b/src/pip/_vendor/packaging/markers.py
-@@ -9,8 +9,9 @@ import operator
+@@ -9,8 +9,9 @@
  import os
  import platform
  import sys
 +from collections.abc import Callable
  from collections.abc import Set as AbstractSet
 -from typing import TYPE_CHECKING, Callable, Literal, TypedDict, Union, cast
-+from typing import TYPE_CHECKING, Literal, TypedDict, cast
++from typing import TYPE_CHECKING, Final, Literal, TypedDict, cast
  
  from ._parser import MarkerAtom, MarkerList, Op, Value, Variable
  from ._parser import parse_marker as _parse_marker
-@@ -29,6 +30,7 @@ __all__ = [
-     "UndefinedComparison",
-     "UndefinedEnvironmentName",
-     "default_environment",
-+    "prepare_environment",
- ]
- 
- 
-@@ -36,7 +38,7 @@ def __dir__() -> list[str]:
+@@ -36,7 +37,7 @@
      return __all__
  
  
@@ -423,100 +639,52 @@ index 51b6036..38cf1ae 100644
  EvaluateContext = Literal["metadata", "lock_file", "requirement"]
  """A ``typing.Literal`` enumerating valid marker evaluation contexts.
  
-@@ -206,27 +208,23 @@ def _normalize_extra_values(results: MarkerList) -> MarkerList:
+@@ -203,30 +204,28 @@
+     return [_normalize_extras(r) for r in results]
+ 
+ 
++_GROUP_TYPES: Final = (list, tuple)
++
++
  def _format_marker(
      marker: list[str] | MarkerAtom | str, first: bool | None = True
  ) -> str:
 -    assert isinstance(marker, (list, tuple, str))
--
--    # Unwrap a redundant [[...]] wrapper, but keep the nesting context so a
--    # nested group keeps the parentheses its and/or precedence needs.
++    if isinstance(marker, tuple):
++        lhs, op, rhs = marker
++        return f"{lhs.serialize()} {op.serialize()} {rhs.serialize()}"
++
++    if isinstance(marker, str):
++        return marker
+ 
+     # Unwrap a redundant [[...]] wrapper, but keep the nesting context so a
+     # nested group keeps the parentheses its and/or precedence needs.
 -    if (
 -        isinstance(marker, list)
 -        and len(marker) == 1
 -        and isinstance(marker[0], (list, tuple))
 -    ):
--        return _format_marker(marker[0], first=first)
-+    """Serialize parser output: a marker list, a three-node item, or an operator."""
-+    if isinstance(marker, tuple):
-+        lhs, op, rhs = marker
-+        return f"{lhs.serialize()} {op.serialize()} {rhs.serialize()}"
++    if len(marker) == 1 and isinstance(marker[0], _GROUP_TYPES):
+         return _format_marker(marker[0], first=first)
  
-     if isinstance(marker, list):
+-    if isinstance(marker, list):
 -        inner = (_format_marker(m, first=False) for m in marker)
-+        # Unwrap a redundant [[...]] wrapper, but keep the nesting context so a
-+        # nested group keeps the parentheses its and/or precedence needs.
-+        if len(marker) == 1 and isinstance(marker[0], (list, tuple)):
-+            return _format_marker(marker[0], first=first)
-+
-+        inner = [_format_marker(m, first=False) for m in marker]
-         if first:
-             return " ".join(inner)
+-        if first:
+-            return " ".join(inner)
 -        else:
 -            return "(" + " ".join(inner) + ")"
 -    elif isinstance(marker, tuple):
 -        return " ".join([m.serialize() for m in marker])
 -    else:
 -        return marker
-+        return "(" + " ".join(inner) + ")"
-+
-+    return marker
++    inner = [_format_marker(m, first=False) for m in marker]
++    if first:
++        return " ".join(inner)
++    return "(" + " ".join(inner) + ")"
  
  
  _operators: dict[str, Operator] = {
-@@ -377,6 +375,51 @@ def default_environment() -> Environment:
-     return cast("Environment", dict(_cached_default_environment()))
- 
- 
-+def prepare_environment(
-+    environment: Mapping[str, str | AbstractSet[str]] | None = None,
-+    context: EvaluateContext = "metadata",
-+) -> dict[str, str | AbstractSet[str]]:
-+    """Build the environment a marker is evaluated against.
-+
-+    The detected process environment merged with the ``context`` defaults and
-+    ``environment``, with ``extra`` canonicalized. Code evaluating many markers
-+    against one environment can build it once here and pass the result to
-+    :meth:`Marker.evaluate_prepared`, rather than having :meth:`Marker.evaluate`
-+    rebuild it on every call.
-+
-+    :param environment: Mapping containing keys and values to override the
-+       detected environment.
-+    :param EvaluateContext context: The context in which the marker is
-+        evaluated, which influences what marker names are considered valid.
-+        Accepted values are ``"metadata"`` (for core metadata; default),
-+        ``"lock_file"``, and ``"requirement"`` (i.e. all other situations).
-+    :returns: A fresh dict on every call, which the caller may mutate.
-+
-+    .. versionadded:: 26.4
-+    """
-+    current_environment = cast(
-+        "dict[str, str | AbstractSet[str]]", default_environment()
-+    )
-+    if context == "lock_file":
-+        current_environment |= {
-+            "extras": frozenset(),
-+            "dependency_groups": frozenset(),
-+        }
-+    elif context == "metadata":
-+        current_environment["extra"] = ""
-+
-+    if environment is not None:
-+        current_environment |= environment
-+        if "extra" in current_environment:
-+            # The API used to allow setting extra to None. We need to handle
-+            # this case for backwards compatibility. Also skip running
-+            # normalize name if extra is empty.
-+            extra = cast("str | None", current_environment["extra"])
-+            current_environment["extra"] = canonicalize_name(extra) if extra else ""
-+
-+    return _repair_python_full_version(current_environment)
-+
-+
- class Marker:
-     """Represents a parsed dependency marker expression.
- 
-@@ -397,7 +440,7 @@ class Marker:
+@@ -397,7 +396,7 @@
          release.
      """
  
@@ -525,7 +693,12 @@ index 51b6036..38cf1ae 100644
  
      def __init__(self, marker: str) -> None:
          # Note: We create a Marker object without calling this constructor in
-@@ -411,7 +454,7 @@ class Marker:
+@@ -407,11 +406,12 @@
+         # If this fails and throws an error, the repr still expects _markers to
+         # be defined.
+         self._markers: MarkerList = []
++        self._serialized: str | None = None
+ 
          try:
              self._markers = _normalize_extra_values(_parse_marker(marker))
              # The attribute `_markers` can be described in terms of a recursive type:
@@ -534,56 +707,35 @@ index 51b6036..38cf1ae 100644
              #
              # For example, the following expression:
              # python_version > "3.6" or (python_version == "3.6" and os_name == "unix")
-@@ -440,7 +483,13 @@ class Marker:
+@@ -437,10 +437,14 @@
+         """
+         new = cls.__new__(cls)
+         new._markers = markers
++        new._serialized = None
          return new
  
      def __str__(self) -> str:
 -        return _format_marker(self._markers)
-+        # _markers is never rebound after construction, so serialise once.
-+        try:
-+            return self._serialized
-+        except AttributeError:
-+            serialized = _format_marker(self._markers)
-+            self._serialized = serialized
-+            return serialized
++        # The parsed tree is private, so its formatted text can be reused.
++        if self._serialized is None:
++            self._serialized = _format_marker(self._markers)
++        return self._serialized
  
      def __repr__(self) -> str:
          return f"<{self.__class__.__name__}({str(self)!r})>"
-@@ -529,6 +578,7 @@ class Marker:
-             Added the ``context`` parameter, which influences which marker names
-             are considered valid.
-         """
-+        # Keep single evaluations free of preparation helper calls.
-         current_environment = cast(
-             "dict[str, str | AbstractSet[str]]", default_environment()
-         )
-@@ -553,6 +603,21 @@ class Marker:
-             self._markers, _repair_python_full_version(current_environment)
-         )
+@@ -460,6 +464,8 @@
+         return str(self)
  
-+    def evaluate_prepared(self, environment: dict[str, str | AbstractSet[str]]) -> bool:
-+        """Evaluate a marker against an already-prepared environment.
-+
-+        :param environment: The result of a :func:`prepare_environment` call.
-+        :raises UndefinedComparison: If the marker uses a comparison on values
-+            that are not valid versions per the :ref:`specification of version
-+            specifiers <pypug:version-specifiers>`.
-+        :raises UndefinedEnvironmentName: If the marker references a value that
-+            is missing from the evaluation environment.
-+        :returns: ``True`` if the marker matches, otherwise ``False``.
-+
-+        .. versionadded:: 26.4
-+        """
-+        return _evaluate_markers(self._markers, environment)
-+
- 
- def _pep440_python_full_version(python_full_version: str) -> str:
-     """
+     def __setstate__(self, state: object) -> None:
++        # State restoration can replace the tree on an existing instance.
++        self._serialized = None
+         if isinstance(state, str):
+             # New format (26.2+): just the marker expression string.
+             try:
 diff --git a/src/pip/_vendor/packaging/metadata.py b/src/pip/_vendor/packaging/metadata.py
-index 1061105..c139366 100644
 --- a/src/pip/_vendor/packaging/metadata.py
 +++ b/src/pip/_vendor/packaging/metadata.py
-@@ -10,7 +10,6 @@ import re
+@@ -10,7 +10,6 @@
  import typing
  from typing import (
      Any,
@@ -591,7 +743,7 @@ index 1061105..c139366 100644
      Generic,
      Literal,
      TypedDict,
-@@ -22,6 +21,8 @@ from . import version as version_module
+@@ -22,6 +21,8 @@
  from .errors import ExceptionGroup, _ErrorCollector
  
  if typing.TYPE_CHECKING:
@@ -600,11 +752,47 @@ index 1061105..c139366 100644
      from .licenses import NormalizedLicenseExpression
      from .version import Version
  
+@@ -183,10 +184,6 @@
+     "supported_platforms",
+     "import_names",
+     "import_namespaces",
+-}
+-
+-_DICT_FIELDS = {
+-    "project_urls",
+ }
+ 
+ 
+@@ -538,9 +535,6 @@
+     return cast("RawMetadata", raw), unparsed
+ 
+ 
+-_NOT_FOUND = object()
+-
+-
+ # Keep the two values in sync.
+ _VALID_METADATA_VERSIONS = [
+     "1.0",
+@@ -774,6 +768,7 @@
+             if (
+                 pathlib.PurePosixPath(path).is_absolute()
+                 or pathlib.PureWindowsPath(path).is_absolute()
++                or pathlib.PureWindowsPath(path).drive
+             ):
+                 raise self._invalid_metadata(
+                     f"{path!r} is invalid for {self.raw_name!r}, paths must be relative"
 diff --git a/src/pip/_vendor/packaging/pylock.py b/src/pip/_vendor/packaging/pylock.py
-index b797623..f981df9 100644
 --- a/src/pip/_vendor/packaging/pylock.py
 +++ b/src/pip/_vendor/packaging/pylock.py
-@@ -3,13 +3,12 @@ from __future__ import annotations
+@@ -1,15 +1,20 @@
++"""Read, validate, and select from pylock files.
++
++The public data model classes are frozen, keyword-only dataclasses whose
++attributes correspond to fields in the pylock file specification.
++"""
++
+ from __future__ import annotations
+ 
  import dataclasses
  import logging
  import re
@@ -619,13 +807,46 @@ index b797623..f981df9 100644
      Protocol,
      TypeVar,
      cast,
-@@ -322,33 +321,15 @@ class PylockSelectError(Exception):
+@@ -26,6 +31,7 @@
+ from .tags import create_compatible_tags_selector, sys_tags
+ from .utils import (
+     NormalizedName,
++    canonicalize_name,
+     is_normalized_name,
+     parse_sdist_filename,
+     parse_wheel_filename,
+@@ -78,7 +84,7 @@
+ 
+ def is_valid_pylock_path(path: Path) -> bool:
+     """Check if the given path is a valid pylock file path."""
+-    return path.name == "pylock.toml" or bool(_PYLOCK_FILE_NAME_RE.match(path.name))
++    return path.name == "pylock.toml" or bool(_PYLOCK_FILE_NAME_RE.fullmatch(path.name))
+ 
+ 
+ def _toml_key(key: str) -> str:
+@@ -252,12 +258,7 @@
+         return None
+     # If the path is relative it MAY use POSIX-style path separators explicitly
+     # for portability
+-    if "/" in path:
+-        return path.rsplit("/", 1)[-1]
+-    elif "\\" in path:
+-        return path.rsplit("\\", 1)[-1]
+-    else:
+-        return path
++    return path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+ 
+ 
+ def _url_name(url: str | None) -> str | None:
+@@ -322,32 +323,16 @@
      """
  
  
 -@dataclass(frozen=True, init=False)
 +@dataclass(frozen=True, kw_only=True, slots=True)
  class PackageVcs:
++    """A package installed from a version control system."""
++
      type: str
      url: str | None = None
      path: str | None = None
@@ -633,7 +854,7 @@ index b797623..f981df9 100644
 -    commit_id: str  # type: ignore[misc]
 +    commit_id: str
      subdirectory: str | None = None
- 
+-
 -    def __init__(
 -        self,
 -        *,
@@ -651,21 +872,22 @@ index b797623..f981df9 100644
 -        object.__setattr__(self, "requested_revision", requested_revision)
 -        object.__setattr__(self, "commit_id", commit_id)
 -        object.__setattr__(self, "subdirectory", subdirectory)
--
+ 
      @classmethod
      def _from_dict(cls, d: Mapping[str, Any]) -> Self:
-         package_vcs = cls(
-@@ -363,24 +344,12 @@ class PackageVcs:
+@@ -363,23 +348,13 @@
          return package_vcs
  
  
 -@dataclass(frozen=True, init=False)
 +@dataclass(frozen=True, kw_only=True, slots=True)
  class PackageDirectory:
++    """A package installed from a local directory."""
++
      path: str
      editable: bool | None = None
      subdirectory: str | None = None
- 
+-
 -    def __init__(
 -        self,
 -        *,
@@ -677,17 +899,18 @@ index b797623..f981df9 100644
 -        object.__setattr__(self, "path", path)
 -        object.__setattr__(self, "editable", editable)
 -        object.__setattr__(self, "subdirectory", subdirectory)
--
+ 
      @classmethod
      def _from_dict(cls, d: Mapping[str, Any]) -> Self:
-         return cls(
-@@ -390,33 +359,15 @@ class PackageDirectory:
+@@ -390,32 +365,16 @@
          )
  
  
 -@dataclass(frozen=True, init=False)
 +@dataclass(frozen=True, kw_only=True, slots=True)
  class PackageArchive:
++    """A package installed from an archive."""
++
      url: str | None = None
      path: str | None = None
      size: int | None = None
@@ -695,7 +918,7 @@ index b797623..f981df9 100644
 -    hashes: Mapping[str, str]  # type: ignore[misc]
 +    hashes: Mapping[str, str]
      subdirectory: str | None = None
- 
+-
 -    def __init__(
 -        self,
 -        *,
@@ -713,17 +936,18 @@ index b797623..f981df9 100644
 -        object.__setattr__(self, "upload_time", upload_time)
 -        object.__setattr__(self, "hashes", hashes)
 -        object.__setattr__(self, "subdirectory", subdirectory)
--
+ 
      @classmethod
      def _from_dict(cls, d: Mapping[str, Any]) -> Self:
-         package_archive = cls(
-@@ -431,32 +382,14 @@ class PackageArchive:
+@@ -431,32 +390,16 @@
          return package_archive
  
  
 -@dataclass(frozen=True, init=False)
 +@dataclass(frozen=True, kw_only=True, slots=True)
  class PackageSdist:
++    """A source distribution for a package."""
++
      name: str | None = None
      upload_time: datetime | None = None
      url: str | None = None
@@ -752,13 +976,15 @@ index b797623..f981df9 100644
  
      @classmethod
      def _from_dict(cls, d: Mapping[str, Any]) -> Self:
-@@ -483,32 +416,14 @@ class PackageSdist:
+@@ -483,32 +426,16 @@
          return filename
  
  
 -@dataclass(frozen=True, init=False)
 +@dataclass(frozen=True, kw_only=True, slots=True)
  class PackageWheel:
++    """A wheel distribution for a package."""
++
      name: str | None = None
      upload_time: datetime | None = None
      url: str | None = None
@@ -787,19 +1013,27 @@ index b797623..f981df9 100644
  
      @classmethod
      def _from_dict(cls, d: Mapping[str, Any]) -> Self:
-@@ -532,7 +447,7 @@ class PackageWheel:
+@@ -532,8 +459,14 @@
          return filename
  
  
 -@dataclass(frozen=True, init=False)
 +@dataclass(frozen=True, kw_only=True, slots=True)
  class Package:
++    """A package entry in a pylock file.
++
++    A package has either distribution files or one direct source (VCS,
++    directory, or archive).
++    """
++
      name: NormalizedName
      version: Version | None = None
-@@ -548,38 +463,6 @@ class Package:
+     marker: Marker | None = None
+@@ -547,38 +480,6 @@
+     wheels: Sequence[PackageWheel] | None = None
      attestation_identities: Sequence[Mapping[str, Any]] | None = None
      tool: Mapping[str, Any] | None = None
- 
+-
 -    def __init__(
 -        self,
 -        *,
@@ -831,20 +1065,22 @@ index b797623..f981df9 100644
 -        object.__setattr__(self, "wheels", wheels)
 -        object.__setattr__(self, "attestation_identities", attestation_identities)
 -        object.__setattr__(self, "tool", tool)
--
+ 
      @classmethod
      def _from_dict(cls, d: Mapping[str, Any]) -> Self:
-         package = cls(
-@@ -666,7 +549,7 @@ class Package:
+@@ -666,9 +567,9 @@
          return not (self.sdist or self.wheels)
  
  
 -@dataclass(frozen=True, init=False)
 +@dataclass(frozen=True, kw_only=True, slots=True)
  class Pylock:
-     """A class representing a pylock file."""
+-    """A class representing a pylock file."""
++    """Represent a validated pylock file."""
  
-@@ -676,34 +559,10 @@ class Pylock:
+     lock_version: Version
+     environments: Sequence[Marker] | None = None
+@@ -676,33 +577,9 @@
      extras: Sequence[NormalizedName] | None = None
      dependency_groups: Sequence[str] | None = None
      default_groups: Sequence[str] | None = None
@@ -853,7 +1089,7 @@ index b797623..f981df9 100644
 +    created_by: str
 +    packages: Sequence[Package]
      tool: Mapping[str, Any] | None = None
- 
+-
 -    def __init__(
 -        self,
 -        *,
@@ -877,11 +1113,60 @@ index b797623..f981df9 100644
 -        object.__setattr__(self, "created_by", created_by)
 -        object.__setattr__(self, "packages", packages)
 -        object.__setattr__(self, "tool", tool)
--
+ 
      @classmethod
      def _from_dict(cls, d: Mapping[str, Any]) -> Self:
-         pylock = cls(
-@@ -836,7 +695,7 @@ class Pylock:
+@@ -788,7 +665,35 @@
+ 
+         .. versionchanged:: 26.3
+             Added the *prefer_sdist_predicate* parameter.
++
++        .. versionchanged:: 26.4
++            Raise :class:`PylockSelectError` if passed extras or dependency groups
++            that are not declared in the corresponding pylock fields.
+         """
++        canonical_extras = {canonicalize_name(extra) for extra in extras or ()}
++        unknown_extras = canonical_extras - set(self.extras or ())
++        if unknown_extras:
++            raise PylockSelectError(
++                f"Undeclared extras: {', '.join(sorted(unknown_extras))}"
++            )
++
++        canonical_dependency_groups = {
++            canonicalize_name(dependency_group)
++            for dependency_group in dependency_groups or ()
++        }
++        unknown_dependency_groups = canonical_dependency_groups - {
++            canonicalize_name(dependency_group)
++            for dependency_group in [
++                *(self.dependency_groups or ()),
++                *(self.default_groups or ()),
++            ]
++        }
++        if unknown_dependency_groups:
++            raise PylockSelectError(
++                f"Undeclared dependency groups: "
++                f"{', '.join(sorted(unknown_dependency_groups))}"
++            )
++
+         compatible_tags_selector = create_compatible_tags_selector(
+             tags if tags is not None else sys_tags()
+         )
+@@ -803,11 +708,11 @@
+             "dict[str, str | frozenset[str]]",
+             dict(
+                 environment or {},  # Marker.evaluate will fill-up
+-                extras=frozenset(extras or []),
++                extras=frozenset(canonical_extras),
+                 dependency_groups=frozenset(
+                     (self.default_groups or [])
+                     if dependency_groups is None  # to allow selecting no group
+-                    else dependency_groups
++                    else canonical_dependency_groups
+                 ),
+             ),
+         )
+@@ -836,7 +741,7 @@
          # #. If :ref:`pylock-environments` is specified, check that at least one of the
          #    environment marker expressions is satisfied; an error MUST be raised if no
          #    expression is satisfied.
@@ -891,10 +1176,24 @@ index b797623..f981df9 100644
                  if env_marker.evaluate(
                      cast("dict[str, str]", environment or {}), context="requirement"
 diff --git a/src/pip/_vendor/packaging/ranges.py b/src/pip/_vendor/packaging/ranges.py
-index 8144a65..e98e5c7 100644
 --- a/src/pip/_vendor/packaging/ranges.py
 +++ b/src/pip/_vendor/packaging/ranges.py
-@@ -25,7 +25,6 @@ from typing import (
+@@ -12,20 +12,20 @@
+ 
+ .. testsetup::
+ 
+-    from packaging.ranges import VersionRange
++    from packaging.ranges import RangeRelation, VersionRange
+     from packaging.specifiers import SpecifierSet
+     from packaging.version import Version
+ """
+ 
+ from __future__ import annotations
+ 
++import bisect
+ import enum
+ import typing
+ from typing import (
      TYPE_CHECKING,
      Any,
      TypeVar,
@@ -902,7 +1201,15 @@ index 8144a65..e98e5c7 100644
  )
  
  from ._ranges import (
-@@ -55,12 +54,41 @@ if TYPE_CHECKING:
+@@ -43,6 +43,7 @@
+     least_version_above,
+     matches_bounds_only,
+     range_is_empty,
++    ranges_are_disjoint,
+     ranges_are_prerelease_only,
+     trim_release,
+ )
+@@ -55,11 +56,45 @@
      from .specifiers import SpecifierSet
  
  
@@ -913,250 +1220,184 @@ index 8144a65..e98e5c7 100644
 -UnparsedVersion = Union[Version, str]
 +UnparsedVersion = Version | str
  UnparsedVersionVar = TypeVar("UnparsedVersionVar", bound=UnparsedVersion)
- 
++
 +
 +class RangeRelation(enum.Enum):
-+    """How one range's members sit against another's.
++    """Result of :meth:`VersionRange.relation` with subset and disjointness flags.
 +
-+    The four members partition the ``(is_subset, is_disjoint)`` space: both
-+    hold together only for an empty range, which is a subset of everything
-+    and shares a member with nothing.
++    .. versionadded:: 26.4
 +    """
 +
-+    EMPTY = (True, True)
-+    SUBSET = (True, False)
-+    DISJOINT = (False, True)
-+    OVERLAPPING = (False, False)
++    #: ``self`` has no members.
++    EMPTY = enum.auto()
 +
-+    def __init__(self, is_subset: bool, is_disjoint: bool) -> None:
-+        self.is_subset = is_subset
-+        self.is_disjoint = is_disjoint
++    #: ``self`` has members and every one of them is in ``other``.
++    SUBSET = enum.auto()
++
++    #: ``self`` has members and none of them is in ``other``.
++    DISJOINT = enum.auto()
++
++    #: The two share a member, and ``self`` has one ``other`` lacks.
++    OVERLAPPING = enum.auto()
++
++    @property
++    def is_subset(self) -> bool:
++        """Whether every member of ``self`` is also a member of ``other``."""
++        return self is RangeRelation.EMPTY or self is RangeRelation.SUBSET
++
++    @property
++    def is_disjoint(self) -> bool:
++        """Whether ``self`` and ``other`` share no member."""
++        return self is RangeRelation.EMPTY or self is RangeRelation.DISJOINT
 +
 +    def __repr__(self) -> str:
-+        return f"RangeRelation.{self.name}"
++        """Return the qualified member name."""
++        return f"{type(self).__name__}.{self.name}"
 +
-+
-+# Bound once so the hot return paths load a module global instead of a class
-+# attribute.
-+_EMPTY_REL = RangeRelation.EMPTY
-+_SUBSET_REL = RangeRelation.SUBSET
-+_DISJOINT_REL = RangeRelation.DISJOINT
-+_OVERLAPPING_REL = RangeRelation.OVERLAPPING
-+
+ 
  #: The most ``!=`` exclusion fragments (``!=V`` points or ``!=P.*`` prefixes)
  #: that :meth:`VersionRange.to_specifier_set` will materialize to spell a
- #: single gap or run. Every site that expands a version-number-driven chain
-@@ -144,6 +172,97 @@ def _union_ranges(
-     return merged
+@@ -84,16 +119,16 @@
+     return __all__
  
  
-+def _relate_bounds(
-+    left: Sequence[Interval],
-+    right: Sequence[Interval],
-+) -> RangeRelation:
-+    """Return the :class:`RangeRelation` for two sorted interval lists.
-+
-+    One two-pointer merge answers both without building the intersection or the
-+    complement. The lists are canonical (sorted, non-overlapping, and
-+    non-touching, since :func:`_union_ranges` merges across empty gaps), so a
-+    covered left interval sits wholly inside one right interval rather than
-+    spanning two: ``left`` is a subset when every one of its intervals is
-+    covered, and the two are disjoint when no overlap is found at all. A partial
-+    overlap rules out both, so the walk stops there.
-+    """
-+    matched = 0
-+    left_index = right_index = 0
-+    disjoint = True
-+    while left_index < len(left) and right_index < len(right):
-+        left_lower, left_upper = left[left_index]
-+        right_lower, right_upper = right[right_index]
-+
-+        # ``max`` and ``min`` return their first argument on a tie, so both cuts
-+        # are the left ones exactly when the overlap is the whole left interval.
-+        lower = max(left_lower, right_lower)
-+        upper = min(left_upper, right_upper)
-+
-+        if not range_is_empty(lower, upper):
-+            if lower is left_lower and upper is left_upper:
-+                matched += 1
-+            else:
-+                return _OVERLAPPING_REL
-+            disjoint = False
-+
-+        # Advance whichever side has the smaller upper bound.
-+        if left_upper < right_upper:
-+            left_index += 1
-+        else:
-+            right_index += 1
-+
-+    if matched == len(left):
-+        return _EMPTY_REL if disjoint else _SUBSET_REL
-+    return _DISJOINT_REL if disjoint else _OVERLAPPING_REL
-+
-+
-+def _subset_bounds(left: Sequence[Interval], right: Sequence[Interval]) -> bool:
-+    """Return whether every version in ``left`` is also in ``right``.
-+
-+    The canonical lists let one two-pointer walk decide containment: skip the
-+    right intervals that end too early, then check that the surviving one starts
-+    early enough.
-+    """
-+    right_index = 0
-+    right_len = len(right)
-+    for left_lower, left_upper in left:
-+        # A right interval ending below this one cannot cover it, and the left
-+        # list ascends, so it cannot cover any later one either.
-+        while right_index < right_len and right[right_index][1] < left_upper:
-+            right_index += 1
-+        if right_index == right_len:
-+            return False
-+        if right[right_index][0] > left_lower:
-+            return False
-+    return True
-+
-+
-+def _disjoint_bounds(left: Sequence[Interval], right: Sequence[Interval]) -> bool:
-+    """Return whether no version lies in both ``left`` and ``right``.
-+
-+    A two-pointer merge that stops at the first overlap.
-+    """
-+    left_index = right_index = 0
-+    left_len = len(left)
-+    right_len = len(right)
-+    while left_index < left_len and right_index < right_len:
-+        left_lower, left_upper = left[left_index]
-+        right_lower, right_upper = right[right_index]
-+
-+        lower = max(left_lower, right_lower)
-+        upper = min(left_upper, right_upper)
-+        if not range_is_empty(lower, upper):
-+            return False
-+
-+        # Advance whichever side has the smaller upper bound.
-+        if left_upper < right_upper:
-+            left_index += 1
-+        else:
-+            right_index += 1
-+
-+    return True
-+
-+
+-# Range algebra: intersection and the empty-interval test live in the engine
+-# (``intersect_ranges`` / ``range_is_empty``); union and complement are only
+-# needed here, so they live in this module.
++# Range algebra: intersection, disjointness and the empty-interval test live
++# in the engine; union, complement and difference are only needed here, so
++# they live in this module.
+ 
+ 
+ def _union_ranges(
+     left: Sequence[Interval],
+     right: Sequence[Interval],
+ ) -> list[Interval]:
+-    """Union two sorted, non-overlapping interval lists.
++    """Union two sorted, non-overlapping lists of non-empty intervals.
+ 
+     A linear merge over the two pre-sorted inputs followed by a single
+     coalescing pass: adjacent or overlapping intervals collapse so the result
+@@ -145,7 +180,7 @@
+ 
+ 
  def _complement_ranges(ranges: Sequence[Interval]) -> list[Interval]:
-     """Complement a sorted, non-overlapping interval list.
+-    """Complement a sorted, non-overlapping interval list.
++    """Complement a sorted, disjoint, non-touching list of non-empty intervals.
  
-@@ -184,6 +303,38 @@ def _complement_ranges(ranges: Sequence[Interval]) -> list[Interval]:
+     Yields the gaps between intervals plus a leading gap before the first and
+     a trailing gap after the last. Bound inclusivity flips so that
+@@ -182,6 +217,85 @@
+         result.append((gap_lower, POS_INF))
+ 
      return result
- 
- 
++
++
 +def _difference_ranges(
-+    left: Sequence[Interval], right: Sequence[Interval]
-+) -> tuple[Interval, ...]:
-+    """Subtract sorted intervals without constructing the right-hand complement."""
-+    result: list[Interval] = []
++    left: tuple[Interval, ...], right: tuple[Interval, ...]
++) -> Iterator[Interval]:
++    """Subtract right from left. Both must be sorted, disjoint and non-touching.
++
++    Right's intervals must be non-empty; empty intervals in left are dropped.
++    """
++    if right == FULL_RANGE:
++        return
++
 +    right_index = 0
-+    for lower, upper in left:
++    for left_lower, upper in left:
++        lower = left_lower
++        unconsumed = True
 +        while right_index < len(right):
 +            right_lower, right_upper = right[right_index]
 +            if range_is_empty(lower, right_upper):
 +                right_index += 1
 +                continue
 +            if range_is_empty(right_lower, upper):
-+                if not range_is_empty(lower, upper):
-+                    result.append((lower, upper))
 +                break
 +
 +            if lower < right_lower:
 +                gap_upper = UpperBound(right_lower.version, not right_lower.inclusive)
 +                if not range_is_empty(lower, gap_upper):
-+                    result.append((lower, gap_upper))
++                    yield lower, gap_upper
 +            if right_upper >= upper:
++                # Keep this exclusion for any later left intervals it overlaps.
++                unconsumed = False
 +                break
 +
 +            lower = LowerBound(right_upper.version, not right_upper.inclusive)
 +            right_index += 1
++
++        if unconsumed and not range_is_empty(lower, upper):
++            yield lower, upper
++
++
++def _relate_bounds(
++    left: tuple[Interval, ...], right: tuple[Interval, ...]
++) -> RangeRelation:
++    """Relate two sorted, disjoint, non-touching interval tuples.
++
++    Each interval must contain at least one version; empty tuples are allowed.
++    """
++    if not left:
++        return RangeRelation.EMPTY
++
++    covered = 0
++    left_index = right_index = 0
++    left_len, right_len = len(left), len(right)
++    while left_index < left_len and right_index < right_len:
++        left_lower, left_upper = left[left_index]
++        right_lower, right_upper = right[right_index]
++
++        contained = not left_lower < right_lower
++        lower = left_lower if contained else right_lower
++
++        if right_upper < left_upper:
++            upper = right_upper
++            right_index += 1
++            contained = False
 +        else:
-+            if not range_is_empty(lower, upper):
-+                result.append((lower, upper))
-+    return tuple(result)
++            upper = left_upper
++            left_index += 1
 +
++        if not range_is_empty(lower, upper):
++            if not contained:
++                return RangeRelation.OVERLAPPING
++            covered += 1
 +
++    if covered == left_len:
++        return RangeRelation.SUBSET
++
++    # An overlap that was not a covered interval returned above, so nothing
++    # covered means nothing shared.
++    return RangeRelation.OVERLAPPING if covered else RangeRelation.DISJOINT
+ 
+ 
  def _canonical_floor(bounds: tuple[Interval, ...]) -> tuple[Interval, ...]:
-     """Collapse the PEP 440 floor in a sorted interval list.
+@@ -291,6 +405,23 @@
+         return admit_arbitrary and bounds == FULL_RANGE
  
-@@ -293,6 +444,72 @@ def _struct_admits(
      return matches_bounds_only(bounds, parsed)
- 
- 
-+def _bisect_predicate(
-+    items: Sequence[Version], predicate: Callable[[Version], bool]
-+) -> int:
-+    """Return the first true position of a monotone predicate over versions."""
-+    low, high = 0, len(items)
-+    while low < high:
-+        mid = (low + high) // 2
-+        if predicate(items[mid]):
-+            high = mid
-+        else:
-+            low = mid + 1
-+    return low
 +
 +
-+def _partition_indexes(
-+    items: Sequence[Version], lower: LowerBound, upper: UpperBound
++def _interval_slice(
++    versions: Sequence[Version], lower: LowerBound, upper: UpperBound
 +) -> tuple[int, int]:
-+    """Locate an interval's half-open slice in an ascending version list."""
-+    above, below = lower._above, upper._below
-+    start = 0 if above is None else _bisect_predicate(items, above)
-+    stop = (
-+        len(items)
-+        if below is None
-+        else _bisect_predicate(items, lambda version: not below(version))
-+    )
++    """Return slice indices for an interval in an ascending version list."""
++    opens = lower._above
++    closes = upper._below
++
++    start = 0 if opens is None else bisect.bisect_left(versions, True, key=opens)
++
++    if closes is None:
++        stop = len(versions)
++    else:
++        stop = bisect.bisect_left(versions, True, key=lambda v: not closes(v))
++
 +    return start, stop
-+
-+
-+def _lattice_release(version: Version, parts: int, *, above: bool) -> Version:
-+    """The nearest ``parts``-component release to ``version`` on the lattice.
-+
-+    Truncates ``version``'s release to ``parts`` components, padding a shorter
-+    release with zeros, to land on a lattice point at or below it. With
-+    ``above`` the result must be strictly greater than ``version``, so a
-+    truncation that lands at or below it is rounded up by one; otherwise a
-+    truncation equal to ``version`` is kept and only a strictly smaller one is
-+    rounded up.
-+    """
-+    release = version.release[:parts]
-+    padded = (*release, *((0,) * (parts - len(release))))
-+    candidate = Version.from_parts(epoch=version.epoch, release=padded)
-+    if candidate > version or (not above and candidate == version):
-+        return candidate
-+    bumped = (*padded[:-1], padded[-1] + 1)
-+    return Version.from_parts(epoch=version.epoch, release=bumped)
-+
-+
-+def _release_boundary_point(
-+    value: BoundaryVersion | Version | None, parts: int
-+) -> Version | None:
-+    """The lattice release one interval edge transitions membership at.
-+
-+    ``None`` for an unbounded (``-inf`` / ``+inf``) edge. A boundary sentinel
-+    reports the smallest lattice release strictly above the version it sits
-+    over (its final release when that version is a pre-release). A plain
-+    version reports its own release projected onto the lattice: the release
-+    itself when it is a lattice point, otherwise the smallest lattice release
-+    above it.
-+    """
-+    if value is None:
-+        return None
-+    if isinstance(value, BoundaryVersion):
-+        return _lattice_release(value.version, parts, above=True)
-+    return _lattice_release(Version(value.base_version), parts, above=False)
-+
-+
+ 
+ 
  # Repr helpers:
- 
- 
-@@ -905,7 +1122,8 @@ class VersionRange:
+@@ -905,12 +1036,14 @@
      :class:`~packaging.specifiers.SpecifierSet`.
  
      Construct via :meth:`~packaging.specifiers.SpecifierSet.to_range`, or with
@@ -1166,7 +1407,13 @@ index 8144a65..e98e5c7 100644
      Compose with :meth:`intersection`, :meth:`union`, :meth:`complement`, and
      :meth:`difference` (or the ``&`` / ``|`` / ``~`` / ``-`` operators). Test
      membership with ``in`` or :meth:`contains`, filter an iterable with
-@@ -920,9 +1138,9 @@ class VersionRange:
+     :meth:`filter`, and convert back to a
+     :class:`~packaging.specifiers.SpecifierSet` with :meth:`to_specifier_set`.
++    Use :meth:`relation` to obtain subset and disjointness results together.
+ 
+     The configured pre-release policy of the originating specifier set carries
+     onto the range and controls whether pre-releases are admitted under ``in``,
+@@ -920,9 +1053,9 @@
      that opt-in scoped to those versions, so unrelated pre-releases are not
      admitted wholesale.
  
@@ -1179,7 +1426,7 @@ index 8144a65..e98e5c7 100644
  
      >>> r = SpecifierSet(">=1.0,<2.0").to_range()
      >>> "1.5" in r
-@@ -998,7 +1216,8 @@ class VersionRange:
+@@ -998,7 +1131,8 @@
          raise TypeError(
              "cannot create 'VersionRange' instances directly; use "
              "SpecifierSet.to_range(), VersionRange.full(), "
@@ -1189,7 +1436,18 @@ index 8144a65..e98e5c7 100644
          )
  
      @classmethod
-@@ -1190,6 +1409,73 @@ class VersionRange:
+@@ -1072,9 +1206,7 @@
+         return self._admit_arbitrary and self._bounds == FULL_RANGE
+ 
+     def _is_plain(self) -> bool:
+-        """True when membership is decided by ``_bounds`` alone, enabling the
+-        bounds-only fast paths in :meth:`is_subset` and :meth:`is_disjoint`.
+-        """
++        """True when ``_bounds`` alone decides membership."""
+         return (
+             not self._has_literals()
+             and not self._admit_arbitrary
+@@ -1190,6 +1322,56 @@
              prereleases_configured=prereleases,
          )
  
@@ -1203,44 +1461,27 @@ index 8144a65..e98e5c7 100644
 +        include_upper: bool = True,
 +        prereleases: bool | None = None,
 +    ) -> VersionRange:
-+        """Return the raw version-order interval from ``lower`` to ``upper``.
++        """Construct an interval using PEP 440 version ordering.
 +
-+        A single interval in the PEP 440 total order. The bounds are pure order
-+        cuts, not specifier semantics: ``None`` on a side is unbounded there.
-+        Both ends are inclusive by default, so ``from_bounds(v, v)`` is
-+        :meth:`singleton`; pass ``include_lower=False`` or ``include_upper=False``
-+        for a half-open interval.
++        Bounds are inclusive by default; ``None`` means unbounded and ignores
++        its inclusion flag. With no bounds, the default policy gives
++        ``full(admit_arbitrary=False)``. Inverted bounds, or equal bounds with
++        either endpoint excluded, give an empty range. Specifier-specific
++        exclusions do not apply.
 +
-+        >>> "2.0" in VersionRange.from_bounds("1.0", "2.0")
-+        True
-+        >>> "2.0" in VersionRange.from_bounds("1.0", "2.0", include_upper=False)
-+        False
-+        >>> VersionRange.from_bounds("1.5", "1.5") == VersionRange.singleton("1.5")
-+        True
++        At the default policy, a pre-release bound does not opt in
++        :meth:`filter`; :meth:`contains` still checks its membership.
 +
-+        Membership is decided by the bounds alone, so pre-releases, post-releases,
-+        and locals inside them are members even where the matching specifier
-+        would exclude them:
++        :param lower: the lower version, or ``None`` for no lower bound.
++        :param upper: the upper version, or ``None`` for no upper bound.
++        :param include_lower: whether to include the lower endpoint.
++        :param include_upper: whether to include the upper endpoint.
++        :param prereleases: the configured pre-release policy. ``None`` leaves
++            it unset; ``True`` admits and ``False`` excludes pre-releases.
++        :raises packaging.version.InvalidVersion: if a bound is an invalid
++            version string.
 +
-+        >>> "1.0.post1" in VersionRange.from_bounds("1.0", "2.0", include_lower=False)
-+        True
-+        >>> "1.0.post1" in SpecifierSet(">1.0,<2.0").to_range()
-+        False
-+        >>> "2.0rc1" in VersionRange.from_bounds("1.0", "2.0")
-+        True
-+        >>> "2.0rc1" in SpecifierSet(">=1.0,<2.0").to_range()
-+        False
-+
-+        An inverted pair, or an equal pair with either end exclusive, is the
-+        empty range; an unbounded pair is the versions-only full range.
-+
-+        >>> VersionRange.from_bounds("2.0", "1.0").is_empty
-+        True
-+        >>> VersionRange.from_bounds() == VersionRange.full(admit_arbitrary=False)
-+        True
-+
-+        :raises packaging.version.InvalidVersion: if ``lower`` or ``upper`` is a
-+            string that does not parse as a PEP 440 version.
++        .. versionadded:: 26.4
 +        """
 +        if lower is not None and not isinstance(lower, Version):
 +            lower = Version(lower)
@@ -1263,7 +1504,7 @@ index 8144a65..e98e5c7 100644
      def intersection(self, other: VersionRange) -> VersionRange:
          """Range containing exactly the versions in both self and other.
  
-@@ -1341,11 +1627,7 @@ class VersionRange:
+@@ -1341,11 +1523,7 @@
          if not other._bounds and not other._admit:
              return self
  
@@ -1272,69 +1513,48 @@ index 8144a65..e98e5c7 100644
 -        new_bounds = tuple(
 -            intersect_ranges(self._bounds, _complement_ranges(other._bounds))
 -        )
-+        new_bounds = _difference_ranges(self._bounds, other._bounds)
++        new_bounds = tuple(_difference_ranges(self._bounds, other._bounds))
  
          # Match ``self & ~other`` on the opt-in region: a complement carries no
          # opt-in, so only ``self``'s region survives. ``other`` acts as a
-@@ -1470,6 +1752,15 @@ class VersionRange:
-         False
-         >>> VersionRange.empty().is_subset(outer)
-         True
-+
-+        A range with an exclusion is a subset of its span, but the span is not a
-+        subset of it:
-+
-+        >>> punctured = SpecifierSet(">=1.0,<2.0,!=1.5").to_range()
-+        >>> punctured.is_subset(outer)
-+        True
-+        >>> outer.is_subset(punctured)
-+        False
-         """
-         self._check_policy_compat(other)
- 
-@@ -1480,12 +1771,55 @@ class VersionRange:
+@@ -1480,7 +1658,7 @@
  
          # Plain ranges: subset reduces to bounds containment, no algebra needed.
          if self._is_plain() and other._is_plain():
 -            return not intersect_ranges(self._bounds, _complement_ranges(other._bounds))
-+            return _subset_bounds(self._bounds, other._bounds)
++            return next(_difference_ranges(self._bounds, other._bounds), None) is None
  
          # difference (unlike intersection with the one-way complement) resolves
          # ``===`` literals against both operands, so it stays correct for them.
-         return self.difference(other).is_empty
+@@ -1519,10 +1697,39 @@
+         """
+         self._check_policy_compat(other)
  
+-        # Plain ranges: disjointness is an empty bounds intersection.
++        # Plain ranges: stop as soon as the bounds overlap.
+         if self._is_plain() and other._is_plain():
+-            return not intersect_ranges(self._bounds, other._bounds)
++            return ranges_are_disjoint(self._bounds, other._bounds)
+         return self.intersection(other).is_empty
++
 +    def relation(self, other: VersionRange) -> RangeRelation:
-+        """Return the :class:`RangeRelation` of ``self`` against ``other``.
++        """Return combined subset and disjointness results.
 +
-+        :attr:`~RangeRelation.SUBSET` is containment,
-+        :attr:`~RangeRelation.DISJOINT` is separation,
-+        :attr:`~RangeRelation.OVERLAPPING` is neither, and
-+        :attr:`~RangeRelation.EMPTY` is an empty ``self``, which is a subset
-+        of everything and shares a member with nothing.
-+
++        The result's flags agree with :meth:`is_subset` and :meth:`is_disjoint`.
 +        Both operands must share the same configured pre-release policy;
 +        otherwise :exc:`ValueError` is raised.
 +
-+        >>> inner = SpecifierSet(">=1.5,<1.8").to_range()
-+        >>> outer = SpecifierSet(">=1.0,<2.0").to_range()
-+        >>> inner.relation(outer)
-+        RangeRelation.SUBSET
-+        >>> outer.relation(SpecifierSet(">=5.0").to_range())
-+        RangeRelation.DISJOINT
-+        >>> VersionRange.empty().relation(outer)
-+        RangeRelation.EMPTY
++        .. versionadded:: 26.4
 +        """
-+        # Identity settles both answers and the policy check with it.
 +        if self is other:
-+            return _EMPTY_REL if self.is_empty else _SUBSET_REL
++            return RangeRelation.EMPTY if self.is_empty else RangeRelation.SUBSET
 +
 +        self._check_policy_compat(other)
 +
++        # Plain ranges: one walk over the bounds settles both answers.
 +        if self._is_plain() and other._is_plain():
-+            # On plain ranges the bounds decide membership, so equal bounds
-+            # settle both answers without a walk.
 +            if self._bounds == other._bounds:
-+                return _SUBSET_REL if self._bounds else _EMPTY_REL
++                return RangeRelation.SUBSET if self._bounds else RangeRelation.EMPTY
 +            return _relate_bounds(self._bounds, other._bounds)
 +
 +        subset = (
@@ -1343,94 +1563,53 @@ index 8144a65..e98e5c7 100644
 +        )
 +        disjoint = self.intersection(other).is_empty
 +        if subset:
-+            return _EMPTY_REL if disjoint else _SUBSET_REL
-+        return _DISJOINT_REL if disjoint else _OVERLAPPING_REL
-+
-     def is_superset(self, other: VersionRange) -> bool:
-         """Return whether every member of other is also a member of self.
- 
-@@ -1516,12 +1850,19 @@ class VersionRange:
-         True
-         >>> a.is_disjoint(SpecifierSet(">=1.5,<2.5").to_range())
-         False
-+
-+        A range pinned to a version the other excludes is disjoint from it:
-+
-+        >>> SpecifierSet("==1.5").to_range().is_disjoint(
-+        ...     SpecifierSet(">=1.0,<2.0,!=1.5").to_range()
-+        ... )
-+        True
-         """
-         self._check_policy_compat(other)
- 
-         # Plain ranges: disjointness is an empty bounds intersection.
-         if self._is_plain() and other._is_plain():
--            return not intersect_ranges(self._bounds, other._bounds)
-+            return _disjoint_bounds(self._bounds, other._bounds)
-         return self.intersection(other).is_empty
++            return RangeRelation.EMPTY if disjoint else RangeRelation.SUBSET
++        return RangeRelation.DISJOINT if disjoint else RangeRelation.OVERLAPPING
  
      def _same_releases(self, other: VersionRange) -> bool:
-@@ -1679,6 +2020,123 @@ class VersionRange:
+         """Whether self and other admit the same non-pre-release versions.
+@@ -1678,6 +1885,55 @@
+ 
          if not found_final:
              yield from all_nonfinal
- 
++
 +    def snap_bounds(self, versions: Iterable[Version | str]) -> VersionRange:
-+        """Snap each finite bound inward onto the given versions.
++        """Narrow finite bounds using the supplied versions.
 +
-+        Returns a subset of self that agrees with self on membership of every
-+        given version: each finite segment end moves inward onto the outermost
-+        given version its segment contains, and a bound with no given version
-+        to land on is unchanged, as are unbounded ends.
++        The result never adds versions. ``contains`` and ``filter`` give the
++        same results for the supplied versions. Pre-release settings and
++        ``===`` rules still apply, but do not affect the choice of bounds.
++        Unbounded ends and intervals containing no supplied version stay
++        unchanged. Calling this again with the same versions leaves the result
++        unchanged.
 +
-+        Solver arithmetic and set algebra leave bounds at versions nobody
-+        released; snapping them onto real versions yields the range a human
-+        would write, and the subset guarantee means the snapped range never
-+        admits a version the original excluded, even if the given list was
-+        stale.
++        Callers can use the result in messages. Keep the original range during
++        solving: versions outside the supplied list can affect range comparisons.
 +
-+        ``versions`` may be any iterable of versions or version strings, in any
-+        order; it is sorted internally. ``snap_bounds([])`` returns an equal
-+        range.
-+
-+        >>> r = SpecifierSet(">=1.0,<2.0").to_range()
-+        >>> r.snap_bounds(["1.2", "1.5", "1.8"])
-+        <VersionRange '[1.2, 1.8]'>
-+        >>> SpecifierSet(">=1.0").to_range().snap_bounds(["1.2", "1.5"])
-+        <VersionRange '[1.2, +inf)'>
-+        >>> r.snap_bounds([]) == r
-+        True
-+
-+        A version-order gap round-trips to the singleton it surrounds:
-+
-+        >>> versions = [Version("1.0"), Version("2.0"), Version("3.0")]
-+        >>> gap = VersionRange.from_bounds(
-+        ...     "1.0", "3.0", include_lower=False, include_upper=False
-+        ... )
-+        >>> gap.snap_bounds(versions) == VersionRange.singleton("2.0")
-+        True
-+
-+        :raises packaging.version.InvalidVersion: if a string does not parse as a
++        :param versions: versions or version strings, in any order.
++        :raises packaging.version.InvalidVersion: if a string is not a valid
 +            PEP 440 version.
++
++        .. versionadded:: 26.4
 +        """
-+        anchors = sorted(v if isinstance(v, Version) else Version(v) for v in versions)
++        # Parsed ahead of the early return, so an unparsable version is
++        # rejected whatever the range holds.
++        ordered = sorted(v if isinstance(v, Version) else Version(v) for v in versions)
 +        if not self._bounds:
 +            return self
 +
 +        simplified: list[Interval] = []
 +        for lower, upper in self._bounds:
-+            first_inside, first_above = _partition_indexes(anchors, lower, upper)
-+            if first_inside >= first_above:
++            start, stop = _interval_slice(ordered, lower, upper)
++            if start >= stop:
 +                simplified.append((lower, upper))
 +                continue
++
 +            new_lower = (
-+                lower
-+                if lower.version is None
-+                else LowerBound(anchors[first_inside], True)
++                lower if lower.version is None else LowerBound(ordered[start], True)
 +            )
 +            new_upper = (
-+                upper
-+                if upper.version is None
-+                else UpperBound(anchors[first_above - 1], True)
++                upper if upper.version is None else UpperBound(ordered[stop - 1], True)
 +            )
 +            simplified.append((new_lower, new_upper))
 +
@@ -1442,63 +1621,162 @@ index 8144a65..e98e5c7 100644
 +            pre_region=self._pre_region,
 +            prereleases_configured=self._prereleases_configured,
 +        )
-+
-+    def release_intervals(
-+        self, parts: int
-+    ) -> tuple[tuple[Version | None, Version | None], ...]:
-+        """The half-open release intervals on which this range is satisfied.
-+
-+        Projects the range onto the lattice of releases with ``parts`` numeric
-+        components and returns the maximal ``[lower, upper)`` intervals it covers,
-+        as ``(lower, upper)`` release pairs. ``None`` on a side is unbounded there.
-+        Structure finer than the lattice, such as prereleases or posts between two
-+        releases, is not represented.
-+
-+        >>> SpecifierSet(">=3.11.4").to_range().release_intervals(3)
-+        ((<Version('3.11.4')>, None),)
-+        >>> SpecifierSet("==3.11.4").to_range().release_intervals(3)
-+        ((<Version('3.11.4')>, <Version('3.11.5')>),)
-+
-+        :raises ValueError: if ``parts`` is less than 1.
-+        """
-+        if parts < 1:
-+            raise ValueError(f"parts must be at least 1, got {parts}")
-+
-+        intervals: list[tuple[Version | None, Version | None]] = []
-+        for lower, upper in self._bounds:
-+            lower_point = _release_boundary_point(lower.version, parts)
-+            upper_point = _release_boundary_point(upper.version, parts)
-+            if (
-+                lower_point is not None
-+                and upper_point is not None
-+                and lower_point >= upper_point
-+            ):
-+                continue
-+            if intervals:
-+                prev_lower, prev_upper = intervals[-1]
-+                if (
-+                    prev_upper is not None
-+                    and lower_point is not None
-+                    and prev_upper >= lower_point
-+                ):
-+                    merged_upper = (
-+                        None
-+                        if upper_point is None
-+                        else max(prev_upper, upper_point)
-+                    )
-+                    intervals[-1] = (prev_lower, merged_upper)
-+                    continue
-+            intervals.append((lower_point, upper_point))
-+        return tuple(intervals)
-+
+ 
      @classmethod
      def _from_specifier_set(cls, specifier_set: SpecifierSet) -> VersionRange:
-         """Build the range accepted by ``specifier_set``.
+@@ -1731,7 +1987,9 @@
+         PEP 440 has no syntax for the strict singleton ``{V}`` (an exclusive
+         plain-version bound), a disjoint union of two or more intervals, or a
+         partial pre-release opt-in region, so ranges built by set algebra often
+-        return ``None``. A gap that takes more than ``_MAX_EXCLUSION_RUN``
++        return ``None``. Raw bounds can also return ``None``: ``<=2.0`` admits
++        ``2.0+local``, ``>1.0`` excludes ``1.0.post1``, and ``>=1.0a1`` opts
++        in pre-releases. A gap that takes more than ``_MAX_EXCLUSION_RUN``
+         contiguous ``!=`` exclusions to spell returns ``None`` too,
+         rather than a pathologically long chain; reaching that cap takes either
+         set algebra or a specifier set that already spells the gap out with
+diff --git a/src/pip/_vendor/packaging/requirements.py b/src/pip/_vendor/packaging/requirements.py
+--- a/src/pip/_vendor/packaging/requirements.py
++++ b/src/pip/_vendor/packaging/requirements.py
+@@ -3,7 +3,10 @@
+ # for complete details.
+ from __future__ import annotations
+ 
+-from typing import TYPE_CHECKING
++import builtins
++import copy
++import sys
++from typing import TYPE_CHECKING, Any
+ 
+ from ._parser import parse_requirement as _parse_requirement
+ from ._tokenizer import ParserSyntaxError
+@@ -14,6 +17,8 @@
+ if TYPE_CHECKING:
+     from collections.abc import Iterator
+ 
++    from typing_extensions import Self
++
+ __all__ = [
+     "InvalidRequirement",
+     "Requirement",
+@@ -24,20 +29,25 @@
+     return __all__
+ 
+ 
++# Sentinel for __replace__, typed as Any so it can be the default for any field.
++# mypy is missing sentinel currently
++_UNSET: Any = object() if sys.version_info < (3, 15) else builtins.sentinel("_UNSET")  # type: ignore[attr-defined]
++
++
+ class InvalidRequirement(ValueError):
+     """
+-    An invalid requirement was found, users should refer to PEP 508.
++    Raised when attempting to create a :class:`Requirement` with a string that
++    does not conform to the specification. Users should refer to PEP 508.
+ 
+     .. versionadded:: 16.1
+     """
+ 
+ 
+ class Requirement:
+-    """Parse a requirement.
++    """Represent a requirement for a project.
+ 
+     Parse a given requirement string into its parts, such as name, specifier,
+-    URL, and extras. Raises InvalidRequirement on a badly-formed requirement
+-    string.
++    URL, and extras, according to the specification.
+ 
+     .. versionadded:: 16.1
+ 
+@@ -70,6 +80,14 @@
+         Equality and hashing normalize requirement names, extras, and
+         equivalent specifiers. The string representation still preserves the
+         parsed name and extras spelling.
++
++    .. versionchanged:: 26.4
++
++        Added ``__replace__``, enabling :func:`copy.replace` on Python 3.13+.
++
++    :param str requirement_string: The string representation of a requirement.
++    :raises InvalidRequirement: If the given ``requirement_string`` is not
++        parseable, then this exception will be raised.
+     """
+ 
+     # TODO: Can we test whether something is contained within a requirement?
+@@ -86,16 +104,61 @@
+             raise InvalidRequirement(str(e)) from e
+ 
+         self.name: str = parsed.name
++        """The name of the requirement."""
+         self.url: str | None = parsed.url or None
++        """The URL to download the requirement from, or ``None``."""
+         self.extras: set[str] = set(parsed.extras)
++        """A set of extras that the requirement specifies."""
+         try:
+             self.specifier: SpecifierSet = SpecifierSet(parsed.specifier)
++            """A :class:`~.SpecifierSet` of the version specified by the requirement."""
+         except InvalidSpecifier as e:
+             raise InvalidRequirement(str(e)) from e
+         self.marker: Marker | None = None
++        """A :class:`~.Marker` for the requirement, or ``None``."""
+         if parsed.marker is not None:
+             self.marker = Marker.__new__(Marker)
+             self.marker._markers = _normalize_extra_values(parsed.marker)
++            self.marker._serialized = None
++
++    def __replace__(
++        self,
++        *,
++        name: str = _UNSET,
++        url: str | None = _UNSET,
++        extras: set[str] = _UNSET,
++        specifier: SpecifierSet = _UNSET,
++        marker: Marker | None = _UNSET,
++    ) -> Self:
++        """Return a copy with the given fields replaced.
++
++        This also enables :func:`copy.replace` on Python 3.13+. The result is
++        validated and normalized by re-parsing its string form, so invalid
++        replacements raise :exc:`InvalidRequirement`.
++
++        .. versionadded:: 26.4
++        """
++        tmp = Requirement.__new__(Requirement)
++        tmp.name = self.name if name is _UNSET else name
++        tmp.url = self.url if url is _UNSET else url or None
++        tmp.extras = self.extras if extras is _UNSET else extras
++        tmp.specifier = self.specifier if specifier is _UNSET else specifier
++        tmp.marker = self.marker if marker is _UNSET else marker
++
++        result = self.__class__(str(tmp))
++        # A field that parses as something more than itself (for example
++        # ``name="foo[bar]"``) would silently change other fields; reject it.
++        if (
++            result.name != tmp.name
++            or result.url != tmp.url
++            or result.extras != tmp.extras
++        ):
++            raise InvalidRequirement(
++                f"Replacement fields do not round-trip: {str(tmp)!r}"
++            )
++        # Specifiers technically can be mutated, so deep copy needed
++        result.specifier = copy.deepcopy(tmp.specifier)
++        return result
+ 
+     def _iter_parts(self, name: str) -> Iterator[str]:
+         yield name
 diff --git a/src/pip/_vendor/packaging/specifiers.py b/src/pip/_vendor/packaging/specifiers.py
-index a6a61af..dd46b56 100644
 --- a/src/pip/_vendor/packaging/specifiers.py
 +++ b/src/pip/_vendor/packaging/specifiers.py
-@@ -16,10 +16,8 @@ import typing
+@@ -11,15 +11,15 @@
+ from __future__ import annotations
+ 
+ import abc
++import builtins
+ import re
++import sys
+ import typing
  from typing import (
      TYPE_CHECKING,
      Any,
@@ -1509,7 +1787,7 @@ index a6a61af..dd46b56 100644
  )
  
  from ._ranges import (
-@@ -37,13 +35,8 @@ from .utils import canonicalize_version
+@@ -37,13 +37,10 @@
  from .version import Version
  
  if TYPE_CHECKING:
@@ -1522,23 +1800,227 @@ index a6a61af..dd46b56 100644
 -        from typing_extensions import TypeGuard
 +    from collections.abc import Callable, Iterable, Iterator, Sequence
 +    from typing import TypeGuard
++
++    from typing_extensions import Self
  
      from . import ranges
      from ._ranges import Interval
-@@ -75,7 +68,7 @@ def _validate_pre(pre: object, /) -> TypeGuard[bool | None]:
+@@ -75,8 +72,13 @@
  
  
  T = TypeVar("T")
 -UnparsedVersion = Union[Version, str]
 +UnparsedVersion = Version | str
  UnparsedVersionVar = TypeVar("UnparsedVersionVar", bound=UnparsedVersion)
++
++
++# Sentinel for __replace__, typed as Any so it can be the default for any field.
++# mypy is missing sentinel currently
++_UNSET: Any = object() if sys.version_info < (3, 15) else builtins.sentinel("_UNSET")  # type: ignore[attr-defined]
  
  
+ # Operators whose result is just a direct Version comparison, given a parsed
+@@ -238,6 +240,7 @@
+     """
+ 
+     __slots__ = (
++        "_canonical_spec_cache",
+         "_prereleases",
+         "_ranges",
+         "_spec",
+@@ -254,7 +257,7 @@
+                 # but included entirely as an escape hatch.
+                 ===  # Only match for the identity operator
+                 \s*
+-                [^\s;)]*  # The arbitrary version can be just about anything,
++                [^\s;)]+  # The arbitrary version can be just about anything,
+                           # we match everything except for whitespace, a
+                           # semi-colon for marker support, and a closing paren
+                           # since versions can be enclosed in them.
+@@ -299,16 +302,16 @@
+                 v?
+                 (?:[0-9]+!)?          # epoch
+                 [0-9]+(?:\.[0-9]+)+   # release  (We have a + instead of a *)
+-                (?:                   # pre release
++                (?a:                  # pre release
+                     [-_\.]?
+                     (alpha|beta|preview|pre|a|b|c|rc)
+                     [-_\.]?
+                     [0-9]*
+                 )?
+-                (?:                                   # post release
++                (?a:                                  # post release
+                     (?:-[0-9]+)|(?:[-_\.]?(post|rev|r)[-_\.]?[0-9]*)
+                 )?
+-                (?:[-_\.]?dev[-_\.]?[0-9]*)?          # dev release
++                (?a:[-_\.]?dev[-_\.]?[0-9]*)?         # dev release
+             )
+             |
+             (?:
+@@ -387,6 +390,46 @@
+         # Version range cache (populated by _to_ranges)
+         self._ranges: Sequence[Interval] | None = None
+ 
++        # Canonical (operator, version) cache (populated by _canonical_spec)
++        self._canonical_spec_cache: tuple[str, str] | None = None
++
++    def __replace__(
++        self,
++        *,
++        operator: str = _UNSET,
++        version: str = _UNSET,
++        prereleases: bool | None = _UNSET,
++    ) -> Self:
++        """__replace__(*, operator=..., version=..., prereleases=...)
++
++        Return a specifier with the given parts replaced. If no part changes,
++        return ``self``.
++
++        :param str operator:
++            Replacement comparison operator. Omit to retain the current operator.
++        :param str version:
++            Replacement version string. Omit to retain the current version.
++        :param prereleases:
++            Replacement prerelease override. Omit to retain the current override;
++            ``None`` restores automatic detection.
++        :type prereleases: bool | None
++
++        .. versionadded:: 26.4
++        """
++        new_operator = self.operator if operator is _UNSET else operator
++        new_version = self.version if version is _UNSET else version
++        new_prereleases = self._prereleases if prereleases is _UNSET else prereleases
++        if (
++            new_operator == self.operator
++            and new_version == self.version
++            and new_prereleases == self._prereleases
++        ):
++            return self
++
++        return self.__class__(
++            f"{new_operator}{new_version}", prereleases=new_prereleases
++        )
++
+     def _get_spec_version(self, version: str) -> Version | None:
+         """One element cache, as only one spec Version is needed per Specifier."""
+         if self._spec_version is not None and self._spec_version[0] == version:
+@@ -472,6 +515,7 @@
+         # Always discard cached values - they will be recomputed on demand.
+         self._spec_version = None
+         self._ranges = None
++        self._canonical_spec_cache = None
+ 
+         if isinstance(state, tuple):
+             if len(state) == 2:
+@@ -549,17 +593,24 @@
+ 
+     @property
+     def _canonical_spec(self) -> tuple[str, str]:
++        cached = self._canonical_spec_cache
++        if cached is not None:
++            return cached
++
+         operator, version = self._spec
+         if operator == "===" or version.endswith(".*"):
+-            return operator, version
+-
+-        spec_version = self._require_spec_version(version)
+-
+-        canonical_version = canonicalize_version(
+-            spec_version, strip_trailing_zero=(operator != "~=")
+-        )
+-
+-        return operator, canonical_version
++            result = self._spec
++        else:
++            canonical = canonicalize_version(
++                self._require_spec_version(version),
++                strip_trailing_zero=(operator != "~="),
++            )
++            # Most versions are already canonical, so reuse the existing tuple rather
++            # than retaining a second copy of a string equal to the one we hold.
++            result = self._spec if canonical == version else (operator, canonical)
++
++        self._canonical_spec_cache = result
++        return result
+ 
+     def __hash__(self) -> int:
+         return hash(self._canonical_spec)
+@@ -834,6 +885,35 @@
+         # Store our prereleases value so we can use it later to determine if
+         # we accept prereleases or not.
+         self._prereleases = prereleases
++
++    def __replace__(
++        self,
++        *,
++        specifiers: str | Iterable[Specifier] = _UNSET,
++        prereleases: bool | None = _UNSET,
++    ) -> Self:
++        """__replace__(*, specifiers=..., prereleases=...)
++
++        Return a specifier set with the given parts replaced. If ``specifiers``
++        is omitted and the prerelease override is unchanged, return ``self``.
++
++        :param specifiers:
++            Replacement specifiers as a string or an iterable of ``Specifier``
++            instances. Omit to retain the current specifiers.
++        :type specifiers: str | Iterable[Specifier]
++        :param prereleases:
++            Replacement prerelease override. Omit to retain the current override;
++            ``None`` restores automatic detection.
++        :type prereleases: bool | None
++
++        .. versionadded:: 26.4
++        """
++        new_specifiers = self._specs if specifiers is _UNSET else specifiers
++        new_prereleases = self._prereleases if prereleases is _UNSET else prereleases
++        if specifiers is _UNSET and new_prereleases == self._prereleases:
++            return self
++
++        return self.__class__(new_specifiers, prereleases=new_prereleases)
+ 
+     def _canonical_specs(self) -> tuple[Specifier, ...]:
+         """Deduplicate, sort, and cache specs for order-sensitive operations."""
 diff --git a/src/pip/_vendor/packaging/tags.py b/src/pip/_vendor/packaging/tags.py
-index dd1ea91..b1eec9b 100644
 --- a/src/pip/_vendor/packaging/tags.py
 +++ b/src/pip/_vendor/packaging/tags.py
-@@ -448,7 +448,7 @@ def cpython_tags(
+@@ -40,6 +40,7 @@
+     "cpython_tags",
+     "create_compatible_tags_selector",
+     "generic_tags",
++    "interpreter_abi",
+     "interpreter_name",
+     "interpreter_version",
+     "ios_platforms",
+@@ -362,9 +363,8 @@
+     return len(python_version) > 1 and tuple(python_version) >= (3, 2) and threading
+ 
+ 
+-def _cpython_abis(py_version: PythonVersion, warn: bool = False) -> list[str]:
++def _cpython_abis(py_version: PythonVersion, warn: bool = False) -> Iterator[str]:
+     py_version = tuple(py_version)  # To allow for version comparison.
+-    abis = []
+     version = _version_nodot(py_version[:2])
+     threading = debug = pymalloc = ucs4 = ""
+     with_debug = _get_config_var("Py_DEBUG", warn)
+@@ -387,12 +387,11 @@
+                 unicode_size is None and sys.maxunicode == 0x10FFFF
+             ):
+                 ucs4 = "u"
+-    elif debug:
++    yield f"cp{version}{threading}{debug}{pymalloc}{ucs4}"
++    if py_version >= (3, 8) and debug:
+         # Debug builds can also load "normal" extension modules.
+         # We can also assume no UCS-4 or pymalloc requirement.
+-        abis.append(f"cp{version}{threading}")
+-    abis.insert(0, f"cp{version}{threading}{debug}{pymalloc}{ucs4}")
+-    return abis
++        yield f"cp{version}{threading}"
+ 
+ 
+ def cpython_tags(
+@@ -448,7 +447,7 @@
          except ValueError:  # noqa: PERF203
              pass
  
@@ -1547,16 +2029,52 @@ index dd1ea91..b1eec9b 100644
      for abi in abis:
          for platform_ in platforms:
              yield Tag(interpreter, abi, platform_)
-@@ -555,7 +555,7 @@ def generic_tags(
+@@ -476,9 +475,9 @@
+                     yield Tag(interpreter, "abi3t", platform_)
+ 
+ 
+-def _generic_abi() -> list[str]:
+-    """
+-    Return the ABI tag based on EXT_SUFFIX.
++def _generic_abi() -> Iterator[str]:
++    """
++    Yield the ABI tag based on EXT_SUFFIX.
+     """
+     # The following are examples of `EXT_SUFFIX`.
+     # We want to keep the parts which are related to the ABI and remove the
+@@ -497,7 +496,8 @@
+     parts = ext_suffix.split(".")
+     if len(parts) < 3:
+         # CPython3.7 and earlier uses ".pyd" on Windows.
+-        return _cpython_abis(sys.version_info[:2])
++        yield from _cpython_abis(sys.version_info[:2])
++        return
+     soabi = parts[1]
+     if soabi.startswith("cpython"):
+         # non-windows
+@@ -516,8 +516,8 @@
+         # pyston, ironpython, others?
+         abi = soabi
+     else:
+-        return []
+-    return [_normalize_string(abi)]
++        return
++    yield _normalize_string(abi)
+ 
+ 
+ def generic_tags(
+@@ -554,8 +554,8 @@
+         interp_name = interpreter_name()
          interp_version = interpreter_version(warn=warn)
          interpreter = f"{interp_name}{interp_version}"
-     abis = _generic_abi() if abis is None else list(abis)
+-    abis = _generic_abi() if abis is None else list(abis)
 -    platforms = list(platforms or platform_tags())
++    abis = list(_generic_abi()) if abis is None else list(abis)
 +    platforms = list(platform_tags() if platforms is None else platforms)
      if "none" not in abis:
          abis.append("none")
      for abi in abis:
-@@ -629,7 +629,7 @@ def compatible_tags(
+@@ -629,7 +629,7 @@
      """
      if not python_version:
          python_version = sys.version_info[:2]
@@ -1565,7 +2083,7 @@ index dd1ea91..b1eec9b 100644
      for version in _py_interpreter_range(python_version):
          for platform_ in platforms:
              yield Tag(version, "none", platform_)
-@@ -913,18 +913,19 @@ def platform_tags() -> Iterator[str]:
+@@ -913,18 +913,19 @@
  
      .. versionadded:: 21.1
      """
@@ -1597,8 +2115,26 @@ index dd1ea91..b1eec9b 100644
  
  
  def interpreter_name() -> str:
+@@ -958,6 +959,18 @@
+ 
+ def _version_nodot(version: PythonVersion) -> str:
+     return "".join(map(str, version))
++
++
++def interpreter_abi() -> str:
++    """
++    Returns the running interpreter's ABI tag.
++
++    This typically acts as the :attr:`~Tag.abi` tag of the most specific tag
++    for the running interpreter.
++    """
++    if interpreter_name() == "cp":
++        return next(iter(_cpython_abis(sys.version_info[:2])))
++    return next(iter(_generic_abi()))
+ 
+ 
+ def sys_tags(*, warn: bool = False) -> Iterator[Tag]:
 diff --git a/src/pip/_vendor/packaging/utils.py b/src/pip/_vendor/packaging/utils.py
-index 2f0ce20..9be9ef3 100644
 --- a/src/pip/_vendor/packaging/utils.py
 +++ b/src/pip/_vendor/packaging/utils.py
 @@ -5,7 +5,7 @@
@@ -1610,7 +2146,7 @@ index 2f0ce20..9be9ef3 100644
  
  from .tags import InvalidTag, Tag, UnsortedTagsError, parse_tag
  from .version import InvalidVersion, Version, _TrimmedRelease
-@@ -28,7 +28,7 @@ def __dir__() -> list[str]:
+@@ -28,7 +28,7 @@
      return __all__
  
  
@@ -1619,11 +2155,23 @@ index 2f0ce20..9be9ef3 100644
  """
  A wheel build tag: an empty tuple, or a ``(build number, build tag suffix)`` pair.
  
+@@ -73,7 +73,7 @@
+ )
+ _normalized_regex = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*", re.ASCII)
+ # PEP 427: The build number must start with a digit.
+-_build_tag_regex = re.compile(r"(\d+)(.*)", re.ASCII)
++_build_tag_regex = re.compile(r"(\d+)(.*)\Z", re.ASCII)
+ # PEP 427: Valid characters for an escaped project name in a wheel filename.
+ # Requires at least one character so an empty project name is rejected.
+ _wheel_name_regex = re.compile(r"^[\w._]+\Z", re.UNICODE)
 diff --git a/src/pip/_vendor/packaging/version.py b/src/pip/_vendor/packaging/version.py
-index 5a964bd..791c8ac 100644
 --- a/src/pip/_vendor/packaging/version.py
 +++ b/src/pip/_vendor/packaging/version.py
-@@ -12,14 +12,13 @@ from __future__ import annotations
+@@ -9,21 +9,20 @@
+ 
+ from __future__ import annotations
+ 
++import builtins
  import re
  import sys
  import typing
@@ -1634,12 +2182,17 @@ index 5a964bd..791c8ac 100644
      Literal,
      NamedTuple,
      SupportsInt,
-     TypedDict,
+-    TypedDict,
 -    Union,
  )
  
  if typing.TYPE_CHECKING:
-@@ -66,14 +65,14 @@ def __dir__() -> list[str]:
+-    from typing_extensions import Self, Unpack
++    from typing_extensions import Self
+ 
+ if sys.version_info >= (3, 13):  # pragma: no cover
+     from warnings import deprecated as _deprecated
+@@ -66,24 +65,20 @@
      return __all__
  
  
@@ -1659,7 +2212,20 @@ index 5a964bd..791c8ac 100644
  VersionComparisonMethod = Callable[[CmpKey, CmpKey], bool]
  
  
-@@ -431,8 +430,7 @@ class Version(_BaseVersion):
+-class _VersionReplace(TypedDict, total=False):
+-    epoch: int | None
+-    release: tuple[int, ...] | None
+-    pre: tuple[str, int] | None
+-    post: int | None
+-    dev: int | None
+-    local: str | None
++# Sentinel for __replace__, typed as Any so it can be the default for any field.
++# mypy is missing sentinel currently
++_UNSET: Any = object() if sys.version_info < (3, 15) else builtins.sentinel("_UNSET")  # type: ignore[attr-defined]
+ 
+ 
+ def normalize_pre(letter: str, /) -> str:
+@@ -431,8 +426,7 @@
                  # propagate to the caller.
                  if "" in version.split("."):
                      raise InvalidVersion(f"Invalid version: {version!r}") from None
@@ -1669,3 +2235,83 @@ index 5a964bd..791c8ac 100644
  
              self._epoch = 0
              self._pre = None
+@@ -512,7 +506,16 @@
+ 
+         return new_version
+ 
+-    def __replace__(self, **kwargs: Unpack[_VersionReplace]) -> Self:
++    def __replace__(
++        self,
++        *,
++        epoch: int | None = _UNSET,
++        release: tuple[int, ...] | None = _UNSET,
++        pre: tuple[str, int] | None = _UNSET,
++        post: int | None = _UNSET,
++        dev: int | None = _UNSET,
++        local: str | None = _UNSET,
++    ) -> Self:
+         """
+         __replace__(*, epoch=..., release=..., pre=..., post=..., dev=..., local=...)
+ 
+@@ -536,37 +539,38 @@
+         .. versionchanged:: 26.1
+ 
+            The pre-release portion is now normalized.
+-        """
+-        epoch = _validate_epoch(kwargs["epoch"]) if "epoch" in kwargs else self._epoch
+-        release = (
+-            _validate_release(kwargs["release"])
+-            if "release" in kwargs
+-            else self._release
+-        )
+-        pre = _validate_pre(kwargs["pre"]) if "pre" in kwargs else self._pre
+-        post = _validate_post(kwargs["post"]) if "post" in kwargs else self._post
+-        dev = _validate_dev(kwargs["dev"]) if "dev" in kwargs else self._dev
+-        local = _validate_local(kwargs["local"]) if "local" in kwargs else self._local
++
++        .. versionchanged:: 26.4
++
++           Unknown keyword arguments now raise :exc:`TypeError` instead of
++           being silently ignored.
++        """
++        _epoch = self._epoch if epoch is _UNSET else _validate_epoch(epoch)
++        _release = self._release if release is _UNSET else _validate_release(release)
++        _pre = self._pre if pre is _UNSET else _validate_pre(pre)
++        _post = self._post if post is _UNSET else _validate_post(post)
++        _dev = self._dev if dev is _UNSET else _validate_dev(dev)
++        _local = self._local if local is _UNSET else _validate_local(local)
+ 
+         if (
+-            epoch == self._epoch
+-            and release == self._release
+-            and pre == self._pre
+-            and post == self._post
+-            and dev == self._dev
+-            and local == self._local
++            _epoch == self._epoch
++            and _release == self._release
++            and _pre == self._pre
++            and _post == self._post
++            and _dev == self._dev
++            and _local == self._local
+         ):
+             return self
+ 
+         new_version = self.__class__.__new__(self.__class__)
+         new_version._key_cache = None
+         new_version._hash_cache = None
+-        new_version._epoch = epoch
+-        new_version._release = release
+-        new_version._pre = pre
+-        new_version._post = post
+-        new_version._dev = dev
+-        new_version._local = local
++        new_version._epoch = _epoch
++        new_version._release = _release
++        new_version._pre = _pre
++        new_version._post = _post
++        new_version._dev = _dev
++        new_version._local = _local
+ 
+         return new_version
+ 
