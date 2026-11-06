@@ -1,0 +1,3068 @@
+diff --git a/src/pip/_vendor/nab_resolver/PROVENANCE.md b/src/pip/_vendor/nab_resolver/PROVENANCE.md
+new file mode 100644
+--- /dev/null
++++ b/src/pip/_vendor/nab_resolver/PROVENANCE.md
+@@ -0,0 +1,7 @@
++# Resolver SDK snapshot
++
++The base distribution is nab-resolver 0.0.26. The vendoring patch reproduces `nab-resolver/src/nab_resolver` at Nab commit `bf83840356d940aa863ac0abf709e6f1d9e87855`, with imports redirected to `pip._vendor`.
++
++The candidate-provider, deferred-query and scheduling APIs come from SDK commit `712a9c08efdb95091b08573e40828c4e316807ed`. Shared value, keyed-range, proof, selected-graph and version-span changes were composed from the native API delta `2d54f3b4ac18ba50d94dc220e8ce6b35a2eca695` to `97d72ef02ac4fd0b7bcc240db6129ec1406af027` using Git's three-way merge. The SDK's other source files retain their earlier implementations.
++
++These APIs are prototype patches, not released in 0.0.26. The separately sourced candidate preference subset is recorded in `nab_provider/PROVENANCE.md`; the two selected snapshots are verified together.
+diff --git a/src/pip/_vendor/nab_resolver/__init__.py b/src/pip/_vendor/nab_resolver/__init__.py
+--- a/src/pip/_vendor/nab_resolver/__init__.py
++++ b/src/pip/_vendor/nab_resolver/__init__.py
+@@ -6,15 +6,30 @@
+ 
+     nab_resolver.diagnostics DiagnosticMessage, Suggestion, error_message,
+                              suggestion_lines
++    nab_resolver.candidate_provider
++                            CandidateHost, CandidateProvider,
++                            CandidateRequirement, PreparedCandidate
+     nab_resolver.errors     ResolutionError, ResolutionInvariantError,
+                             ResolutionLimitError,
+                             ResolutionStalledError, ResolutionTerminatedError
++    nab_resolver.keyed_ranges KeyedRange
++    nab_resolver.priority   CONFLICT_THRESHOLD, CULPRIT_DEMOTE_THRESHOLD,
++                            MAX_PRECHECK_BACKTRACKS, PRECHECK_REJECTION_THRESHOLD,
++                            TIER_AFFECTED, TIER_CULPRIT, TIER_NORMAL,
++                            compute_tier, is_dominant_culprit
++    nab_resolver.proofs     DependencyCause, dependency_terms, external_clauses,
++                            select_dependency_causes
+     nab_resolver.ranges     Range
+     nab_resolver.resolver   BaseProvider, DEFAULT_MAX_ITERATIONS, Resolver,
+                             ResolverObserver, ResolverProvider, Solution
++    nab_resolver.result     IncompleteSelectionError, walk_selected
+     nab_resolver.root       ROOT
++    nab_resolver.testing    ProviderScenario, check_provider,
++                            check_provider_scenarios
+     nab_resolver.types      Incompatibility, IncompatibilityCause,
+                             RangeProtocol, RootRequirement, Term
++    nab_resolver.values     FrozenValue, SlottedValue
++    nab_resolver.version_spans OrderedVersion, cached_dependency_span
+ 
+ The package root binds no names, so importing ``nab_resolver`` pulls in no
+ submodules and a caller loads only what it imports.
+diff --git a/src/pip/_vendor/nab_resolver/candidate_provider.py b/src/pip/_vendor/nab_resolver/candidate_provider.py
+new file mode 100644
+--- /dev/null
++++ b/src/pip/_vendor/nab_resolver/candidate_provider.py
+@@ -0,0 +1,594 @@
++"""Drive the resolver with candidates prepared and ordered by a host."""
++
++from __future__ import annotations
++
++from collections import defaultdict, deque
++from collections.abc import Hashable
++from types import MappingProxyType
++from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar
++
++from ._compat import override
++from .priority import (
++    MAX_PRECHECK_BACKTRACKS,
++    PRECHECK_REJECTION_THRESHOLD,
++    compute_tier,
++)
++from .resolver import BaseProvider
++from .types import (
++    Incompatibility,
++    IncompatibilityCause,
++    RangeProtocol,
++    RootRequirement,
++    Term,
++)
++
++if TYPE_CHECKING:
++    from collections.abc import Iterable, Mapping, Sequence
++
++    from .resolver import Solution
++
++
++PackageType = TypeVar("PackageType", bound=Hashable)
++CandidateKeyType = TypeVar("CandidateKeyType", bound=Hashable)
++
++__all__ = [
++    "CandidateHost",
++    "CandidateProvider",
++    "CandidateRequirement",
++    "PreparedCandidate",
++]
++
++
++class CandidateRequirement(Generic[PackageType, CandidateKeyType]):
++    """A solver restriction retaining the host's original requirement object."""
++
++    __slots__ = ("constraint", "origin", "package")
++
++    def __init__(
++        self,
++        package: PackageType,
++        constraint: RangeProtocol[CandidateKeyType],
++        origin: object,
++    ) -> None:
++        """Retain stable host inputs for the duration of a resolve."""
++        self.package = package
++        self.constraint = constraint
++        self.origin = origin
++
++
++class PreparedCandidate(Generic[CandidateKeyType]):
++    """A usable candidate retaining the host's prepared install object."""
++
++    __slots__ = ("key", "origin")
++
++    def __init__(self, key: CandidateKeyType, origin: object) -> None:
++        """Associate one stable candidate key with its host object."""
++        self.key = key
++        self.origin = origin
++
++
++class CandidateHost(Protocol[PackageType, CandidateKeyType]):
++    """Prepare candidates using the host's current original requirements.
++
++    Eligibility for a fixed requirement set must not change because unrelated
++    metadata was cached. Source registries identify candidates; they do not
++    make every discovered source selectable.
++    """
++
++    def iter_candidates(
++        self,
++        package: PackageType,
++        allowed: RangeProtocol[CandidateKeyType],
++        requirements: Mapping[
++            PackageType, Sequence[CandidateRequirement[PackageType, CandidateKeyType]]
++        ],
++    ) -> Iterable[PreparedCandidate[CandidateKeyType]]:
++        """Yield usable candidates in native host order, preserving file fallbacks."""
++        ...
++
++    def get_dependencies(
++        self, candidate: PreparedCandidate[CandidateKeyType]
++    ) -> Iterable[CandidateRequirement[PackageType, CandidateKeyType]]:
++        """Bind active dependencies without changing unrelated source eligibility."""
++        ...
++
++    def priority(
++        self,
++        package: PackageType,
++        requirements: Sequence[CandidateRequirement[PackageType, CandidateKeyType]],
++    ) -> Any:
++        """Rank this package from its declarations and fixed host policy.
++
++        The result must remain stable while these declarations are unchanged.
++        """
++        ...
++
++
++class _QueryFeedback(Generic[PackageType]):
++    """Count contextual failures for one solve without changing candidate admission."""
++
++    __slots__ = ("parent_failures", "target_failures")
++
++    def __init__(self) -> None:
++        self.parent_failures: dict[PackageType, int] = {}
++        self.target_failures: dict[PackageType, int] = {}
++
++    def clear(self) -> None:
++        """Start a new solve with no inherited ordering feedback."""
++        self.parent_failures.clear()
++        self.target_failures.clear()
++
++    def record(self, package: PackageType, parents: Iterable[PackageType]) -> None:
++        """Credit the query target and each current declaring package."""
++        self.target_failures[package] = self.target_failures.get(package, 0) + 1
++        for parent in parents:
++            self.parent_failures[parent] = self.parent_failures.get(parent, 0) + 1
++
++    def priority(
++        self, package: PackageType, host_priority: Any
++    ) -> tuple[int, int, Any]:
++        """Prefer declaring packages, then failed targets, before the host's key."""
++        return (
++            -self.parent_failures.get(package, 0),
++            -self.target_failures.get(package, 0),
++            host_priority,
++        )
++
++
++class _PrecheckFeedback(Generic[PackageType, CandidateKeyType]):
++    """Bound retreat requests from distinct candidates sharing a selected blocker."""
++
++    __slots__ = ("counts", "parents", "rejected", "targets")
++
++    def __init__(self) -> None:
++        self.rejected: dict[
++            tuple[PackageType, PackageType, CandidateKeyType], set[CandidateKeyType]
++        ] = {}
++        self.counts: dict[PackageType, int] = {}
++        self.parents: dict[PackageType, set[PackageType]] = {}
++        self.targets: list[PackageType] = []
++
++    def clear(self) -> None:
++        """Forget rejection history at the start of a new solve."""
++        self.rejected.clear()
++        self.counts.clear()
++        self.parents.clear()
++        self.targets.clear()
++
++    def record(
++        self,
++        package: PackageType,
++        key: CandidateKeyType,
++        blocker: PackageType,
++        blocked_key: CandidateKeyType,
++    ) -> None:
++        """Record a distinct candidate and request a retreat at the shared threshold."""
++        requests = self.counts.get(blocker, 0)
++        if requests >= MAX_PRECHECK_BACKTRACKS:
++            return
++
++        rejected = self.rejected.setdefault((package, blocker, blocked_key), set())
++        rejected.add(key)
++        if (
++            len(rejected) >= PRECHECK_REJECTION_THRESHOLD
++            and blocker not in self.targets
++        ):
++            self.targets.append(blocker)
++            self.counts[blocker] = requests + 1
++            self.parents.setdefault(blocker, set()).add(package)
++            rejected.clear()
++
++    def consume_targets(self) -> list[PackageType]:
++        """Drain requested blockers without clearing their per-solve counts."""
++        targets = self.targets
++        self.targets = []
++        return targets
++
++    def requested(self, package: PackageType) -> bool:
++        """Whether a requesting parent still has to be decided."""
++        return package in self.parents
++
++    def decided(self, package: PackageType) -> bool:
++        """Expire blockers whose requesting parents have all been decided."""
++        if not self.parents:
++            return False
++        expired = []
++        for blocker, parents in self.parents.items():
++            parents.discard(package)
++            if not parents:
++                expired.append(blocker)
++
++        for blocker in expired:
++            del self.parents[blocker]
++
++        return bool(expired)
++
++
++class CandidateProvider(BaseProvider[PackageType, CandidateKeyType]):
++    """Keep candidate identity and active requirements around a host's selection."""
++
++    def __init__(
++        self,
++        host: CandidateHost[PackageType, CandidateKeyType],
++        roots: Sequence[CandidateRequirement[PackageType, CandidateKeyType]],
++        *,
++        query_feedback: bool = False,
++        conflict_feedback: bool = False,
++        dependency_precheck: bool = False,
++        precheck_feedback: bool = False,
++    ) -> None:
++        """Snapshot roots and configure optional ordering and dependency prechecks."""
++        if precheck_feedback and not dependency_precheck:
++            message = "precheck_feedback requires dependency_precheck"
++            raise ValueError(message)
++
++        self.host = host
++        self.roots = tuple(roots)
++        self._query_feedback = _QueryFeedback[PackageType]() if query_feedback else None
++        self._conflict_feedback = conflict_feedback
++        self._dependency_precheck = dependency_precheck
++        self._precheck_feedback = (
++            _PrecheckFeedback[PackageType, CandidateKeyType]()
++            if precheck_feedback
++            else None
++        )
++
++        self._positive_ranges: Mapping[
++            PackageType, RangeProtocol[CandidateKeyType]
++        ] = {}
++        self._pending: list[Incompatibility[PackageType, CandidateKeyType]] = []
++        self._decisions: Mapping[PackageType, CandidateKeyType] = {}
++        self._selected: dict[
++            tuple[PackageType, CandidateKeyType], PreparedCandidate[CandidateKeyType]
++        ] = {}
++        self._causes: dict[
++            tuple[PackageType, CandidateKeyType],
++            tuple[CandidateRequirement[PackageType, CandidateKeyType], ...],
++        ] = {}
++        self._dependencies: dict[
++            tuple[PackageType, CandidateKeyType],
++            dict[PackageType, RangeProtocol[CandidateKeyType]],
++        ] = {}
++
++        # A decision snapshot owns its immutable declaration view.
++        self._active_cache: (
++            Mapping[
++                PackageType,
++                tuple[CandidateRequirement[PackageType, CandidateKeyType], ...],
++            ]
++            | None
++        ) = None
++        self._priority_requirements: Mapping[
++            PackageType, tuple[CandidateRequirement[PackageType, CandidateKeyType], ...]
++        ] = {}
++
++    @override
++    def begin_resolution(self) -> None:
++        """Clear ordering feedback while retaining prepared candidate metadata."""
++        if self._query_feedback is not None:
++            self._query_feedback.clear()
++
++        self._pending.clear()
++        self._priority_requirements = {}
++        if self._precheck_feedback is not None:
++            self._precheck_feedback.clear()
++
++        if self._dependency_precheck:
++            self._positive_ranges = {}
++            self._decisions = {}
++            self._active_cache = None
++
++    @override
++    def receive_contextual_failure(self, package: PackageType) -> bool:
++        """Credit the failed query and its currently decided declaring packages."""
++        if self._query_feedback is None:
++            return False
++
++        parents = (
++            parent
++            for parent, key in self._decisions.items()
++            if any(
++                cause.package == package
++                for cause in self._causes.get((parent, key), ())
++            )
++        )
++        self._query_feedback.record(package, parents)
++        return True
++
++    @override
++    def receive_decision(self, package: PackageType, version: CandidateKeyType) -> bool:
++        """Expire forced demotion once the requesting parents are decided."""
++        del version
++        if self._precheck_feedback is None:
++            return False
++
++        return self._precheck_feedback.decided(package)
++
++    def root_requirements(self) -> list[RootRequirement[PackageType, CandidateKeyType]]:
++        """Return solver roots with their original host provenance attached."""
++        return [
++            RootRequirement(root.package, root.constraint, root.origin)
++            for root in self.roots
++        ]
++
++    def active_requirements(
++        self,
++    ) -> Mapping[
++        PackageType, tuple[CandidateRequirement[PackageType, CandidateKeyType], ...]
++    ]:
++        """Return read-only requirement collections for the decision snapshot."""
++        if self._active_cache is None:
++            self._active_cache = self._build_active_requirements()
++        return self._active_cache
++
++    def consume_priority_changes(self) -> set[PackageType]:
++        """Report declaration changes even when the solver's ranges did not move."""
++        current = self.active_requirements()
++        previous = self._priority_requirements
++        self._priority_requirements = current
++        return {
++            package
++            for package in previous.keys() | current.keys()
++            if previous.get(package) != current.get(package)
++        }
++
++    def _build_active_requirements(
++        self,
++    ) -> Mapping[
++        PackageType, tuple[CandidateRequirement[PackageType, CandidateKeyType], ...]
++    ]:
++        """Collect roots and dependencies of candidates in the current solution."""
++        requirements: dict[
++            PackageType, list[CandidateRequirement[PackageType, CandidateKeyType]]
++        ] = defaultdict(list)
++        for root in self.roots:
++            requirements[root.package].append(root)
++
++        for package, key in self._decisions.items():
++            for cause in self._causes.get((package, key), ()):
++                requirements[cause.package].append(cause)
++
++        return MappingProxyType(
++            {package: tuple(causes) for package, causes in requirements.items()}
++        )
++
++    def choose_version(
++        self, package: PackageType, version_range: RangeProtocol[CandidateKeyType]
++    ) -> CandidateKeyType | None:
++        """Prepare a candidate or queue its conflicting dependency before selection."""
++        for candidate in self.host.iter_candidates(
++            package, version_range, self.active_requirements()
++        ):
++            if candidate.key in version_range:
++                self._selected[package, candidate.key] = candidate
++                if self._dependency_precheck and self._precheck_dependencies(
++                    package, candidate.key, version_range
++                ):
++                    return None
++                return candidate.key
++
++        return None
++
++    def _precheck_dependencies(
++        self,
++        package: PackageType,
++        key: CandidateKeyType,
++        allowed: RangeProtocol[CandidateKeyType],
++    ) -> bool:
++        """Queue a dependency conflict without deciding the rejected candidate."""
++        dependencies = self.get_dependencies(package, key)
++        if package in dependencies:
++            return False
++
++        for dependency, required in dependencies.items():
++            if dependency not in self._decisions:
++                continue
++            assignment = self._positive_ranges.get(dependency)
++            if assignment is None or not assignment.is_disjoint(required):
++                continue
++            selected = required.singleton(self._decisions[dependency])
++            if not selected.is_disjoint(required):
++                continue
++
++            self._pending.append(
++                Incompatibility(
++                    [
++                        Term(package, allowed.singleton(key), positive=True),
++                        Term(dependency, required, positive=False),
++                    ],
++                    cause=IncompatibilityCause.DEPENDENCY,
++                )
++            )
++            if self._precheck_feedback is not None:
++                self._precheck_feedback.record(
++                    package, key, dependency, self._decisions[dependency]
++                )
++            return True
++
++        return False
++
++    @override
++    def consume_pending_clauses(
++        self,
++    ) -> list[Incompatibility[PackageType, CandidateKeyType]]:
++        """Drain prechecked dependencies before an ordinary absence is recorded."""
++        pending = self._pending
++        self._pending = []
++        return pending
++
++    @override
++    def consume_force_backtrack_targets(self) -> list[PackageType]:
++        """Request bounded retreats after repeated proven precheck blockers."""
++        if self._precheck_feedback is None:
++            return []
++
++        return self._precheck_feedback.consume_targets()
++
++    @override
++    def is_query_ready(self, package: PackageType) -> bool:
++        """Require original declarations before an early provisional absence."""
++        return bool(self.active_requirements().get(package, ()))
++
++    def has_satisfying_version(
++        self, package: PackageType, version_range: RangeProtocol[CandidateKeyType]
++    ) -> bool:
++        """Probe candidates without recording a solver selection."""
++        return any(
++            candidate.key in version_range
++            for candidate in self.host.iter_candidates(
++                package, version_range, self.active_requirements()
++            )
++        )
++
++    def widen_decision(self, package: PackageType, version: CandidateKeyType) -> None:
++        """Keep dependency clauses tied to one candidate identity."""
++        del package, version
++
++    def get_dependencies(
++        self, package: PackageType, version: CandidateKeyType
++    ) -> dict[PackageType, RangeProtocol[CandidateKeyType]]:
++        """Return dependency restrictions, stopping at the first empty result."""
++        key = package, version
++        cached = self._dependencies.get(key)
++        if cached is not None:
++            return cached
++
++        candidate = self._selected[key]
++        causes = []
++        dependencies: dict[PackageType, RangeProtocol[CandidateKeyType]] = {}
++        for cause in self.host.get_dependencies(candidate):
++            causes.append(cause)
++            previous = dependencies.get(cause.package)
++            dependencies[cause.package] = (
++                cause.constraint if previous is None else previous & cause.constraint
++            )
++            if dependencies[cause.package].is_empty:
++                break
++
++        # Metadata survives backtracking; only active declarations expire.
++        self._active_cache = None
++        self._causes[key] = tuple(causes)
++        self._dependencies[key] = dependencies
++        return dependencies
++
++    @override
++    def receive_partial_solution_hint(
++        self,
++        positive_ranges: Mapping[PackageType, RangeProtocol[CandidateKeyType]],
++        decisions: Mapping[PackageType, CandidateKeyType],
++    ) -> None:
++        """Retain the current decisions so rejected parents lose their requirements."""
++        if self._dependency_precheck:
++            self._positive_ranges = positive_ranges
++
++        self._decisions = decisions
++        self._active_cache = None
++
++    def prioritize(
++        self,
++        package: PackageType,
++        version_range: RangeProtocol[CandidateKeyType],
++        conflict_counts: Mapping[PackageType, int],
++        culprit_counts: Mapping[PackageType, int] | None = None,
++    ) -> Any:
++        """Order query feedback (parent, target), conflict tier, and host preference."""
++        del version_range
++        priority = self.host.priority(
++            package, self.active_requirements().get(package, ())
++        )
++        if self._conflict_feedback or self._precheck_feedback is not None:
++            affected = conflict_counts.get(package, 0) if self._conflict_feedback else 0
++            counts = culprit_counts if self._conflict_feedback else None
++            culprit = 0 if counts is None else counts.get(package, 0)
++            forced = (
++                self._precheck_feedback is not None
++                and self._precheck_feedback.requested(package)
++            )
++            priority = (
++                compute_tier(
++                    package, affected, culprit, counts, force_backtracked=forced
++                ),
++                priority,
++            )
++
++        if self._query_feedback is not None:
++            return self._query_feedback.priority(package, priority)
++        return priority
++
++    def prepared(
++        self, package: PackageType, key: CandidateKeyType
++    ) -> PreparedCandidate[CandidateKeyType]:
++        """Return the exact prepared candidate used by a solver decision."""
++        return self._selected[package, key]
++
++    def validate_solution(
++        self,
++        solution: Solution[PackageType, CandidateKeyType],
++        constraints: Mapping[PackageType, RangeProtocol[CandidateKeyType]]
++        | None = None,
++    ) -> bool:
++        """Check complete declarations, constraints and final host admission."""
++        requirements = self._validation_requirements(solution)
++        if requirements is None or requirements.keys() != solution.pins.keys():
++            return False
++
++        for package, key in solution.pins.items():
++            constraint = None if constraints is None else constraints.get(package)
++            if constraint is not None and key not in constraint:
++                return False
++            if any(key not in cause.constraint for cause in requirements[package]):
++                return False
++
++            allowed = requirements[package][0].constraint.singleton(key)
++            if not any(
++                offered.key == key
++                for offered in self.host.iter_candidates(package, allowed, requirements)
++            ):
++                return False
++        return True
++
++    def _validation_requirements(
++        self, solution: Solution[PackageType, CandidateKeyType]
++    ) -> (
++        dict[PackageType, list[CandidateRequirement[PackageType, CandidateKeyType]]]
++        | None
++    ):
++        """Rebuild reachable declarations, requiring a prepared pin for each package."""
++        requirements: dict[
++            PackageType, list[CandidateRequirement[PackageType, CandidateKeyType]]
++        ] = defaultdict(list)
++        pending = deque(root.package for root in self.roots)
++        for root in self.roots:
++            requirements[root.package].append(root)
++
++        visited = set()
++        while pending:
++            package = pending.popleft()
++            if package in visited:
++                continue
++            if package not in solution.pins:
++                return None
++
++            candidate = self._selected.get((package, solution.pins[package]))
++            if candidate is None:
++                return None
++
++            visited.add(package)
++            for cause in self.host.get_dependencies(candidate):
++                requirements[cause.package].append(cause)
++                pending.append(cause.package)
++        return requirements
++
++    def causes_for(
++        self, package: PackageType, key: CandidateKeyType
++    ) -> tuple[CandidateRequirement[PackageType, CandidateKeyType], ...]:
++        """Return the host dependency declarations consumed for this candidate."""
++        return self._causes.get((package, key), ())
++
++    def recorded_candidates(
++        self,
++    ) -> Iterable[tuple[PackageType, PreparedCandidate[CandidateKeyType]]]:
++        """Iterate prepared decisions retained for failure provenance."""
++        return (
++            (package, candidate) for (package, _), candidate in self._selected.items()
++        )
+diff --git a/src/pip/_vendor/nab_resolver/decide.py b/src/pip/_vendor/nab_resolver/decide.py
+--- a/src/pip/_vendor/nab_resolver/decide.py
++++ b/src/pip/_vendor/nab_resolver/decide.py
+@@ -16,10 +16,13 @@
+ from typing import TYPE_CHECKING, Any
+ 
+ from .incompat_index import add_incompatibility
++from .root import ROOT
+ from .types import Incompatibility, IncompatibilityCause, RangeProtocol, Term
+ 
+ if TYPE_CHECKING:
+-    from .resolver import Resolver
++    from collections.abc import Set as AbstractSet
++
++    from .resolver import Resolver, ResolverProvider
+ 
+ __all__ = [
+     "absorb_pending_clauses",
+@@ -27,11 +30,14 @@
+     "choose_package_to_decide",
+     "choose_version",
+     "record_no_versions",
++    "refresh_provider_hint",
+ ]
+ 
+ 
+-def choose_package_to_decide(resolver: Resolver[Any, Any]) -> Any | None:
+-    """Choose the next undecided package, or None if all decided.
++def choose_package_to_decide(
++    resolver: Resolver[Any, Any], excluded: AbstractSet[Any] | None = None
++) -> Any | None:
++    """Choose the next undecided package outside ``excluded``, or None.
+ 
+     Prefers ``is_ready`` packages so resolution keeps making progress while
+     other listings/metadata are still in flight.  ``begin_decision_scan`` marks
+@@ -41,12 +47,20 @@
+     across scans, so one that moves without the solution or ``priority_epoch``
+     moving is never read again.
+ 
++    A dynamic provider can supply ``consume_priority_changes`` to report
++    additional invalidations and use the queue across deferred queries.
++    Without that contract, dynamic queries recompute every eligible key.
++
+     ``ROOT`` never turns up in the undecided set: it is decided at level 1, a
+     targeted backtrack never aims lower, and conflict resolution raises rather
+     than backjumping to level 0.
+     """
+     undecided = resolver.solution.undecided_packages()
++    if excluded is not None and excluded:
++        undecided = undecided - excluded
+     if not undecided:
++        if excluded is not None and resolver.solution.undecided_packages():
++            resolver.provider.begin_decision_scan()
+         return None
+ 
+     # Readiness can depend on decisions changed by propagation or backtracking.
+@@ -84,21 +98,36 @@
+             tiebreak_cache[package] = tiebreak
+         return (ready_penalty, priority, tiebreak)
+ 
++    consume_changes = getattr(resolver.provider, "consume_priority_changes", None)
++    if excluded is not None and consume_changes is None:
++        resolver.solution.take_changed_packages()
++        return min(undecided, key=sort_key)
++
++    changed = resolver.solution.take_changed_packages()
++    if consume_changes is not None:
++        changed.update(consume_changes())
+     return resolver.decision_queue.pick(
+         undecided,
+         sort_key,
+-        resolver.solution.take_changed_packages(),
++        changed,
+         resolver.priority_epoch,
+         key_inputs_arrived,
+-    )
+-
+-
+-def choose_version(resolver: Resolver[Any, Any], package: Any) -> Any | None:
++        excluded=excluded,
++    )
++
++
++def choose_version(
++    resolver: Resolver[Any, Any],
++    package: Any,
++    *,
++    hinted_provider: ResolverProvider[Any, Any] | None = None,
++) -> Any | None:
+     """Ask the provider to pick a version within the allowed range.
+ 
+     A user constraint narrows the acceptable range here rather than acting
+     as an incompatibility: it restricts which version is picked but never
+-    forces the package into the solution.
++    forces the package into the solution. A provider already refreshed for
++    this decision phase needs no second hint.
+     """
+     current_range = resolver.solution.get(package) or resolver.range_type.full()
+     constraint = resolver.constraints.get(package)
+@@ -106,15 +135,23 @@
+         current_range = current_range & constraint
+ 
+     provider = resolver.provider
+-    # The hint costs two snapshots of the solution, so it is skipped for the
+-    # provider whose hook is ``BaseProvider``'s discarding no-op.
++    if provider is not hinted_provider:
++        refresh_provider_hint(resolver)
++    return provider.choose_version(package, current_range)
++
++
++def refresh_provider_hint(resolver: Resolver[Any, Any]) -> ResolverProvider[Any, Any]:
++    """Return the current provider, delivering snapshots unless its hint is a no-op."""
++    provider = resolver.provider
++
++    # The inherited no-op cannot read either snapshot.
+     if provider is not resolver._hint_ignoring_provider:  # noqa: SLF001
+         provider.receive_partial_solution_hint(
+             resolver.solution.positive_ranges(),
+             resolver.solution.decisions(),
+         )
+ 
+-    return provider.choose_version(package, current_range)
++    return provider
+ 
+ 
+ def _normalize_terms(
+@@ -142,6 +179,8 @@
+     the default ``NO_VERSIONS`` clause this turn.
+     """
+     clauses = list(resolver.provider.consume_pending_clauses())
++    if clauses and resolver.deferred is not None:
++        resolver.deferred.clear()
+     for incompatibility in clauses:
+         _normalize_terms(resolver, incompatibility)
+         add_incompatibility(resolver, incompatibility)
+@@ -191,15 +230,25 @@
+ 
+ 
+ def record_no_versions(
+-    resolver: Resolver[Any, Any], package: Any, *, had_pending: bool
++    resolver: Resolver[Any, Any],
++    package: Any,
++    *,
++    had_pending: bool,
++    deferrable: bool = True,
+ ) -> None:
+-    """Add the default ``NO_VERSIONS`` clause for ``package``.
++    """Defer a failed query or record its default absence clause.
+ 
+     Skipped when the provider already supplied context-aware clauses;
+     otherwise the broad clause would persist past the backjump that lifts
+     the supporting decisions.
+     """
+     if had_pending:
++        return
++    if deferrable and resolver.deferred is not None:
++        if resolver.provisional and _can_assume_absence(resolver, package):
++            _record_provisional_absence(resolver, package)
++            return
++        resolver.deferred.packages[package] = None
+         return
+ 
+     current_range = resolver.solution.get(package) or resolver.term_top
+@@ -224,3 +273,74 @@
+             constraint_range=constraint_range,
+         ),
+     )
++
++
++def _can_assume_absence(resolver: Resolver[Any, Any], package: Any) -> bool:
++    """Ask whether this provisional query had enough host context to run."""
++    ready = getattr(resolver.provider, "is_query_ready", None)
++    return ready is not None and bool(ready(package))
++
++
++def _record_provisional_absence(resolver: Resolver[Any, Any], package: Any) -> None:
++    """Record an assumed absence, including queries preceding every real decision."""
++    # Probes can raise before the incompatibility is recorded.
++    resolver.provisional_absences += 1
++    current_range = resolver.solution.get(package) or resolver.term_top
++    resolver.observer.on_no_versions(package, current_range)
++    constraint = resolver.constraints.get(package)
++    if constraint is None or not _constraint_hid_a_version(
++        resolver, package, current_range
++    ):
++        constraint = None
++    receive_failure = getattr(resolver.provider, "receive_contextual_failure", None)
++    if receive_failure is not None and receive_failure(package):
++        resolver.priority_epoch += 1
++    cause = (
++        IncompatibilityCause.NO_VERSIONS
++        if constraint is None
++        else IncompatibilityCause.CONSTRAINT
++    )
++    add_incompatibility(
++        resolver,
++        Incompatibility(
++            [Term(package, current_range, positive=True)],
++            cause=cause,
++            constraint_range=constraint,
++        ),
++    )
++
++
++def record_contextual_no_versions(resolver: Resolver[Any, Any], package: Any) -> None:
++    """Guard an exhausted availability query by every other current decision."""
++    if resolver.provisional and _can_assume_absence(resolver, package):
++        _record_provisional_absence(resolver, package)
++        return
++    decisions = resolver.solution.decisions()
++    guards = [
++        Term(name, resolver.range_type.singleton(version), positive=True)
++        for name, version in decisions.items()
++        if name is not ROOT
++    ]
++    if not guards:
++        record_no_versions(resolver, package, had_pending=False, deferrable=False)
++        return
++
++    current_range = resolver.solution.get(package) or resolver.term_top
++    resolver.observer.on_no_versions(package, current_range)
++    constraint = resolver.constraints.get(package)
++    if constraint is None or not _constraint_hid_a_version(
++        resolver, package, current_range
++    ):
++        constraint = None
++    receive_failure = getattr(resolver.provider, "receive_contextual_failure", None)
++    if receive_failure is not None and receive_failure(package):
++        resolver.priority_epoch += 1
++
++    add_incompatibility(
++        resolver,
++        Incompatibility(
++            [Term(package, current_range, positive=True), *guards],
++            cause=IncompatibilityCause.CONTEXTUAL_NO_VERSIONS,
++            constraint_range=constraint,
++        ),
++    )
+diff --git a/src/pip/_vendor/nab_resolver/decision_queue.py b/src/pip/_vendor/nab_resolver/decision_queue.py
+--- a/src/pip/_vendor/nab_resolver/decision_queue.py
++++ b/src/pip/_vendor/nab_resolver/decision_queue.py
+@@ -43,6 +43,7 @@
+         self._heap: list[tuple[tuple[Any, ...], int, PackageType]] = []
+         self._keys: dict[PackageType, tuple[Any, ...]] = {}
+         self._unready: set[PackageType] = set()
++        self._excluded: set[PackageType] = set()
+         self._epoch = 0
+         self._pushes = 0
+         self._rebuild_at = _REBUILD_MINIMUM
+@@ -52,6 +53,7 @@
+         self._heap.clear()
+         self._keys.clear()
+         self._unready.clear()
++        self._excluded.clear()
+         self._epoch = 0
+         self._rebuild_at = _REBUILD_MINIMUM
+ 
+@@ -62,6 +64,8 @@
+         changed: set[PackageType],
+         epoch: int,
+         key_inputs_arrived: Callable[[PackageType], bool] | None = None,
++        *,
++        excluded: AbstractSet[PackageType] | None = None,
+     ) -> PackageType:
+         """Return the undecided package with the smallest sort key.
+ 
+@@ -72,6 +76,10 @@
+         scan; a new ``epoch`` stands for a move in the counts every key reads,
+         so it re-evaluates all of them.
+ 
++        ``excluded`` names deferred packages already removed from ``undecided``.
++        Changes to that set invalidate their keys, including when a deferred
++        package returns without a new solution assignment.
++
+         ``sort_key`` must lead with the ready penalty: a truthy first field
+         keeps the package on the re-evaluate list until it clears.
+ 
+@@ -80,6 +88,11 @@
+         already gave stands until that answer turns true, which lets the scan
+         keep the key instead of building it again.
+         """
++        if excluded is not None or self._excluded:
++            current_excluded = set(excluded or ())
++            changed = changed | (self._excluded ^ current_excluded)
++            self._excluded = current_excluded
++
+         # _stale_packages overwrites the stored epoch, so compare before it
+         # runs: a new epoch re-evaluates every key, probe or not.
+         probe = key_inputs_arrived if epoch == self._epoch else None
+diff --git a/src/pip/_vendor/nab_resolver/deferred.py b/src/pip/_vendor/nab_resolver/deferred.py
+new file mode 100644
+--- /dev/null
++++ b/src/pip/_vendor/nab_resolver/deferred.py
+@@ -0,0 +1,39 @@
++"""Track a stable sweep of queries whose candidates may be discovered later."""
++
++from __future__ import annotations
++
++from typing import TYPE_CHECKING, Generic
++
++if TYPE_CHECKING:
++    from collections.abc import Callable
++
++from .types import PackageType
++
++
++class DeferredChoices(Generic[PackageType]):
++    """Remember unavailable packages until resolution or availability progresses."""
++
++    def __init__(self, generation: Callable[[], int]) -> None:
++        """Start with no deferred queries at the provider's current generation."""
++        self.read_generation = generation
++        self.packages: dict[PackageType, None] = {}
++        self.generation = generation()
++        self.derivations = 0
++        self.decisions = 0
++
++    def clear(self) -> None:
++        """Start another sweep after a decision, backjump or queued clause."""
++        self.packages.clear()
++
++    def refresh(self, derivations: int, decisions: int) -> None:
++        """Invalidate failed queries when their allowed ranges or candidates change."""
++        generation = self.read_generation()
++        if (
++            generation != self.generation
++            or derivations != self.derivations
++            or decisions != self.decisions
++        ):
++            self.packages.clear()
++        self.generation = generation
++        self.derivations = derivations
++        self.decisions = decisions
+diff --git a/src/pip/_vendor/nab_resolver/errors.py b/src/pip/_vendor/nab_resolver/errors.py
+--- a/src/pip/_vendor/nab_resolver/errors.py
++++ b/src/pip/_vendor/nab_resolver/errors.py
+@@ -35,6 +35,7 @@
+     ``ResolutionTerminatedError`` identifies a limit or resolver fault.
+     Its incompatibility, when present, is diagnostic rather than a proof
+     that the requirements are unsatisfiable.
++    Provisional assumptions also make a derived failure inconclusive.
+ 
+     ``verbose_message`` is the same report at more depth, set by whatever
+     augments the error with what the resolve knows beyond the derivation.
+diff --git a/src/pip/_vendor/nab_resolver/keyed_ranges.py b/src/pip/_vendor/nab_resolver/keyed_ranges.py
+new file mode 100644
+--- /dev/null
++++ b/src/pip/_vendor/nab_resolver/keyed_ranges.py
+@@ -0,0 +1,202 @@
++"""Range algebra over an unbounded key domain with finite exceptions."""
++
++from __future__ import annotations
++
++from collections.abc import Hashable
++from typing import TYPE_CHECKING, Any, Generic, TypeVar
++
++from ._compat import override
++from .types import RangeProtocol, RangeRelation
++from .values import FrozenValue
++
++if TYPE_CHECKING:
++    from collections.abc import Callable, Iterable, Iterator, Mapping
++
++    from typing_extensions import Self
++
++__all__ = ["KeyedRange"]
++
++KeyType = TypeVar("KeyType", bound=Hashable)
++ValueType = TypeVar("ValueType", bound=Hashable)
++
++
++class KeyedRange(FrozenValue, Generic[KeyType, ValueType]):
++    """A default range and finite replacements for particular keys.
++
++    Keys need equality and hashing, but need not be ordered or enumerable.
++    Coordinate ranges must obey :class:`RangeProtocol` with one shared policy.
++    A domain-specific subclass supplies its scalar factories and membership.
++    Binary operations retain that subclass and call its constructor.
++    """
++
++    __slots__ = __match_args__ = ("default", "overrides", "_hash")
++
++    default: RangeProtocol[ValueType]
++    overrides: tuple[tuple[KeyType, RangeProtocol[ValueType]], ...]
++    _hash: int
++
++    def __init__(
++        self,
++        default: RangeProtocol[ValueType],
++        overrides: Mapping[KeyType, RangeProtocol[ValueType]]
++        | Iterable[tuple[KeyType, RangeProtocol[ValueType]]] = (),
++    ) -> None:
++        """Snapshot replacements, keeping the last range for repeated keys."""
++        normalized = tuple(
++            (key, value) for key, value in dict(overrides).items() if value != default
++        )
++
++        object.__setattr__(self, "default", default)
++        object.__setattr__(self, "overrides", normalized)
++        object.__setattr__(self, "_hash", hash((default, frozenset(normalized))))
++
++    def for_key(self, key: KeyType) -> RangeProtocol[ValueType]:
++        """Return the coordinate applying to a key, including an unseen key."""
++        for stored, value in self.overrides:
++            if stored == key:
++                return value
++        return self.default
++
++    def contains(self, key: KeyType, value: ValueType) -> bool:
++        """Test a value in its key's coordinate."""
++        return value in self.for_key(key)
++
++    @property
++    def is_empty(self) -> bool:
++        """Whether every coordinate is empty."""
++        return self.default.is_empty and all(
++            value.is_empty for _, value in self.overrides
++        )
++
++    def _combine(
++        self,
++        other: Self,
++        operation: Callable[
++            [RangeProtocol[ValueType], RangeProtocol[ValueType]],
++            RangeProtocol[ValueType],
++        ],
++    ) -> Self:
++        """Apply an operation to the default and each exceptional coordinate."""
++        default = operation(self.default, other.default)
++
++        # The default represents every key outside these finite exceptions.
++        return type(self)(
++            default,
++            (
++                (key, operation(left, right))
++                for key, left, right in self._coordinate_pairs(other)
++            ),
++        )
++
++    def _coordinate_pairs(
++        self, other: Self
++    ) -> Iterator[tuple[KeyType, RangeProtocol[ValueType], RangeProtocol[ValueType]]]:
++        """Pair exceptional coordinates without repeated scans of either tuple."""
++        left = dict(self.overrides)
++        right = dict(other.overrides)
++        for key in left.keys() | right.keys():
++            yield key, left.get(key, self.default), right.get(key, other.default)
++
++    def __and__(self, other: object) -> Self:
++        """Intersect each key's range."""
++        if not isinstance(other, type(self)):
++            # Zuban does not allow the standard operator fallback for Self.
++            return NotImplemented  # zuban: ignore[return-value]
++
++        return self._combine(other, lambda left, right: left & right)
++
++    def __or__(self, other: object) -> Self:
++        """Union each key's range."""
++        if not isinstance(other, type(self)):
++            # Zuban does not allow the standard operator fallback for Self.
++            return NotImplemented  # zuban: ignore[return-value]
++
++        return self._combine(other, lambda left, right: left | right)
++
++    def __sub__(self, other: object) -> Self:
++        """Remove the other range at each key."""
++        if not isinstance(other, type(self)):
++            # Zuban does not allow the standard operator fallback for Self.
++            return NotImplemented  # zuban: ignore[return-value]
++
++        return self._combine(other, lambda left, right: left - right)
++
++    def __invert__(self) -> Self:
++        """Complement every coordinate, including keys not yet encountered."""
++        return type(self)(
++            ~self.default, ((key, ~value) for key, value in self.overrides)
++        )
++
++    def is_subset(self, other: Self) -> bool:
++        """Whether every admitted keyed value is also admitted by the other."""
++        return self.relation(other).is_subset
++
++    def is_superset(self, other: Self) -> bool:
++        """Whether every keyed value in the other range is admitted here."""
++        return other.is_subset(self)
++
++    def is_disjoint(self, other: Self) -> bool:
++        """Whether the ranges share no keyed value."""
++        return self.relation(other).is_disjoint
++
++    def relation(self, other: Self) -> RangeRelation:
++        """Combine the scalar relation over the default and finite exceptions."""
++        relation = self.default.relation(other.default)
++        subset = relation.is_subset
++        disjoint = relation.is_disjoint
++        for _, left, right in self._coordinate_pairs(other):
++            relation = left.relation(right)
++            subset &= relation.is_subset
++            disjoint &= relation.is_disjoint
++
++        if subset:
++            return RangeRelation.EMPTY if disjoint else RangeRelation.SUBSET
++        return RangeRelation.DISJOINT if disjoint else RangeRelation.OVERLAPPING
++
++    @override
++    def identity(self) -> tuple[object, ...]:
++        """Compare coordinates independently of the cached hash."""
++        return self.default, frozenset(self.overrides)
++
++    @override
++    def __eq__(self, other: object) -> bool:
++        """Compare keyed coordinates without retaining a second lookup table."""
++        if not isinstance(other, type(self)):
++            return NotImplemented
++        if self.default != other.default:
++            return False
++        if self.overrides == other.overrides:
++            return True
++        if len(self.overrides) != len(other.overrides):
++            return False
++
++        # Coordinate order does not change the admitted set.
++        return dict(self.overrides) == dict(other.overrides)
++
++    @override
++    def __hash__(self) -> int:
++        """Return the hash of the snapshotted coordinates."""
++        return self._hash
++
++    @override
++    def __getstate__(
++        self,
++    ) -> dict[str, Any] | tuple[dict[str, Any], dict[str, Any]]:
++        """Omit the process-specific hash when copying or serializing."""
++        state = super().__getstate__()
++        dictionary = state[0] if isinstance(state, tuple) else state
++        del dictionary["_hash"]
++        return state
++
++    @override
++    def __setstate__(
++        self, state: dict[str, Any] | tuple[dict[str, Any], dict[str, Any]]
++    ) -> None:
++        """Restore fields, then compute the hash in the receiving process."""
++        super().__setstate__(state)
++        object.__setattr__(self, "_hash", hash(self.identity()))
++
++    @override
++    def __str__(self) -> str:
++        """Render the default and exceptional coordinates."""
++        return f"{self.default!r}; keys={self.overrides!r}"
+diff --git a/src/pip/_vendor/nab_resolver/priority.py b/src/pip/_vendor/nab_resolver/priority.py
+new file mode 100644
+--- /dev/null
++++ b/src/pip/_vendor/nab_resolver/priority.py
+@@ -0,0 +1,68 @@
++"""Shared conflict ordering and bounded dependency-precheck feedback."""
++
++from __future__ import annotations
++
++from typing import TYPE_CHECKING
++
++if TYPE_CHECKING:
++    from collections.abc import Mapping
++
++    from .types import PackageType
++
++__all__ = [
++    "CONFLICT_THRESHOLD",
++    "CULPRIT_DEMOTE_THRESHOLD",
++    "MAX_PRECHECK_BACKTRACKS",
++    "PRECHECK_REJECTION_THRESHOLD",
++    "TIER_AFFECTED",
++    "TIER_CULPRIT",
++    "TIER_NORMAL",
++    "compute_tier",
++    "is_dominant_culprit",
++]
++
++
++CONFLICT_THRESHOLD = 5
++PRECHECK_REJECTION_THRESHOLD = 4
++MAX_PRECHECK_BACKTRACKS = 3
++
++# Minimum culprit count and lead required for count-based demotion.
++CULPRIT_DEMOTE_THRESHOLD = 5
++
++# Lower number = higher priority.
++TIER_AFFECTED = 0
++TIER_NORMAL = 1
++TIER_CULPRIT = 2
++
++
++def compute_tier(
++    package: PackageType,
++    affected_count: int,
++    culprit_count: int,
++    culprit_counts: Mapping[PackageType, int] | None,
++    *,
++    force_backtracked: bool = False,
++) -> int:
++    """Apply conflict promotion and culprit or forced-backtrack demotion."""
++    if affected_count >= CONFLICT_THRESHOLD:
++        return TIER_AFFECTED
++    if force_backtracked:
++        return TIER_CULPRIT
++    if is_dominant_culprit(package, culprit_count, culprit_counts):
++        return TIER_CULPRIT
++    return TIER_NORMAL
++
++
++def is_dominant_culprit(
++    package: PackageType,
++    package_count: int,
++    culprit_counts: Mapping[PackageType, int] | None,
++) -> bool:
++    """Identify the leading culprit when its gap reaches the demotion threshold."""
++    if culprit_counts is None or package_count < CULPRIT_DEMOTE_THRESHOLD:
++        return False
++    second_highest = max(
++        (count for other, count in culprit_counts.items() if other != package),
++        default=0,
++    )
++    return package_count - second_highest >= CULPRIT_DEMOTE_THRESHOLD
+diff --git a/src/pip/_vendor/nab_resolver/proofs.py b/src/pip/_vendor/nab_resolver/proofs.py
+new file mode 100644
+--- /dev/null
++++ b/src/pip/_vendor/nab_resolver/proofs.py
+@@ -0,0 +1,182 @@
++"""Recover original dependency requests from a PubGrub failure proof."""
++
++from __future__ import annotations
++
++from collections import Counter
++from collections.abc import Hashable, Sequence
++from typing import Generic, TypeVar
++
++from .root import ROOT
++from .types import Incompatibility, IncompatibilityCause, RangeProtocol, Term
++
++__all__ = [
++    "DependencyCause",
++    "dependency_terms",
++    "external_clauses",
++    "select_dependency_causes",
++]
++
++PackageType = TypeVar("PackageType", bound=Hashable)
++VersionType = TypeVar("VersionType", bound=Hashable)
++
++
++class DependencyCause(Generic[PackageType, VersionType]):
++    """An original request and the parent versions responsible for it."""
++
++    parent: PackageType | None
++    package: PackageType
++    parent_range: RangeProtocol[VersionType] | None
++    constraint: RangeProtocol[VersionType]
++
++    __slots__ = ("constraint", "package", "parent", "parent_range")
++
++    def __init__(
++        self,
++        parent: PackageType | None,
++        package: PackageType,
++        parent_range: RangeProtocol[VersionType] | None,
++        constraint: RangeProtocol[VersionType],
++    ) -> None:
++        """Retain one original request without changing its ranges."""
++        self.parent = parent
++        self.package = package
++        self.parent_range = parent_range
++        self.constraint = constraint
++
++
++_DEPENDENCY_TERMS = 2
++
++
++def external_clauses(
++    derivation: Incompatibility[PackageType, VersionType] | None,
++    *,
++    left_first: bool = True,
++) -> list[Incompatibility[PackageType, VersionType]]:
++    """Return original facts once in the caller's chosen proof order."""
++    if derivation is None:
++        return []
++
++    return [
++        clause
++        for clause in derivation.walk(left_first=left_first)
++        if clause.cause is not IncompatibilityCause.DERIVED
++    ]
++
++
++def dependency_terms(
++    clause: Incompatibility[PackageType, VersionType],
++    terms: Sequence[Term[PackageType, VersionType]] | None = None,
++) -> tuple[Term[PackageType, VersionType], Term[PackageType, VersionType]] | None:
++    """Recover dependency sides, including merged self-dependency terms."""
++    if clause.cause is not IncompatibilityCause.DEPENDENCY:
++        return None
++
++    terms = clause.terms if terms is None else terms
++    if len(terms) == _DEPENDENCY_TERMS:
++        return terms[0], terms[1]
++
++    if len(terms) != 1 or clause.dependency_range is None:
++        return None
++
++    parent = terms[0]
++    return parent, Term(parent.package, clause.dependency_range, positive=False)
++
++
++def _requested_cause(
++    clause: Incompatibility[PackageType, VersionType],
++) -> DependencyCause[PackageType, VersionType] | None:
++    """Read a root or dependency clause without treating guards as requests."""
++    positive = [term for term in clause.terms if term.is_positive()]
++    negative = [term for term in clause.terms if not term.is_positive()]
++
++    # A merged self-dependency keeps its requested range on the clause.
++    if len(positive) == 1 and clause.dependency_range is not None:
++        parent = positive[0]
++        return DependencyCause(
++            parent.package, parent.package, parent.constraint, clause.dependency_range
++        )
++
++    if len(positive) != 1 or len(negative) != 1:
++        return None
++
++    parent, requested = positive[0], negative[0]
++    return DependencyCause(
++        None if parent.package is ROOT else parent.package,
++        requested.package,
++        None if parent.package is ROOT else parent.constraint,
++        requested.constraint,
++    )
++
++
++def _unavailable_ranges(
++    clauses: Sequence[Incompatibility[PackageType, VersionType]],
++) -> tuple[set[PackageType], dict[PackageType, RangeProtocol[VersionType]]]:
++    """Collect blamed packages and proven absence domains."""
++    unavailable: dict[PackageType, RangeProtocol[VersionType]] = {}
++    blamed: set[PackageType] = set()
++    for clause in clauses:
++        # Contextual absence names its unavailable package before its guards.
++        if clause.cause is IncompatibilityCause.CONTEXTUAL_NO_VERSIONS:
++            package = clause.terms[0].package
++        else:
++            positive = [term for term in clause.terms if term.is_positive()]
++            if len(positive) != 1:
++                continue
++            package = positive[0].package
++
++        if clause.cause is IncompatibilityCause.CONSTRAINT:
++            blamed.add(package)
++        elif clause.cause in {
++            IncompatibilityCause.NO_VERSIONS,
++            IncompatibilityCause.CONTEXTUAL_NO_VERSIONS,
++        }:
++            bounds = clause.terms[0].constraint
++            previous = unavailable.get(package)
++            unavailable[package] = bounds if previous is None else previous | bounds
++
++    return blamed, unavailable
++
++
++def select_dependency_causes(
++    clauses: Sequence[Incompatibility[PackageType, VersionType]],
++) -> list[DependencyCause[PackageType, VersionType]]:
++    """Attribute absence and contradictory requests to original dependency edges."""
++    blamed, unavailable = _unavailable_ranges(clauses)
++    requested: list[DependencyCause[PackageType, VersionType]] = []
++    impossible: set[
++        tuple[PackageType | None, PackageType, RangeProtocol[VersionType] | None]
++    ] = set()
++
++    for clause in clauses:
++        if clause.cause not in {
++            IncompatibilityCause.ROOT,
++            IncompatibilityCause.DEPENDENCY,
++        }:
++            continue
++        cause = _requested_cause(clause)
++        if cause is None:
++            continue
++        requested.append(cause)
++        if clause.cause is IncompatibilityCause.DEPENDENCY and any(
++            not term.is_positive() and term.constraint.is_empty for term in clause.terms
++        ):
++            impossible.add((cause.parent, cause.package, cause.parent_range))
++
++        absent = unavailable.get(cause.package)
++        if absent is not None and cause.constraint.is_subset(absent):
++            blamed.add(cause.package)
++
++    # An impossible dependency already explains why its parent cannot be selected.
++    upstream = {parent for parent, package, _ in impossible if parent != package}
++    selected = [
++        cause
++        for cause in requested
++        if (cause.parent, cause.package, cause.parent_range) in impossible
++        or (cause.package in blamed and cause.package not in upstream)
++    ]
++    if selected or not requested:
++        return selected
++
++    counts = Counter(cause.package for cause in requested)
++    most_requested = max(counts.values())
++    return [cause for cause in requested if counts[cause.package] == most_requested]
+diff --git a/src/pip/_vendor/nab_resolver/report.py b/src/pip/_vendor/nab_resolver/report.py
+--- a/src/pip/_vendor/nab_resolver/report.py
++++ b/src/pip/_vendor/nab_resolver/report.py
+@@ -13,6 +13,7 @@
+ 
+ from typing import TYPE_CHECKING, Any, TypeAlias
+ 
++from .proofs import dependency_terms
+ from .root import ROOT
+ from .types import IncompatibilityCause, PackageType, Term, VersionType
+ 
+@@ -129,7 +130,10 @@
+     The comparison runs on exactly what the reader sees, so a requirement is
+     read as printed, un-narrowed, the way the line states it.
+     """
+-    if incompatibility.cause is IncompatibilityCause.NO_VERSIONS:
++    if incompatibility.cause in {
++        IncompatibilityCause.NO_VERSIONS,
++        IncompatibilityCause.CONTEXTUAL_NO_VERSIONS,
++    }:
+         return {term.package: term for term in incompatibility.terms}
+     return {
+         term.package: _narrow_positive(term, narrow) for term in incompatibility.terms
+@@ -241,31 +245,6 @@
+     return found
+ 
+ 
+-def _dependency_pair(
+-    incompatibility: Incompatibility[Any, Any], terms: Sequence[Term[Any, Any]]
+-) -> tuple[Term[Any, Any], Term[Any, Any]] | None:
+-    """Return the parent and dependency terms of a DEPENDENCY clause, else None.
+-
+-    ``terms`` are the clause's terms as the line renders them, which is not
+-    ``incompatibility.terms`` once narrowing has been applied.  A package
+-    depending on itself merges the two terms into one, so the dependency side
+-    is rebuilt from the range the clause carries.
+-    """
+-    if incompatibility.cause is not IncompatibilityCause.DEPENDENCY:
+-        return None
+-
+-    if len(terms) == _ATTRIBUTION_CLAUSE_TERMS:
+-        parent, dependency = terms
+-        return parent, dependency
+-
+-    dependency_range = incompatibility.dependency_range
+-    if len(terms) != 1 or dependency_range is None:
+-        return None
+-
+-    (parent,) = terms
+-    return parent, Term(parent.package, dependency_range, positive=False)
+-
+-
+ def _render_line(
+     incompatibility: Incompatibility[Any, Any],
+     narrow: _NarrowFn | None,
+@@ -276,10 +255,16 @@
+     terms = incompatibility.terms
+     # An availability line renders its own range: narrowing it onto the listing
+     # is what let it stop covering the requirement it closes against.
+-    if narrow is not None and cause is not IncompatibilityCause.NO_VERSIONS:
++    if narrow is not None and cause not in {
++        IncompatibilityCause.NO_VERSIONS,
++        IncompatibilityCause.CONTEXTUAL_NO_VERSIONS,
++    }:
+         terms = [_narrow_positive(term, narrow) for term in terms]
+ 
+-    attributed = _dependency_pair(incompatibility, terms)
++    if cause is IncompatibilityCause.CONTEXTUAL_NO_VERSIONS:
++        return _render_contextual_no_versions(incompatibility, format_range)
++
++    attributed = dependency_terms(incompatibility, terms)
+     if attributed is not None:
+         parent, dep = attributed
+         plural = _is_full(parent)
+@@ -308,6 +293,21 @@
+         return f"because the user constrained {subject}"
+ 
+     return _render_prefix_line(cause, terms, format_range)
++
++
++def _render_contextual_no_versions(
++    incompatibility: Incompatibility[Any, Any], format_range: _FormatFn
++) -> str:
++    """Render an absence with its supporting decisions."""
++    unavailable, *guards = incompatibility.terms
++    context = " and ".join(format_term(term, format_range) for term in guards)
++    if incompatibility.constraint_range is not None:
++        requirement = _with_range(
++            str(unavailable.package), format_range(incompatibility.constraint_range)
++        )
++        return f"because the user constrained {requirement} with {context} selected"
++    requirement = _format_requirement(unavailable, format_range)
++    return f"because no versions of {requirement} are available with {context} selected"
+ 
+ 
+ def _render_prefix_line(
+diff --git a/src/pip/_vendor/nab_resolver/resolver.py b/src/pip/_vendor/nab_resolver/resolver.py
+--- a/src/pip/_vendor/nab_resolver/resolver.py
++++ b/src/pip/_vendor/nab_resolver/resolver.py
+@@ -38,6 +38,7 @@
+ from . import conflict, decide, incompat_index, propagate
+ from ._compat import override
+ from .decision_queue import DecisionQueue
++from .deferred import DeferredChoices
+ from .errors import ResolutionError, ResolutionLimitError
+ from .partial_solution import PartialSolution
+ from .ranges import Range
+@@ -267,8 +268,9 @@
+     ) -> None:
+         """Accept a snapshot of positive ranges and decisions.
+ 
+-        Called before ``choose_version`` so providers can forward-check the
+-        candidate's dependencies against accumulated constraints.
++        Delivered after propagation when undecided packages remain, before
++        availability refresh and package ordering. The following version query
++        uses the same snapshot unless the provider is replaced.
+         ``decisions`` is the subset with concrete versions (not derivations);
+         decision-based reasoning is safer because decisions cannot be undone
+         in isolation.  Default is a no-op.
+@@ -340,7 +342,7 @@
+ 
+ 
+ class BaseProvider(Generic[PackageType, VersionType]):
+-    """Defaults for the six provider methods a synchronous provider does not need.
++    """Defaults for optional provider behavior.
+ 
+     Supplies ``begin_decision_scan``, ``is_ready``,
+     ``receive_partial_solution_hint``, ``consume_pending_clauses``,
+@@ -350,11 +352,40 @@
+     ``choose_version``, ``has_satisfying_version``, ``get_dependencies``,
+     ``prioritize`` and ``widen_decision``.
+ 
++    ``begin_resolution``, ``receive_contextual_failure`` and ``receive_decision``
++    are optional lifecycle and priority notifications.
++    ``is_query_ready`` controls provisional queries.
++    Structural providers may omit these hooks.
++
+     Subclassing is optional; the resolver accepts anything that satisfies the
+     protocol.  Nothing re-exports this, so import it as
+     ``from nab_resolver.resolver import BaseProvider``.
+     """
+ 
++    def begin_resolution(self) -> None:
++        """Receive notification that a new solve is beginning."""
++        return
++
++    def receive_contextual_failure(self, package: PackageType) -> bool:
++        """Report whether a contextual absence changed priorities.
++
++        Change priority state only, preserving availability and current decisions.
++        """
++        del package
++        return False
++
++    def receive_decision(self, package: PackageType, version: VersionType) -> bool:
++        """Report whether the recorded decision changed priorities.
++
++        Runs after the observer, before this decision's ``get_dependencies`` call.
++        Prechecks may already have read metadata. Leaf decisions also notify.
++        Selections may be backtracked immediately. The virtual root is excluded.
++        Change priority state only; preserve availability, decisions and queued clauses.
++        Return True to invalidate cached priority keys.
++        """
++        del package, version
++        return False
++
+     def begin_decision_scan(self) -> Callable[[PackageType], bool] | None:
+         """Freeze nothing and offer no probe: no state moves between scans."""
+         return None
+@@ -363,6 +394,11 @@
+         """Report every package ready, since answers do not wait on a fetch."""
+         del package
+         return True
++
++    def is_query_ready(self, package: PackageType) -> bool:
++        """Decline provisional absence when query provenance is not established."""
++        del package
++        return False
+ 
+     def receive_partial_solution_hint(
+         self,
+@@ -656,6 +692,9 @@
+         range_type: type[RangeProtocol[Any]] = Range,
+         root_version: Any = 1,
+         format_range: Callable[[Any], str] = str,
++        *,
++        availability_generation: Callable[[], int] | None = None,
++        provisional: bool = False,
+     ) -> None:
+         """Create a resolver with the given provider and optional observer.
+ 
+@@ -666,6 +705,26 @@
+         :class:`packaging.ranges.VersionRange` requires a parseable
+         version string or :class:`~packaging.version.Version` here.
+ 
++        ``availability_generation`` defers failed queries when candidate
++        availability depends on current decisions.
++        Its monotonically increasing result invalidates deferred queries when
++        provider operations reveal candidates; reading it must not change
++        availability. Missing packages are retried
++        after other decisions, and an exhausted sweep records absence guarded
++        by all current decisions. The provider must ensure such an absence
++        remains true whenever those decisions and requirements hold, regardless
++        of later cache population. Availability must not change asynchronously
++        between the final generation check and clause recording. Omitting this
++        callback keeps the static candidate-universe contract.
++
++        ``provisional`` treats failed queries as permanent absences when the
++        provider's optional ``is_query_ready(package)`` returns True. Other
++        failures retain query deferral and contextual guards. Validate successful
++        results against final availability and retry failures without this
++        option. ``provisional_absences`` counts attempted provisional absences,
++        including attempts interrupted by an observer or diagnostic probe.
++        ``max_iterations`` bounds normal and provisional solves.
++
+         ``format_range`` renders a constraint in a failure report.  It travels
+         with ``range_type``: the default ``str`` reads well for
+         :class:`~nab_resolver.ranges.Range`, while a range type whose ``str``
+@@ -673,6 +732,13 @@
+         """
+         self.provider = provider
+         self.preferred_trial_consumed = False
++        self.provisional = provisional
++        self.provisional_absences = 0
++        self.deferred = (
++            None
++            if availability_generation is None
++            else DeferredChoices[PackageType](availability_generation)
++        )
+ 
+         # Recording the provider rather than a flag keeps the answer tied to
+         # the object it was asked about, so a provider swapped into
+@@ -789,7 +855,8 @@
+         """Resolve requirements and return ``{package: version}``.
+ 
+         The pins of :meth:`solve`, for a caller that has no use for the
+-        dependency graph.
++        dependency graph. Use ``solve`` for provisional attempts so the
++        complete result can be validated.
+         """
+         return self.solve(requirements, constraints).pins
+ 
+@@ -815,7 +882,10 @@
+         ``~range_type.empty()``, which may be strictly narrower; see
+         :class:`~nab_resolver.types.RangeProtocol`.
+ 
+-        Raises ``ResolutionError`` if no solution exists.
++        Raises ``ResolutionError`` if resolution fails. After provisional
++        assumptions, failure is inconclusive and success requires validation
++        against the host's final candidate availability. ``max_iterations``
++        bounds both modes; reaching it does not prove unsatisfiability.
+         """
+         if self.preferred_trial_consumed:
+             message = (
+@@ -824,6 +894,7 @@
+             )
+             raise RuntimeError(message)
+         self._reset(constraints)
++        self.provisional_absences = 0
+         self._add_root_requirements(_as_root_requirements(requirements))
+ 
+         # Threshold doubles each restart (geometric schedule).
+@@ -851,13 +922,32 @@
+                 continue
+ 
+             # Phase 3: Decision making.
+-            next_package = decide.choose_package_to_decide(self)
++            hinted_provider = (
++                decide.refresh_provider_hint(self)
++                if self.solution.undecided_packages()
++                else None
++            )
++
++            deferred = self.deferred
++            if deferred is not None:
++                deferred.refresh(self.stats.derivations, self.stats.decisions)
++            next_package = decide.choose_package_to_decide(
++                self, None if deferred is None else deferred.packages.keys()
++            )
+             if next_package is None:
+-                # All packages decided; the spec requires filtering out
+-                # any unreachable extras before returning.
++                if deferred is not None and deferred.packages:
++                    deferred.refresh(self.stats.derivations, self.stats.decisions)
++                    if not deferred.packages:
++                        continue
++                    changed_package = next(iter(deferred.packages))
++                    decide.record_contextual_no_versions(self, changed_package)
++                    deferred.clear()
++                    continue
+                 return self._build_result()
+ 
+-            changed_package = self._decide_next(next_package)
++            changed_package = self._decide_next(
++                next_package, hinted_provider=hinted_provider
++            )
+ 
+         exceeded_message = f"Resolution exceeded {self.max_iterations} iterations"
+         raise ResolutionLimitError(exceeded_message)
+@@ -1014,7 +1104,7 @@
+                 ],
+                 cause=IncompatibilityCause.DEPENDENCY,
+             )
+-            incompat_index.add_incompatibility(self, clause)
++            # The derived range enforces this edge without a search clause.
+             narrowed = self.solution.derive(
+                 dependency, dependency_range, positive=True, cause=clause
+             )
+@@ -1060,6 +1150,8 @@
+         restarts_remaining: int,
+     ) -> tuple[Any, int, int]:
+         """Run conflict resolution, targeted backtrack, and restart phases."""
++        if self.deferred is not None:
++            self.deferred.clear()
+         self.stats.conflicts += 1
+         self.observer.on_conflict(conflicting_incompatibility)
+         learned = conflict.conflict_resolution(self, conflicting_incompatibility)
+@@ -1077,9 +1169,24 @@
+             changed_package = ROOT
+         return changed_package, restart_threshold, restarts_remaining
+ 
+-    def _decide_next(self, next_package: Any) -> Any:
++    def _apply_force_requests(self, targets: list[Any]) -> Any | None:
++        """Apply requested retreats and clear deferred queries after a backtrack."""
++        self.priority_epoch += 1
++        triggering = conflict.force_targeted_backtrack(self, targets)
++        if triggering is not None and self.deferred is not None:
++            self.deferred.clear()
++        return triggering
++
++    def _decide_next(
++        self,
++        next_package: Any,
++        *,
++        hinted_provider: ResolverProvider[Any, Any] | None = None,
++    ) -> Any:
+         """Run the decision phase for ``next_package``. Return next changed package."""
+-        chosen_version = decide.choose_version(self, next_package)
++        chosen_version = decide.choose_version(
++            self, next_package, hinted_provider=hinted_provider
++        )
+         had_pending = decide.absorb_pending_clauses(self)
+ 
+         # Provider-driven force back-track. When the provider returns
+@@ -1087,8 +1194,7 @@
+         # blockers before the candidate is decided.
+         force_targets = list(self.provider.consume_force_backtrack_targets())
+         if force_targets:
+-            self.priority_epoch += 1
+-            triggering = conflict.force_targeted_backtrack(self, force_targets)
++            triggering = self._apply_force_requests(force_targets)
+             if triggering is not None:
+                 return triggering
+ 
+@@ -1101,6 +1207,12 @@
+         self.observer.on_decision(
+             next_package, chosen_version, self.solution.decision_level
+         )
++
++        receive_decision = getattr(self.provider, "receive_decision", None)
++        if receive_decision is not None and receive_decision(
++            next_package, chosen_version
++        ):
++            self.priority_epoch += 1
+ 
+         dependencies = self.provider.get_dependencies(next_package, chosen_version)
+         if dependencies:
+@@ -1185,6 +1297,8 @@
+         constraints: Mapping[PackageType, RangeProtocol[VersionType]] | None,
+     ) -> None:
+         """Reset solver state for a new resolution."""
++        if self.deferred is not None:
++            self.deferred.clear()
+         self.incompatibilities.clear()
+         self.package_to_incompatibilities.clear()
+         self.clause_contradicted_at.clear()
+@@ -1211,6 +1325,9 @@
+ 
+         # Re-asked here, so a hook installed since the last resolve is honoured.
+         self._hint_ignoring_provider = _provider_with_inherited_hint(self.provider)
++        begin_resolution = getattr(self.provider, "begin_resolution", None)
++        if begin_resolution is not None:
++            begin_resolution()
+ 
+     def _add_root_requirements(
+         self, requirements: Sequence[RootRequirement[PackageType, VersionType]]
+diff --git a/src/pip/_vendor/nab_resolver/result.py b/src/pip/_vendor/nab_resolver/result.py
+--- a/src/pip/_vendor/nab_resolver/result.py
++++ b/src/pip/_vendor/nab_resolver/result.py
+@@ -17,16 +17,61 @@
+ )
+ 
+ from collections import deque
+-from typing import TYPE_CHECKING, Any
++from typing import TYPE_CHECKING, Any, TypeVar
+ 
+ from .types import IncompatibilityCause, PackageType, VersionType
+ 
+ if TYPE_CHECKING:
+-    from collections.abc import Callable, Iterable, Mapping
++    from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
+ 
+     from .types import Incompatibility, RangeProtocol
+ 
+-__all__ = ["build_solution_data"]
++__all__ = ["IncompleteSelectionError", "build_solution_data", "walk_selected"]
++
++SelectedCandidateType = TypeVar("SelectedCandidateType")
++
++
++class IncompleteSelectionError(Exception):
++    """A reachable package lacks a selected candidate or readable dependencies."""
++
++    def __init__(self, package: object) -> None:
++        """Retain the first incomplete package in traversal order."""
++        self.package = package
++        super().__init__(f"Incomplete selected metadata for {package!r}")
++
++
++def walk_selected(
++    roots: Iterable[PackageType],
++    selected: Mapping[PackageType, SelectedCandidateType],
++    dependency_names: Callable[
++        [PackageType, SelectedCandidateType], Collection[PackageType] | None
++    ],
++    *,
++    depth_first: bool = False,
++) -> Iterator[tuple[PackageType, SelectedCandidateType, Collection[PackageType]]]:
++    """Visit the selected reachable graph once using the caller's metadata policy.
++
++    None from ``dependency_names`` means unread metadata; callback exceptions propagate.
++    """
++    seen: set[PackageType] = set()
++    pending: deque[PackageType] = deque(roots)
++    while pending:
++        package = pending.pop() if depth_first else pending.popleft()
++        if package in seen:
++            continue
++
++        candidate = selected.get(package)
++        if candidate is None:
++            raise IncompleteSelectionError(package)
++
++        dependencies = dependency_names(package, candidate)
++        if dependencies is None:
++            raise IncompleteSelectionError(package)
++
++        # Revisit suppression applies only after the caller has supplied metadata.
++        seen.add(package)
++        yield package, candidate, dependencies
++        pending.extend(child for child in dependencies if child not in seen)
+ 
+ 
+ def build_solution_data(
+@@ -66,22 +111,15 @@
+     # recording each dependency crossed on the way.
+     edges: list[tuple[PackageType, PackageType]] = []
+     reachable: set[PackageType] = set()
+-    queue: deque[PackageType] = deque(root_required)
+-    while queue:
+-        package = queue.popleft()
+-        if package in reachable:
+-            continue
+-        reachable.add(package)
+-
+-        version = all_decisions.get(package)
+-        if version is None:  # pragma: no cover
+-            unreachable = f"Bug: reachable package {package!r} has no decision"
+-            raise RuntimeError(unreachable)
+-
+-        for dep_package in get_dependencies(package, version):
+-            edges.append((package, dep_package))
+-            if dep_package not in reachable:
+-                queue.append(dep_package)
++    try:
++        for package, _, dependencies in walk_selected(
++            root_required, all_decisions, get_dependencies
++        ):
++            reachable.add(package)
++            edges.extend((package, child) for child in dependencies)
++    except IncompleteSelectionError as error:
++        unreachable = f"Bug: reachable package {error.package!r} has no decision"
++        raise RuntimeError(unreachable) from error
+ 
+     return (
+         {
+diff --git a/src/pip/_vendor/nab_resolver/testing.py b/src/pip/_vendor/nab_resolver/testing.py
+new file mode 100644
+--- /dev/null
++++ b/src/pip/_vendor/nab_resolver/testing.py
+@@ -0,0 +1,873 @@
++"""Small, reusable checks for implementations of ResolverProvider."""
++
++from __future__ import annotations
++
++from itertools import product
++from math import prod
++from types import MappingProxyType
++from typing import TYPE_CHECKING, Generic, TypeVar
++
++from ._compat import override
++from .errors import ResolutionError, ResolutionTerminatedError
++from .resolver import BaseProvider, Resolver
++from .types import VersionType
++
++_PackageType = TypeVar("_PackageType", bound="Hashable")
++
++if TYPE_CHECKING:
++    from collections.abc import Callable, Hashable, Mapping, Sequence
++
++    from .resolver import ResolverProvider, Solution
++    from .types import Incompatibility, RangeProtocol
++
++    _ProbeState = Callable[[ResolverProvider[_PackageType, VersionType]], object]
++    _Requirements = Mapping[_PackageType, RangeProtocol[VersionType]]
++    _DependencyGraph = Mapping[
++        _PackageType, Mapping[VersionType, _Requirements[_PackageType, VersionType]]
++    ]
++    _Membership = Mapping[_PackageType, frozenset[VersionType]]
++    _OracleGraph = Mapping[
++        _PackageType, Mapping[VersionType, _Membership[_PackageType, VersionType]]
++    ]
++
++__all__ = ["ProviderScenario", "check_provider", "check_provider_scenarios"]
++
++# Two roots and their shared dependency need three package keys.
++_SCENARIO_PACKAGE_COUNT = 3
++_SCENARIO_VERSION_COUNT = 2
++
++
++class ProviderScenario(Generic[_PackageType, VersionType]):
++    """A named graph, required packages and optional constraints for one check."""
++
++    __slots__ = ("constraints", "graph", "name", "requirements")
++
++    def __init__(
++        self,
++        name: str,
++        requirements: _Requirements[_PackageType, VersionType],
++        graph: _DependencyGraph[_PackageType, VersionType],
++        *,
++        constraints: _Requirements[_PackageType, VersionType] | None = None,
++    ) -> None:
++        """Copy the fixture mappings before giving them to a provider factory."""
++        self.name = name
++        self.requirements: _Requirements[_PackageType, VersionType] = MappingProxyType(
++            dict(requirements)
++        )
++
++        copied_constraints: dict[_PackageType, RangeProtocol[VersionType]] = {}
++        if constraints is not None:
++            copied_constraints.update(constraints)
++        self.constraints: _Requirements[_PackageType, VersionType] = MappingProxyType(
++            copied_constraints
++        )
++
++        # Copy each mapping level while retaining immutable range values.
++        copied_graph: dict[
++            _PackageType,
++            Mapping[VersionType, _Requirements[_PackageType, VersionType]],
++        ] = {}
++        for package, versions in graph.items():
++            copied_versions: dict[
++                VersionType, _Requirements[_PackageType, VersionType]
++            ] = {}
++            for version, dependencies in versions.items():
++                copied_versions[version] = MappingProxyType(dict(dependencies))
++            copied_graph[package] = MappingProxyType(copied_versions)
++        self.graph: _DependencyGraph[_PackageType, VersionType] = MappingProxyType(
++            copied_graph
++        )
++
++
++def _membership(
++    requirements: _Requirements[_PackageType, VersionType],
++    graph: _DependencyGraph[_PackageType, VersionType],
++) -> dict[_PackageType, frozenset[VersionType]]:
++    """Snapshot range membership over every version supplied by the fixture."""
++    return {
++        package: frozenset(
++            version for version in graph.get(package, {}) if version in allowed
++        )
++        for package, allowed in requirements.items()
++    }
++
++
++def _range_membership(
++    allowed: RangeProtocol[VersionType], versions: Sequence[VersionType]
++) -> tuple[bool, ...]:
++    """Snapshot an input range without retaining mutable keys or range state."""
++    return tuple(version in allowed for version in versions)
++
++
++class _FixtureMembership(Generic[_PackageType, VersionType]):
++    """Independent membership facts retained across all provider calls."""
++
++    __slots__ = ("constraints", "graph", "requirements")
++
++    def __init__(
++        self,
++        graph: _OracleGraph[_PackageType, VersionType],
++        requirements: _Membership[_PackageType, VersionType],
++        constraints: _Membership[_PackageType, VersionType],
++    ) -> None:
++        self.graph = graph
++        self.requirements = requirements
++        self.constraints = constraints
++
++
++def _fixture_membership(
++    fixture: ProviderScenario[_PackageType, VersionType],
++) -> _FixtureMembership[_PackageType, VersionType]:
++    """Copy range meaning into immutable sets before the provider can change it."""
++    # Store keys rather than ranges, so mutations cannot also rewrite the oracle.
++    graph = {
++        package: {
++            version: _membership(dependencies, fixture.graph)
++            for version, dependencies in versions.items()
++        }
++        for package, versions in fixture.graph.items()
++    }
++    return _FixtureMembership[_PackageType, VersionType](
++        graph,
++        _membership(fixture.requirements, fixture.graph),
++        _membership(fixture.constraints, fixture.graph),
++    )
++
++
++def _checked_singleton(
++    range_type: type[RangeProtocol[VersionType]],
++    version: VersionType,
++    versions: Sequence[VersionType],
++) -> RangeProtocol[VersionType]:
++    """Keep bad range constructors from changing both the input and its oracle."""
++    singleton = range_type.singleton(version)
++
++    if frozenset(item for item in versions if item in singleton) != frozenset(
++        (version,)
++    ):
++        message = "range singleton does not preserve version membership"
++        raise ValueError(message)
++    return singleton
++
++
++def _check_range_type(
++    range_type: type[RangeProtocol[VersionType]],
++    versions: Sequence[VersionType],
++) -> None:
++    """Refuse range backends that misrepresent the supplied fixture keys."""
++    empty = range_type.empty()
++    full = range_type.full()
++
++    if any(version in empty or version not in full for version in versions):
++        message = "range empty/full does not preserve version membership"
++        raise ValueError(message)
++
++    for version in versions:
++        _checked_singleton(range_type, version, versions)
++
++
++def _valid_selection(
++    selection: Mapping[_PackageType, VersionType],
++    requirements: _Membership[_PackageType, VersionType],
++    graph: _OracleGraph[_PackageType, VersionType],
++    constraints: _Membership[_PackageType, VersionType],
++) -> bool:
++    """Check reachable dependencies using sets, without resolver range operations."""
++    pending = list(requirements.items())
++    visited: set[_PackageType] = set()
++
++    while pending:
++        package, allowed = pending.pop()
++        if package not in selection or selection[package] not in allowed:
++            return False
++
++        version = selection[package]
++        if package in constraints and version not in constraints[package]:
++            return False
++        if package not in visited:
++            visited.add(package)
++            pending.extend(graph[package][version].items())
++
++    return True
++
++
++def _has_solution(
++    requirements: _Membership[_PackageType, VersionType],
++    graph: _OracleGraph[_PackageType, VersionType],
++    constraints: _Membership[_PackageType, VersionType],
++    max_combinations: int,
++) -> bool:
++    """Try every combination of fixture versions, without querying a provider."""
++    domains = {
++        package: tuple(versions) for package, versions in graph.items() if versions
++    }
++    combinations = prod(len(versions) for versions in domains.values())
++
++    if max_combinations < 1 or combinations > max_combinations:
++        message = (
++            f"fixture needs {combinations} combinations; budget is {max_combinations}"
++        )
++        raise ValueError(message)
++
++    # The closure check ignores choices outside the required dependency graph.
++    return any(
++        _valid_selection(
++            dict(zip(domains, choices, strict=True)), requirements, graph, constraints
++        )
++        for choices in product(*domains.values())
++    )
++
++
++class _QueryAnswer(Generic[_PackageType, VersionType]):
++    """Retain one choice until its pending clauses and backtrack requests are read."""
++
++    __slots__ = ("available", "chosen", "package")
++
++    def __init__(
++        self, package: _PackageType, chosen: VersionType | None, *, available: bool
++    ) -> None:
++        self.package = package
++        self.chosen = chosen
++        self.available = available
++
++
++class _WidenedDependencies(Generic[_PackageType, VersionType]):
++    """Retain a widened fact until another version is actually chosen."""
++
++    __slots__ = ("allowed", "dependencies", "package")
++
++    def __init__(
++        self,
++        package: _PackageType,
++        allowed: RangeProtocol[VersionType],
++        dependencies: _Membership[_PackageType, VersionType],
++    ) -> None:
++        self.package = package
++        self.allowed = allowed
++        self.dependencies = dependencies
++
++
++class _CheckingProvider(BaseProvider[_PackageType, VersionType]):
++    """Observe real resolver calls without inventing partial-solution context."""
++
++    def __init__(
++        self,
++        provider: ResolverProvider[_PackageType, VersionType],
++        *,
++        scenario: ProviderScenario[_PackageType, VersionType],
++        expected: _FixtureMembership[_PackageType, VersionType],
++        versions: Sequence[VersionType],
++        probe_state: _ProbeState[_PackageType, VersionType] | None,
++    ) -> None:
++        self.provider = provider
++        self.scenario = scenario
++        self.expected = expected
++        self.versions = versions
++        self.probe_state = probe_state
++
++        self._answer: _QueryAnswer[_PackageType, VersionType] | None = None
++        self._pending = False
++        self._known: dict[_PackageType, set[VersionType]] = {}
++        self._hashes: list[tuple[VersionType, int]] = []
++        self._retained: list[
++            tuple[
++                _Requirements[_PackageType, VersionType],
++                _Membership[_PackageType, VersionType],
++            ]
++        ] = []
++        self._widened: list[_WidenedDependencies[_PackageType, VersionType]] = []
++
++    def _check_retained(self) -> None:
++        """Check earlier answers while the provider's resolution is still active."""
++        for version, original in self._hashes:
++            assert hash(version) == original, "candidate hash changed"
++
++        for actual, recorded in self._retained:
++            assert _membership(actual, self.scenario.graph) == recorded, (
++                "returned dependency mapping was mutated"
++            )
++
++    def _record_choice(
++        self,
++        package: _PackageType,
++        version: VersionType,
++        allowed: RangeProtocol[VersionType],
++    ) -> None:
++        """Record a real choice and compare it with earlier widened facts."""
++        assert version in allowed, f"chosen version outside query for {package!r}"
++        assert version in self.expected.graph.get(package, {}), (
++            f"chosen version outside fixture for {package!r}"
++        )
++
++        self._known.setdefault(package, set()).add(version)
++        self._hashes.append((version, hash(version)))
++
++        # Only choices seen in this resolution prove that a version is selectable.
++        for widened in self._widened:
++            if widened.package == package and version in widened.allowed:
++                assert widened.dependencies == self.expected.graph[package][version], (
++                    f"widening merges unequal dependencies for {package!r}"
++                )
++
++    def has_satisfying_version(
++        self, package: _PackageType, version_range: RangeProtocol[VersionType]
++    ) -> bool:
++        """Probe availability without changing owner-selected decision state."""
++        self._check_retained()
++
++        before = None if self.probe_state is None else self.probe_state(self.provider)
++        input_membership = _range_membership(version_range, self.versions)
++        available = self.provider.has_satisfying_version(package, version_range)
++
++        assert _range_membership(version_range, self.versions) == input_membership, (
++            "availability probe mutated its range"
++        )
++        if self.probe_state is not None:
++            assert self.probe_state(self.provider) == before, (
++                "availability probe changed decision state"
++            )
++        self._check_retained()
++
++        return available
++
++    def choose_version(
++        self, package: _PackageType, version_range: RangeProtocol[VersionType]
++    ) -> VersionType | None:
++        """Retain a real choice until its pending work has been read."""
++        # Extra availability probes use the solver's actual context and range.
++        available = self.has_satisfying_version(package, version_range)
++        input_membership = _range_membership(version_range, self.versions)
++        chosen = self.provider.choose_version(package, version_range)
++
++        assert _range_membership(version_range, self.versions) == input_membership, (
++            "candidate query mutated its range"
++        )
++        self._check_retained()
++
++        if chosen is not None:
++            self._record_choice(package, chosen, version_range)
++        self._answer = _QueryAnswer[_PackageType, VersionType](
++            package, chosen, available=available
++        )
++
++        return chosen
++
++    @override
++    def consume_pending_clauses(
++        self,
++    ) -> list[Incompatibility[_PackageType, VersionType]]:
++        """Forward clauses and record whether they replace an absence."""
++        clauses = self.provider.consume_pending_clauses()
++
++        self._pending = bool(clauses)
++
++        return clauses
++
++    @override
++    def consume_force_backtrack_targets(self) -> list[_PackageType]:
++        """Check availability agreement after all pending work is known."""
++        targets = self.provider.consume_force_backtrack_targets()
++
++        answer = self._answer
++        pending = self._pending
++        self._answer = None
++        self._pending = False
++
++        if answer is not None and not (answer.chosen is None and (pending or targets)):
++            assert answer.available == (answer.chosen is not None), (
++                f"availability probe disagrees for {answer.package!r}"
++            )
++
++        return targets
++
++    def get_dependencies(
++        self, package: _PackageType, version: VersionType
++    ) -> Mapping[_PackageType, RangeProtocol[VersionType]]:
++        """Compare real metadata reads and retain their mappings during this solve."""
++        self._check_retained()
++
++        actual = self.provider.get_dependencies(package, version)
++        captured = _membership(actual, self.scenario.graph)
++        assert captured == self.expected.graph[package][version], (
++            f"wrong dependencies for {(package, version)!r}"
++        )
++
++        self._retained.append((actual, captured))
++
++        # Repeated reads happen after the real decision, with its original hints.
++        repeated = self.provider.get_dependencies(package, version)
++        assert _membership(repeated, self.scenario.graph) == captured, (
++            f"dependencies changed for {(package, version)!r}"
++        )
++
++        self._retained.append((repeated, captured))
++        self._check_retained()
++
++        return actual
++
++    def widen_decision(
++        self, package: _PackageType, version: VersionType
++    ) -> RangeProtocol[VersionType] | None:
++        """Compare widened facts with versions actually chosen in this resolution."""
++        widened = self.provider.widen_decision(package, version)
++        if widened is not None:
++            assert version in widened, f"widening excludes decision for {package!r}"
++
++            dependencies = self.expected.graph[package][version]
++            for known in self._known.get(package, ()):
++                if known in widened:
++                    assert dependencies == self.expected.graph[package][known], (
++                        f"widening merges unequal dependencies for {package!r}"
++                    )
++
++            self._widened.append(_WidenedDependencies(package, widened, dependencies))
++        self._check_retained()
++
++        return widened
++
++    @override
++    def narrow_for_display(
++        self, package: _PackageType, constraint: RangeProtocol[VersionType]
++    ) -> RangeProtocol[VersionType]:
++        """Preserve observed version membership in real error reports."""
++        known = (
++            tuple(self._known.get(package, ()))
++            if package in self.scenario.graph
++            else tuple(self.versions)
++        )
++        original = _range_membership(constraint, known)
++        shown = self.provider.narrow_for_display(package, constraint)
++
++        # Returning the same mutated object must not change both sides of the check.
++        assert _range_membership(shown, known) == original, (
++            f"display narrowing changes membership for {package!r}"
++        )
++        assert _range_membership(constraint, known) == original, (
++            f"display narrowing mutated input for {package!r}"
++        )
++        self._check_retained()
++
++        return shown
++
++    @override
++    def begin_decision_scan(self) -> Callable[[_PackageType], bool] | None:
++        return self.provider.begin_decision_scan()
++
++    @override
++    def begin_resolution(self) -> None:
++        """Initialize the underlying provider within the real resolver lifecycle."""
++        begin = getattr(self.provider, "begin_resolution", None)
++        if begin is not None:
++            begin()
++
++    @override
++    def receive_decision(self, package: _PackageType, version: VersionType) -> bool:
++        """Preserve provider notifications before the checker reads metadata."""
++        notify = getattr(self.provider, "receive_decision", None)
++        return notify is not None and bool(notify(package, version))
++
++    @override
++    def is_ready(self, package: _PackageType) -> bool:
++        return self.provider.is_ready(package)
++
++    def prioritize(
++        self,
++        package: _PackageType,
++        version_range: RangeProtocol[VersionType],
++        conflict_counts: Mapping[_PackageType, int],
++        culprit_counts: Mapping[_PackageType, int] | None = None,
++    ) -> object:
++        return self.provider.prioritize(
++            package, version_range, conflict_counts, culprit_counts
++        )
++
++    @override
++    def receive_partial_solution_hint(
++        self,
++        positive_ranges: Mapping[_PackageType, RangeProtocol[VersionType]],
++        decisions: Mapping[_PackageType, VersionType],
++    ) -> None:
++        self.provider.receive_partial_solution_hint(positive_ranges, decisions)
++
++    def receive_decision_scan_hint(
++        self,
++        positive_ranges: Mapping[_PackageType, RangeProtocol[VersionType]],
++        decisions: Mapping[_PackageType, VersionType],
++    ) -> None:
++        # This documented hook is optional for structural providers.
++        hint = getattr(self.provider, "receive_decision_scan_hint", None)
++        if hint is not None:
++            hint(positive_ranges, decisions)
++
++
++def _check_solution(
++    solution: Solution[_PackageType, VersionType],
++    requirements: _Membership[_PackageType, VersionType],
++    graph: _OracleGraph[_PackageType, VersionType],
++    constraints: _Membership[_PackageType, VersionType],
++) -> None:
++    """Check the result's pins, reachable packages, edges and roots independently."""
++    assert _valid_selection(solution.pins, requirements, graph, constraints), (
++        "solution violates fixture requirements"
++    )
++
++    reachable: set[_PackageType] = set()
++    pending = list(requirements)
++    edges: set[tuple[_PackageType, _PackageType]] = set()
++
++    while pending:
++        package = pending.pop()
++        if package in reachable:
++            continue
++
++        reachable.add(package)
++        dependencies = graph[package][solution.pins[package]]
++        edges.update((package, child) for child in dependencies)
++        pending.extend(dependencies)
++
++    assert reachable == solution.pins.keys(), "solution includes unreachable packages"
++    assert edges == set(solution.edges), (
++        "solution edges differ from fixture dependencies"
++    )
++    assert tuple(requirements) == solution.roots, (
++        "solution roots differ from input order"
++    )
++
++
++class _ResolutionQuery(Generic[_PackageType, VersionType]):
++    """Pair a provider's actual input scope with independent root membership."""
++
++    __slots__ = ("membership", "scenario")
++
++    def __init__(
++        self,
++        scenario: ProviderScenario[_PackageType, VersionType],
++        membership: _Membership[_PackageType, VersionType],
++    ) -> None:
++        self.scenario = scenario
++        self.membership = membership
++
++
++def _resolution_queries(
++    fixture: ProviderScenario[_PackageType, VersionType],
++    expected: _FixtureMembership[_PackageType, VersionType],
++    range_type: type[RangeProtocol[VersionType]],
++    versions: Sequence[VersionType],
++) -> list[_ResolutionQuery[_PackageType, VersionType]]:
++    """Vary root order and isolate each version without reinterpreting inputs."""
++    reversed_roots = dict(reversed(tuple(fixture.requirements.items())))
++    reversed_membership = dict(reversed(tuple(expected.requirements.items())))
++    reordered = ProviderScenario(
++        fixture.name, reversed_roots, fixture.graph, constraints=fixture.constraints
++    )
++    queries = [
++        _ResolutionQuery[_PackageType, VersionType](fixture, expected.requirements),
++        _ResolutionQuery[_PackageType, VersionType](reordered, reversed_membership),
++        _ResolutionQuery[_PackageType, VersionType](fixture, expected.requirements),
++    ]
++
++    # Singleton roots expose omissions hidden by another feasible alternative.
++    for package, choices in fixture.graph.items():
++        for version in choices:
++            roots = {package: _checked_singleton(range_type, version, versions)}
++            scenario = ProviderScenario(
++                fixture.name, roots, fixture.graph, constraints=fixture.constraints
++            )
++            membership: dict[_PackageType, frozenset[VersionType]] = {
++                package: frozenset((version,))
++            }
++            queries.append(
++                _ResolutionQuery[_PackageType, VersionType](scenario, membership)
++            )
++    return queries
++
++
++def _check_fixture(
++    scenario: ProviderScenario[_PackageType, VersionType],
++    expected: _FixtureMembership[_PackageType, VersionType],
++) -> None:
++    """Keep shared range mutations from changing the expected answers."""
++    current = _fixture_membership(scenario)
++    assert current.graph == expected.graph, "fixture metadata changed"
++    assert current.requirements == expected.requirements, "fixture requirements changed"
++    assert current.constraints == expected.constraints, "fixture constraints changed"
++
++
++def check_provider(
++    factory: Callable[
++        [ProviderScenario[_PackageType, VersionType]],
++        ResolverProvider[_PackageType, VersionType],
++    ],
++    scenario: ProviderScenario[_PackageType, VersionType],
++    *,
++    range_type: type[RangeProtocol[VersionType]],
++    root_version: VersionType,
++    max_combinations: int,
++    probe_state: _ProbeState[_PackageType, VersionType] | None = None,
++) -> None:
++    """Check one small, independently specified fixture against a provider.
++
++    The graph defines the candidate versions and their unchanging dependencies.
++    factory receives each query's roots and constraints and returns a fresh provider.
++    Contract failures raise AssertionError; operational errors propagate.
++    max_combinations limits search before the provider is called.
++    probe_state may return an independent snapshot of decision state; exclude
++    permitted cache and diagnostic changes from that snapshot.
++    Run these checks with assertions enabled.
++    """
++    # Freeze inputs before provider construction, including shared range values.
++    expected = _fixture_membership(scenario)
++    _has_solution(
++        expected.requirements, expected.graph, expected.constraints, max_combinations
++    )
++    supplied_versions = tuple(
++        dict.fromkeys(
++            (
++                root_version,
++                *(
++                    version
++                    for choices in scenario.graph.values()
++                    for version in choices
++                ),
++            )
++        )
++    )
++    _check_range_type(range_type, supplied_versions)
++
++    queries = _resolution_queries(scenario, expected, range_type, supplied_versions)
++    for query in queries:
++        _check_fixture(scenario, expected)
++        possible = _has_solution(
++            query.membership, expected.graph, expected.constraints, max_combinations
++        )
++
++        # Provider state belongs to one resolution; shared caches belong to its factory.
++        provider = _CheckingProvider(
++            factory(query.scenario),
++            scenario=query.scenario,
++            expected=expected,
++            versions=supplied_versions,
++            probe_state=probe_state,
++        )
++        resolver = Resolver[_PackageType, VersionType](
++            provider, range_type=range_type, root_version=root_version
++        )
++        try:
++            solution = resolver.solve(
++                query.scenario.requirements, query.scenario.constraints
++            )
++        except ResolutionTerminatedError:
++            raise
++        except ResolutionError as error:
++            if error.incompatibility is None:
++                raise
++            assert not possible, "provider rejected a satisfiable fixture"
++        else:
++            assert possible, "provider accepted an impossible fixture"
++            _check_solution(
++                solution, query.membership, expected.graph, expected.constraints
++            )
++
++        _check_fixture(scenario, expected)
++
++
++def _scenarios(
++    packages: Sequence[_PackageType],
++    versions: Sequence[VersionType],
++    range_type: type[RangeProtocol[VersionType]],
++) -> tuple[ProviderScenario[_PackageType, VersionType], ...]:
++    """Build a bounded suite from the caller's package and version key types."""
++    first_package, second_package, third_package = packages
++    first_version, second_version = versions
++    any_version = range_type.full()
++    first_only = range_type.singleton(first_version)
++    second_only = range_type.singleton(second_version)
++
++    no_dependencies: dict[_PackageType, RangeProtocol[VersionType]] = {}
++    first_dependency: dict[_PackageType, RangeProtocol[VersionType]] = {
++        first_package: first_only
++    }
++    second_dependency: dict[_PackageType, RangeProtocol[VersionType]] = {
++        second_package: first_only
++    }
++    second_alternative: dict[_PackageType, RangeProtocol[VersionType]] = {
++        second_package: second_only
++    }
++    third_dependency: dict[_PackageType, RangeProtocol[VersionType]] = {
++        third_package: first_only
++    }
++    any_second_version: dict[_PackageType, RangeProtocol[VersionType]] = {
++        second_package: any_version
++    }
++    # Version catalogues keep each scenario graph to two mapping levels.
++    requires_second: dict[VersionType, _Requirements[_PackageType, VersionType]] = {
++        first_version: second_dependency
++    }
++    requires_third: dict[VersionType, _Requirements[_PackageType, VersionType]] = {
++        first_version: third_dependency
++    }
++    requires_first: dict[VersionType, _Requirements[_PackageType, VersionType]] = {
++        first_version: first_dependency
++    }
++    requires_second_alternative: dict[
++        VersionType, _Requirements[_PackageType, VersionType]
++    ] = {first_version: second_alternative}
++    requires_any_second: dict[VersionType, _Requirements[_PackageType, VersionType]] = {
++        first_version: any_second_version
++    }
++    leaf_versions: dict[VersionType, _Requirements[_PackageType, VersionType]] = {
++        first_version: no_dependencies
++    }
++    two_leaf_versions: dict[VersionType, _Requirements[_PackageType, VersionType]] = {
++        first_version: no_dependencies,
++        second_version: no_dependencies,
++    }
++    alternating_dependencies: dict[
++        VersionType, _Requirements[_PackageType, VersionType]
++    ] = {first_version: second_dependency, second_version: second_alternative}
++    equal_dependencies: dict[VersionType, _Requirements[_PackageType, VersionType]] = {
++        first_version: second_dependency,
++        second_version: second_dependency,
++    }
++
++    return (
++        ProviderScenario[_PackageType, VersionType]("empty", {}, {}),
++        ProviderScenario[_PackageType, VersionType](
++            "missing", {first_package: any_version}, {}
++        ),
++        ProviderScenario[_PackageType, VersionType](
++            "chain",
++            {first_package: any_version},
++            {
++                first_package: requires_second,
++                second_package: leaf_versions,
++            },
++        ),
++        ProviderScenario[_PackageType, VersionType](
++            "diamond",
++            {first_package: any_version, second_package: any_version},
++            {
++                first_package: requires_third,
++                second_package: requires_third,
++                third_package: leaf_versions,
++            },
++        ),
++        ProviderScenario[_PackageType, VersionType](
++            "cycle",
++            {first_package: any_version},
++            {
++                first_package: requires_second,
++                second_package: requires_first,
++            },
++        ),
++        ProviderScenario[_PackageType, VersionType](
++            "conflicting roots",
++            {first_package: first_only, third_package: first_only},
++            {
++                first_package: requires_second,
++                third_package: requires_second_alternative,
++                second_package: two_leaf_versions,
++            },
++        ),
++        ProviderScenario[_PackageType, VersionType](
++            "backtracking",
++            {first_package: any_version, third_package: first_only},
++            {
++                first_package: alternating_dependencies,
++                third_package: requires_second,
++                second_package: two_leaf_versions,
++            },
++        ),
++        ProviderScenario[_PackageType, VersionType](
++            "reverse backtracking",
++            {first_package: any_version, third_package: first_only},
++            {
++                first_package: alternating_dependencies,
++                third_package: requires_second_alternative,
++                second_package: two_leaf_versions,
++            },
++        ),
++        ProviderScenario[_PackageType, VersionType](
++            "pinned root",
++            first_dependency,
++            {first_package: two_leaf_versions},
++        ),
++        ProviderScenario[_PackageType, VersionType](
++            "constraint",
++            {first_package: any_version},
++            {
++                first_package: requires_any_second,
++                second_package: two_leaf_versions,
++            },
++            constraints=second_dependency,
++        ),
++        ProviderScenario[_PackageType, VersionType](
++            "unused constraint",
++            first_dependency,
++            {
++                first_package: leaf_versions,
++                second_package: leaf_versions,
++            },
++            constraints={second_package: range_type.empty()},
++        ),
++        ProviderScenario[_PackageType, VersionType](
++            "equal dependencies",
++            {first_package: any_version},
++            {
++                first_package: equal_dependencies,
++                second_package: leaf_versions,
++            },
++        ),
++    )
++
++
++def check_provider_scenarios(
++    factory: Callable[
++        [ProviderScenario[_PackageType, VersionType]],
++        ResolverProvider[_PackageType, VersionType],
++    ],
++    *,
++    packages: Sequence[_PackageType],
++    versions: Sequence[VersionType],
++    range_type: type[RangeProtocol[VersionType]],
++    probe_state: _ProbeState[_PackageType, VersionType] | None = None,
++) -> None:
++    """Run reusable resolution scenarios using the caller's key and range types.
++
++    Supply three distinct package keys and two distinct version keys.
++    The range class must preserve empty, full and singleton membership for them.
++    factory receives each scenario and returns a fresh provider for it.
++    Checks include conflicts, backtracking, cycles, constraints, repeated solves,
++    metadata stability and any widening offered by the provider.
++    """
++    # Keep caller-owned key lists stable while factories run.
++    package_keys = tuple(packages)
++    version_keys = tuple(versions)
++    if (
++        len(package_keys) != _SCENARIO_PACKAGE_COUNT
++        or len(version_keys) != _SCENARIO_VERSION_COUNT
++        or len(set(package_keys)) != len(package_keys)
++        or len(set(version_keys)) != len(version_keys)
++    ):
++        message = "provide three distinct package keys and two distinct version keys"
++        raise ValueError(message)
++
++    _check_range_type(range_type, version_keys)
++
++    for scenario in _scenarios(package_keys, version_keys, range_type):
++        # The root package is a separate sentinel; any accepted version key is valid.
++        budget = prod(max(1, len(choices)) for choices in scenario.graph.values())
++        try:
++            check_provider(
++                factory,
++                scenario,
++                range_type=range_type,
++                root_version=version_keys[0],
++                max_combinations=budget,
++                probe_state=probe_state,
++            )
++        except AssertionError as error:
++            # Preserve the original exception and traceback on Python 3.10, too.
++            error.args = (f"{scenario.name}: {error}",)
++            raise
+diff --git a/src/pip/_vendor/nab_resolver/types.py b/src/pip/_vendor/nab_resolver/types.py
+--- a/src/pip/_vendor/nab_resolver/types.py
++++ b/src/pip/_vendor/nab_resolver/types.py
+@@ -379,6 +379,9 @@
+     """Derived from two other incompatibilities via resolution.
+     See: https://github.com/dart-lang/pub/blob/master/doc/solver.md#conflict-resolution
+     """
++
++    CONTEXTUAL_NO_VERSIONS = enum.auto()
++    """No candidate exists while the decisions after the first term remain selected."""
+ 
+ 
+ class Incompatibility(Generic[PackageType, VersionType]):
+@@ -437,8 +440,10 @@
+         self.origin = origin
+         self.dependency_range = dependency_range
+ 
+-    def walk(self) -> Iterator[Incompatibility[PackageType, VersionType]]:
+-        """Visit each derivation node once, with left causes before right causes."""
++    def walk(
++        self, *, left_first: bool = True
++    ) -> Iterator[Incompatibility[PackageType, VersionType]]:
++        """Visit each derivation node once in the chosen cause order."""
+         pending: list[Incompatibility[PackageType, VersionType]] = [self]
+         seen: set[int] = set()
+         while pending:
+@@ -448,10 +453,22 @@
+             seen.add(id(node))
+             yield node
+ 
+-            if node.cause_right is not None:
+-                pending.append(node.cause_right)
+-            if node.cause_left is not None:
+-                pending.append(node.cause_left)
++            first, second = (
++                (node.cause_left, node.cause_right)
++                if left_first
++                else (node.cause_right, node.cause_left)
++            )
++            if second is not None:
++                pending.append(second)
++            if first is not None:
++                pending.append(first)
++
++    @property
++    def unavailable_package(self) -> PackageType | None:
++        """The package whose availability a contextual absence clause describes."""
++        if self.cause is IncompatibilityCause.CONTEXTUAL_NO_VERSIONS:
++            return self.terms[0].package
++        return None
+ 
+     @override
+     def __repr__(self) -> str:
+diff --git a/src/pip/_vendor/nab_resolver/values.py b/src/pip/_vendor/nab_resolver/values.py
+new file mode 100644
+--- /dev/null
++++ b/src/pip/_vendor/nab_resolver/values.py
+@@ -0,0 +1,128 @@
++"""Immutable slotted values with explicit field and identity declarations."""
++
++from __future__ import annotations
++
++from types import MemberDescriptorType
++from typing import Any, ClassVar
++
++from ._compat import override
++
++__all__ = ["FrozenValue", "SlottedValue"]
++
++
++class SlottedValue:
++    """Equality, hashing and repr over a subclass's declared immutable identity.
++
++    ``__match_args__`` declares field order. Override :meth:`identity` to refine
++    field equality. This class installs no runtime write guard.
++    """
++
++    __slots__ = ()
++    __match_args__: ClassVar[tuple[str, ...]]
++
++    def identity(self) -> tuple[object, ...]:
++        """Return the immutable values used for equality and hashing."""
++        return tuple(getattr(self, name) for name in self.__match_args__)
++
++    @override
++    def __eq__(self, other: object) -> bool:
++        """Compare identities within the exact value class."""
++        if not isinstance(other, SlottedValue) or type(other) is not type(self):
++            return NotImplemented
++
++        return self.identity() == other.identity()
++
++    @override
++    def __hash__(self) -> int:
++        """Hash the identity used by equality."""
++        return hash(self.identity())
++
++    @override
++    def __repr__(self) -> str:
++        """Render the declared fields in their construction order."""
++        fields = ", ".join(
++            f"{name}={getattr(self, name)!r}" for name in self.__match_args__
++        )
++        return f"{type(self).__qualname__}({fields})"
++
++
++class FrozenValue(SlottedValue):
++    """Snapshot fields named by ``__match_args__`` for hashable value semantics.
++
++    Constructors initialize their own slots with ``object.__setattr__``.
++    Override :meth:`identity` when field equality alone loses a domain identity.
++    Subclasses that inherit the fields may retain additional mutable state.
++    """
++
++    __slots__ = ("__weakref__",)
++    __match_args__: ClassVar[tuple[str, ...]]
++
++    @override
++    def __setattr__(self, name: str, value: object) -> None:
++        """Refuse changes to the declared identity fields."""
++        if "__match_args__" in type(self).__dict__ or name in self.__match_args__:
++            message = f"cannot assign to field {name!r}"
++            raise AttributeError(message)
++        object.__setattr__(self, name, value)
++
++    @override
++    def __delattr__(self, name: str) -> None:
++        """Refuse deletion of the declared identity fields."""
++        if "__match_args__" in type(self).__dict__ or name in self.__match_args__:
++            message = f"cannot delete field {name!r}"
++            raise AttributeError(message)
++        object.__delattr__(self, name)
++
++    def __getstate__(
++        self,
++    ) -> dict[str, Any] | tuple[dict[str, Any], dict[str, Any]]:
++        """Collect fields and subclass state without copying contained values."""
++        dictionary = getattr(self, "__dict__", {}).copy()
++        slots: dict[str, Any] = {}
++        seen = set()
++
++        for cls in type(self).__mro__:
++            for name, descriptor in cls.__dict__.items():
++                if not isinstance(descriptor, MemberDescriptorType) or name in seen:
++                    continue
++
++                # Read slot storage without invoking subclass properties.
++                try:
++                    value = descriptor.__get__(self)
++                except AttributeError:
++                    continue
++
++                seen.add(name)
++                if name in self.__match_args__:
++                    dictionary[name] = value
++                else:
++                    slots[name] = value
++
++        return (dictionary, slots) if slots else dictionary
++
++    def __setstate__(
++        self, state: dict[str, Any] | tuple[dict[str, Any], dict[str, Any]]
++    ) -> None:
++        """Restore fields and subclass state without running their constructors."""
++        dictionary, slots = state if isinstance(state, tuple) else (state, {})
++        extra = dictionary.copy()
++
++        for name in self.__match_args__:
++            if name in extra and name not in slots:
++                descriptor = _attribute_slot(type(self), name)
++                if descriptor is not None:
++                    descriptor.__set__(self, extra.pop(name))
++
++        if extra:
++            self.__dict__.update(extra)
++
++        for name, value in slots.items():
++            setattr(self, name, value)
++
++
++def _attribute_slot(cls: type, name: str) -> MemberDescriptorType | None:
++    """Find the visible slot without invoking a subclass property."""
++    descriptor = next(
++        base.__dict__[name] for base in cls.__mro__ if name in base.__dict__
++    )
++    return descriptor if isinstance(descriptor, MemberDescriptorType) else None
+diff --git a/src/pip/_vendor/nab_resolver/version_spans.py b/src/pip/_vendor/nab_resolver/version_spans.py
+new file mode 100644
+--- /dev/null
++++ b/src/pip/_vendor/nab_resolver/version_spans.py
+@@ -0,0 +1,57 @@
++"""Cache-only dependency equivalence over a fixed ordered version listing."""
++
++from __future__ import annotations
++
++from bisect import bisect_left, bisect_right
++from typing import TYPE_CHECKING, Protocol, TypeVar
++
++if TYPE_CHECKING:
++    from collections.abc import Callable, Sequence
++
++    from typing_extensions import Self
++
++__all__ = ["OrderedVersion", "cached_dependency_span"]
++
++
++class OrderedVersion(Protocol):
++    """A version value that can be bisected within its own ordered domain."""
++
++    def __lt__(self, other: Self, /) -> bool:
++        """Compare versions from the same listing."""
++        ...
++
++
++VersionType = TypeVar("VersionType", bound=OrderedVersion)
++
++
++def cached_dependency_span(
++    version: VersionType,
++    universe: Sequence[VersionType],
++    dependency_at: Callable[[VersionType], object | None],
++    *,
++    expand_higher: bool = True,
++) -> tuple[VersionType | None, VersionType | None]:
++    """Return open bounds around cached equivalents without reading metadata.
++
++    ``universe`` must be sorted ascending and remain fixed for the resolution.
++    ``dependency_at`` returns a cached dependency value, or None for unread metadata.
++    """
++    below = bisect_left(universe, version)
++    above = bisect_right(universe, version)
++    dependencies = dependency_at(version)
++
++    # Unknown metadata fences a span even when both cache lookups are missing.
++    if dependencies is not None:
++        while below and dependency_at(universe[below - 1]) == dependencies:
++            below -= 1
++
++        if expand_higher:
++            while (
++                above < len(universe) and dependency_at(universe[above]) == dependencies
++            ):
++                above += 1
++
++    return (
++        universe[below - 1] if below else None,
++        universe[above] if above < len(universe) else None,
++    )
