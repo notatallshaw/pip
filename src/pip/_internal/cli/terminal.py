@@ -28,21 +28,35 @@ if sys.platform == "win32":
 
     def _enable_windows_vt(file: TextIO) -> bool:
         """Enable ANSI output when the Windows console supports it."""
+        # Console APIs need an OS handle, not Python's C runtime descriptor.
+        # https://docs.python.org/3/library/msvcrt.html#msvcrt.get_osfhandle
         try:
             handle = msvcrt.get_osfhandle(file.fileno())
         except (OSError, ValueError):
             return False
+
+        # WinDLL selects Windows' stdcall calling convention for the console APIs.
+        # https://docs.python.org/3/library/ctypes.html#ctypes.WinDLL
         kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+
+        # HANDLE types avoid ctypes' default C int conversion on 64-bit Windows.
+        # https://docs.python.org/3/library/ctypes.html#specifying-the-required-argument-types-function-prototypes
         kernel.GetConsoleMode.argtypes = [
             wintypes.HANDLE,
             ctypes.POINTER(wintypes.DWORD),
         ]
         kernel.GetConsoleMode.restype = wintypes.BOOL
+
         kernel.SetConsoleMode.argtypes = [wintypes.HANDLE, wintypes.DWORD]
         kernel.SetConsoleMode.restype = wintypes.BOOL
+
+        # GetConsoleMode fills this DWORD through a pointer; pipes fail the query.
+        # https://learn.microsoft.com/en-us/windows/console/getconsolemode
         mode = wintypes.DWORD()
-        # Preserve existing flags while enabling ENABLE_VIRTUAL_TERMINAL_PROCESSING.
+
+        # Add ENABLE_VIRTUAL_TERMINAL_PROCESSING (0x0004) without clearing other flags.
         # https://learn.microsoft.com/en-us/windows/console/setconsolemode
+        # Prior art: https://github.com/tartley/colorama/blob/0.4.6/colorama/winterm.py#L166-L182
         return bool(
             kernel.GetConsoleMode(handle, ctypes.byref(mode))
             and kernel.SetConsoleMode(handle, mode.value | 0x0004)
@@ -55,6 +69,7 @@ else:
 
 
 _SGR_FOREGROUND = 30
+
 # Use the basic SGR palette rather than terminal-specific RGB color support.
 # https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#text-formatting
 _STYLES = {
@@ -102,6 +117,7 @@ class Text:
             escaped, tag = match.groups()
             result.parts.append((text[start : match.start()], " ".join(styles)))
             start = match.end()
+
             # Quote backslashes and brackets independently of surrounding markup.
             if escaped is not None:
                 result.parts.append((escaped, " ".join(styles)))
@@ -174,12 +190,15 @@ class Display:
 
     def __init__(self) -> None:
         self.lock = threading.RLock()
+        # Keep outer lines so finishing a nested operation can restore them.
         self.lines: list[LiveLine] = []
         self.drawn: Terminal | None = None
 
     def clear(self) -> None:
         """Clear the active line under the caller's display lock."""
         if self.drawn is not None:
+            # Return to column zero, then erase the rest of the previous frame.
+            # https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#text-modification
             _write(self.drawn.file, "\r\x1b[K")
             self.drawn.file.flush()
             self.drawn = None
@@ -197,6 +216,7 @@ class Display:
         width = max(shutil.get_terminal_size().columns - 1, 0)
         encoding = owner.file.encoding or "utf-8"
         text = line.text.encode(encoding, "backslashreplace").decode(encoding)
+
         # Leave the last column empty so a repaint never wraps.
         _write(owner.file, "\r" + fit_line(text, width))
         owner.file.flush()
@@ -223,6 +243,7 @@ class Terminal:
         capable = capable and compatible != "0"
         if os.name == "nt" and tty:
             capable = capable and _enable_windows_vt(self.file)
+
         # An empty FORCE_COLOR explicitly disables automatic styling.
         forced = os.environ.get("FORCE_COLOR")
         self.styled = (
@@ -231,9 +252,13 @@ class Terminal:
             else (compatible == "1" or (tty if forced is None else bool(forced)))
             and capable
         )
+
+        # NO_COLOR suppresses colors while retaining emphasis such as bold text.
+        # https://no-color.org/
         self.color = (
             self.styled and not no_color and os.environ.get("NO_COLOR", "") == ""
         )
+
         interactive = os.environ.get("TTY_INTERACTIVE")
         self.interactive = capable and (
             interactive == "1" or (tty and interactive != "0")
@@ -253,6 +278,7 @@ class Terminal:
 
         codes: set[int] = set()
         foreground = None
+
         for word in style.split():
             for code in map(int, _STYLES[word].split(";")):
                 if code >= _SGR_FOREGROUND:
@@ -263,6 +289,7 @@ class Terminal:
         # A nested foreground replaces the enclosing color.
         if self.color and foreground is not None:
             codes.add(foreground)
+
         if not codes:
             return text
 
@@ -279,10 +306,12 @@ class Terminal:
         if self.file is other.file:
             self.display = other.display
         elif self.interactive and other.interactive:
+            # stdout and stderr may have different descriptors for the same terminal.
             try:
                 same = os.fstat(self.file.fileno()) == os.fstat(other.file.fileno())
             except (OSError, ValueError):
                 same = False
+
             if same:
                 self.display = other.display
 
@@ -311,11 +340,14 @@ class LiveLine:
         with self.terminal.display.lock:
             self.terminal.display.clear()
             self.terminal.display.lines.append(self)
+
         return self
 
     def update(self, text: str) -> None:
         with self.terminal.display.lock:
             self.text = text
+
+            # Hidden outer lines retain their newest frame without repainting.
             if self.terminal.display.lines[-1] is self:
                 self.terminal.display.clear()
                 self.terminal.display.paint()
@@ -332,9 +364,11 @@ def fit_line(text: str, width: int) -> str:
     # Approximate terminal cells using Unicode combining and width properties.
     # https://docs.python.org/3/library/unicodedata.html#unicodedata.east_asian_width
     result = []
+
     for char in text:
         if not char.isprintable():
             continue
+
         cells = (
             0
             if unicodedata.combining(char)
@@ -342,6 +376,7 @@ def fit_line(text: str, width: int) -> str:
         )
         if cells > width:
             break
+
         result.append(char)
         width -= cells
 
@@ -351,6 +386,7 @@ def fit_line(text: str, width: int) -> str:
 def print_json(data: object, terminal: Terminal) -> None:
     """Write indented JSON, with token colors on color-enabled streams."""
     text = json.dumps(data, indent=2, ensure_ascii=False)
+
     # Text-stream backslash replacement can produce invalid JSON escapes.
     try:
         text.encode(terminal.file.encoding or "utf-8")
@@ -362,13 +398,16 @@ def print_json(data: object, terminal: Terminal) -> None:
         return
 
     decoder = json.JSONDecoder()
+
     # JSON tokens have no literal LF; each role can share one wrapper per document.
     # https://www.rfc-editor.org/rfc/rfc8259#section-7
     styles = {
         style: terminal.style("%s", style) for style in ("bold blue", "green", "cyan")
     }
+
     parts: list[str] = []
     start = 0
+
     while match := _JSON_TOKEN.search(text, start):
         parts.append(text[start : match.start()])
         if match[0] == '"':
@@ -379,13 +418,16 @@ def print_json(data: object, terminal: Terminal) -> None:
         else:
             end = match.end()
             style = "cyan"
+
         parts.append(styles[style] % text[match.start() : end])
         start = end
 
     parts.append(text[start:])
     text = "".join(parts)
+
     # Drop token fragments before the stream's encoding copies.
     del parts
+
     terminal.print(Text(text))
 
 
@@ -398,8 +440,10 @@ def _traceback_locals(
     # Retain native exception formatting while replacing only captured locals.
     # https://docs.python.org/3/library/traceback.html#traceback.FrameSummary
     pending = [(rendered, exc, tb)]
+
     while pending:
         summary, original, original_tb = pending.pop()
+
         for frame_summary, (frame, _) in zip(
             summary.stack, traceback.walk_tb(original_tb), strict=False
         ):
@@ -412,6 +456,7 @@ def _traceback_locals(
         if summary.__cause__ is not None and original.__cause__ is not None:
             cause = original.__cause__
             pending.append((summary.__cause__, cause, cause.__traceback__))
+
         if summary.__context__ is not None and original.__context__ is not None:
             context = original.__context__
             pending.append((summary.__context__, context, context.__traceback__))
@@ -434,6 +479,7 @@ def debug_traceback(
 ) -> None:
     """Show exception chains and abbreviated local variables in debug mode."""
     rendered = traceback.TracebackException(exc_type, exc, tb, capture_locals=False)
+
     try:
         _traceback_locals(rendered, exc, tb)
     except Exception:
