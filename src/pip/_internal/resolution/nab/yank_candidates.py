@@ -11,6 +11,7 @@ from pip._vendor.nab_provider.version_candidates import (
     is_pin,
 )
 from pip._vendor.nab_resolver.resolver import Resolver
+from pip._vendor.nab_resolver.result import IncompleteSelectionError, walk_selected
 from pip._vendor.packaging.ranges import VersionRange
 from pip._vendor.packaging.utils import canonicalize_name
 
@@ -307,25 +308,22 @@ class YankCandidates(PreparedVersionCatalogue[Candidate, CandidateData]):
             requirements.setdefault(requirement.name, []).append(requirement)
 
         reachable: dict[str, Candidate] = {}
-        pending = list(provider.roots)
-        while pending:
-            name = pending.pop()
-            if name in reachable:
-                continue
-            choice = selected.get(name)
-            if choice is None:
-                return True
-            record = self.dependencies.get(choice)
-            if record is None:
-                return True
-
-            reachable[name] = choice
-            for requirement in record[0]:
-                requirements.setdefault(requirement.name, []).append(requirement)
-            pending.extend(record[1])
+        try:
+            for name, choice, _ in walk_selected(
+                provider.roots,
+                selected,
+                lambda _name, choice: self.dependencies.get(choice, ((), None))[1],
+                depth_first=True,
+            ):
+                reachable[name] = choice
+                for requirement in self.dependencies[choice][0]:
+                    requirements.setdefault(requirement.name, []).append(requirement)
+        except IncompleteSelectionError:
+            return True
 
         if candidate not in reachable.values():
             return True
+
         return all(
             provider.prerelease_is_admitted(
                 self.prepared[choice],

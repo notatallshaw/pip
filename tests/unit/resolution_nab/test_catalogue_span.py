@@ -1,7 +1,6 @@
+from pip._vendor.nab_resolver.version_spans import cached_dependency_span
 from pip._vendor.packaging.ranges import VersionRange
 from pip._vendor.packaging.version import Version
-
-from pip._internal.resolution.nab.catalogue import cached_dependency_span
 
 
 def test_cached_span_stops_at_different_or_unread_metadata() -> None:
@@ -11,7 +10,18 @@ def test_cached_span_stops_at_different_or_unread_metadata() -> None:
         ("app", versions[1]): ((), {}),
         ("app", versions[2]): ((), {}),
     }
-    span = cached_dependency_span("app", versions[1], versions, dependencies)
+    lower, upper = cached_dependency_span(
+        versions[1],
+        versions,
+        lambda version: (
+            record[1]
+            if (record := dependencies.get(("app", version))) is not None
+            else None
+        ),
+    )
+    span = VersionRange.from_bounds(
+        lower, upper, include_lower=False, include_upper=False
+    )
     assert versions[1] in span
     assert versions[2] in span
     assert Version("2.5") in span
@@ -22,7 +32,10 @@ def test_cached_span_stops_at_different_or_unread_metadata() -> None:
 
 def test_missing_selected_metadata_does_not_absorb_unknown_neighbors() -> None:
     versions = list(map(Version, ("1", "2", "3")))
-    span = cached_dependency_span("app", versions[1], versions, {})
+    lower, upper = cached_dependency_span(versions[1], versions, lambda _version: None)
+    span = VersionRange.from_bounds(
+        lower, upper, include_lower=False, include_upper=False
+    )
     assert versions[1] in span
     assert versions[0] not in span
     assert versions[2] not in span
@@ -30,7 +43,10 @@ def test_missing_selected_metadata_does_not_absorb_unknown_neighbors() -> None:
 
 def test_prerelease_is_a_real_boundary_in_the_catalogue() -> None:
     versions = list(map(Version, ("1", "2a1", "2", "3")))
-    span = cached_dependency_span("app", versions[2], versions, {})
+    lower, upper = cached_dependency_span(versions[2], versions, lambda _version: None)
+    span = VersionRange.from_bounds(
+        lower, upper, include_lower=False, include_upper=False
+    )
     assert versions[2] in span
     assert versions[1] not in span
     assert versions[3] not in span

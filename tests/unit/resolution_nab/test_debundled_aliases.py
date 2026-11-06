@@ -22,14 +22,45 @@ initializer = initializer.replace("DEBUNDLED = False", "DEBUNDLED = True")
 exec(compile(initializer, vendor.__file__, "exec"), vendor.__dict__)
 
 importlib.import_module("pip._vendor.nab_resolver." + first)
+
+from pip._vendor.nab_resolver.result import IncompleteSelectionError
+from nab_resolver.result import walk_selected
+
+try:
+    list(walk_selected(("missing",), {}, lambda _package, _candidate: ()))
+except IncompleteSelectionError as error:
+    assert error.package == "missing"
+else:
+    raise AssertionError("incomplete external selection was accepted")
+
+from pip._internal.resolution.nab.ranges import CandidateKey
+from pip._vendor.packaging.version import Version
+from nab_resolver.values import FrozenValue
+
+assert isinstance(CandidateKey(Version("1"), "index"), FrozenValue)
+
 for name in (
-    "candidate_provider", "diagnostics", "errors", "priority", "ranges",
-    "resolver", "root", "testing", "types",
+    "candidate_provider", "diagnostics", "errors", "keyed_ranges", "priority",
+    "proofs", "ranges", "resolver", "result", "root", "testing", "types", "values",
+    "version_spans",
 ):
     bundled = importlib.import_module("pip._vendor.nab_resolver." + name)
     canonical = importlib.import_module("nab_resolver." + name)
     assert bundled is canonical, "split nab module: " + name
     assert Path(canonical.__file__).is_relative_to(external)
+
+for name in (
+    "preference", "preference_provider", "value", "version_candidates",
+):
+    bundled = importlib.import_module("pip._vendor.nab_provider." + name)
+    canonical = importlib.import_module("nab_provider." + name)
+    assert bundled is canonical, "split provider module: " + name
+    assert Path(canonical.__file__).is_relative_to(external)
+
+from pip._vendor.nab_resolver.root import ROOT
+from nab_resolver.root import ROOT as canonical_root
+
+assert ROOT is canonical_root
 
 from pip._vendor.nab_resolver.candidate_provider import (
     CandidateProvider, CandidateRequirement, PreparedCandidate,
@@ -63,13 +94,19 @@ assert provider.validate_solution(solution)
 def test_debundled_nab_public_modules_share_identity(
     tmp_path: Path, first: str
 ) -> None:
-    """Keep public types and phase-module sentinels in one external namespace."""
+    """Keep external exceptions, value types and solver roots coherent."""
     source = Path(__file__).parents[3] / "src"
-    shutil.copytree(
-        source / "pip/_vendor/nab_resolver",
-        tmp_path / "nab_resolver",
-        ignore=shutil.ignore_patterns("__pycache__"),
-    )
+    for package in ("nab_resolver", "nab_provider", "packaging"):
+        target = tmp_path / package
+        shutil.copytree(
+            source / "pip/_vendor" / package,
+            target,
+            ignore=shutil.ignore_patterns("__pycache__"),
+        )
+        # External distributions import each other by their canonical names.
+        for module in target.rglob("*.py"):
+            module.write_text(module.read_text().replace("pip._vendor.", ""))
+
     result = subprocess.run(
         [sys.executable, "-I", "-S", "-c", _PROBE, str(source), str(tmp_path), first],
         capture_output=True,

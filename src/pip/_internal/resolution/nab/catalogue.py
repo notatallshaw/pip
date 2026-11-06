@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import copy
 import logging
-from bisect import bisect_left, bisect_right
 from collections import defaultdict, deque
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, NoReturn, cast
 
 from pip._vendor.nab_provider.preference import (
@@ -24,12 +23,14 @@ from pip._vendor.nab_resolver.resolver import (
     ResolverObserver,
     Solution,
 )
+from pip._vendor.nab_resolver.result import IncompleteSelectionError, walk_selected
 from pip._vendor.nab_resolver.types import (
     Incompatibility,
     IncompatibilityCause,
     RangeProtocol,
     Term,
 )
+from pip._vendor.nab_resolver.version_spans import cached_dependency_span
 from pip._vendor.packaging.ranges import VersionRange
 from pip._vendor.packaging.specifiers import SpecifierSet
 from pip._vendor.packaging.version import Version
@@ -81,36 +82,6 @@ logger = logging.getLogger(__name__)
 
 class _TryYankedResolution(Exception):
     """Continue fixed-catalogue search with conditional yank permission."""
-
-
-def cached_dependency_span(
-    package: str,
-    version: Version,
-    universe: Sequence[Version],
-    dependencies: Mapping[tuple[str, Version], DependencyRecord],
-) -> VersionRange:
-    """Cover adjacent cached equivalents and the empty gaps around them."""
-    below = bisect_left(universe, version)
-    above = bisect_right(universe, version)
-    cached = dependencies.get((package, version))
-    if cached is not None:
-        while (
-            below
-            and dependencies.get((package, universe[below - 1]), ((), None))[1]
-            == cached[1]
-        ):
-            below -= 1
-        while (
-            above < len(universe)
-            and dependencies.get((package, universe[above]), ((), None))[1] == cached[1]
-        ):
-            above += 1
-    return VersionRange.from_bounds(
-        universe[below - 1] if below else None,
-        universe[above] if above < len(universe) else None,
-        include_lower=False,
-        include_upper=False,
-    )
 
 
 class CatalogueObserver(ResolverObserver[str, Version]):
@@ -581,20 +552,22 @@ class CatalogueProvider(BaseProvider[str, Version]):
         """Return a fully read reachable plan including the prospective choice."""
         selected = dict(self.solution_decisions)
         selected[package] = version
-        reachable: dict[str, Version] = {}
-        pending = list(self.roots)
-        while pending:
-            name = pending.pop()
-            if name in reachable:
-                continue
-            chosen = selected.get(name)
-            if chosen is None:
-                return None
-            record = self.dependencies.get((name, chosen))
-            if record is None:
-                return None
-            reachable[name] = chosen
-            pending.extend(record[1])
+
+        try:
+            reachable = {
+                name: chosen
+                for name, chosen, _ in walk_selected(
+                    self.roots,
+                    selected,
+                    lambda name, chosen: self.dependencies.get(
+                        (name, chosen), ((), None)
+                    )[1],
+                    depth_first=True,
+                )
+            }
+        except IncompleteSelectionError:
+            return None
+
         return reachable if package in reachable else None
 
     def precheck_prerelease_admission(self, package: str, version: Version) -> bool:
@@ -748,8 +721,14 @@ class CatalogueProvider(BaseProvider[str, Version]):
             if installed is not None:
                 versions.add(installed)
             self.universes[package] = sorted(versions)
-        return cached_dependency_span(
-            package, version, self.universes[package], self.dependencies
+
+        lower, upper = cached_dependency_span(
+            version,
+            self.universes[package],
+            lambda neighbor: self.dependencies.get((package, neighbor), ((), None))[1],
+        )
+        return VersionRange.from_bounds(
+            lower, upper, include_lower=False, include_upper=False
         )
 
     def solve(
