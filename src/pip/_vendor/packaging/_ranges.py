@@ -17,11 +17,10 @@ from .version import InvalidVersion, Version
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Sequence
-    from typing import Union
 
     # Total-order key for comparing two boundaries (boundary-vs-boundary only).
     # The post slot may be ``_BOUNDARY_INF`` for an AFTER_POSTS boundary.
-    _BoundaryOrderSuffix = tuple[int, int, int, Union[int, float], int, int]
+    _BoundaryOrderSuffix = tuple[int, int, int, int | float, int, int]
     _BoundaryOrderKey = tuple[int, tuple[int, ...], _BoundaryOrderSuffix, float]
 
 __all__ = [
@@ -34,6 +33,7 @@ __all__ = [
     "least_version_above",
     "matches_bounds_only",
     "range_is_empty",
+    "ranges_are_disjoint",
     "ranges_are_prerelease_only",
     "resolve_prereleases",
     "standard_ranges",
@@ -82,6 +82,9 @@ class BoundaryVersion:
         "kind",
         "version",
     )
+
+    # Synthetic boundaries must use version operators rather than cached keys.
+    _key_cache: None = None
 
     def __init__(self, version: Version, kind: BoundaryKind) -> None:
         self.version = version
@@ -172,14 +175,15 @@ class BoundaryVersion:
 
 
 if TYPE_CHECKING:
-    _VersionOrBoundary = Union[Version, BoundaryVersion, None]
+    _VersionOrBoundary = Version | BoundaryVersion | None
 
 
 @functools.total_ordering
 class LowerBound:
     """Lower bound of a version range.
 
-    A version *v* of ``None`` means unbounded below (-inf).
+    A version *v* of ``None`` means unbounded below (-inf), with
+    ``inclusive`` forced to ``False``.
     At equal versions, ``[v`` sorts before ``(v`` because an inclusive
     bound starts earlier.
     """
@@ -187,6 +191,10 @@ class LowerBound:
     __slots__ = ("_above", "inclusive", "version")
 
     def __init__(self, version: _VersionOrBoundary, inclusive: bool) -> None:
+        # Two spellings of -inf would sort above each other under total_ordering.
+        if version is None:
+            inclusive = False
+
         self.version = version
         self.inclusive = inclusive
         # Pre-bind a predicate "is parsed at or above this lower
@@ -219,10 +227,55 @@ class LowerBound:
             return other.version is not None
         if other.version is None:
             return False
-        if self.version != other.version:
-            return self.version < other.version
+
+        # Use cached keys when both exist; cold versions and boundaries use operators.
+        self_key = self.version._key_cache
+        other_key = other.version._key_cache
+        if self_key is None or other_key is None:
+            if self.version != other.version:
+                return self.version < other.version
+        elif self_key != other_key:
+            return self_key < other_key
+
         # [v < (v: inclusive starts earlier.
         return self.inclusive and not other.inclusive
+
+    # Explicit operators avoid total_ordering's repeated comparison dispatch.
+    def __gt__(self, other: LowerBound) -> bool:
+        if not isinstance(other, LowerBound):
+            return NotImplemented
+        if self.version is None:
+            return False
+        if other.version is None:
+            return True
+
+        self_key = self.version._key_cache
+        other_key = other.version._key_cache
+        if self_key is None or other_key is None:
+            if self.version != other.version:
+                return other.version < self.version
+        elif self_key != other_key:
+            return other_key < self_key
+
+        return other.inclusive and not self.inclusive
+
+    def __le__(self, other: LowerBound) -> bool:
+        if not isinstance(other, LowerBound):
+            return NotImplemented
+        if self.version is None:
+            return True
+        if other.version is None:
+            return False
+
+        self_key = self.version._key_cache
+        other_key = other.version._key_cache
+        if self_key is None or other_key is None:
+            if self.version != other.version:
+                return self.version < other.version
+        elif self_key != other_key:
+            return self_key < other_key
+
+        return self.inclusive or not other.inclusive
 
     def __hash__(self) -> int:
         return hash((self.version, self.inclusive))
@@ -236,7 +289,8 @@ class LowerBound:
 class UpperBound:
     """Upper bound of a version range.
 
-    A version *v* of ``None`` means unbounded above (+inf).
+    A version *v* of ``None`` means unbounded above (+inf), with
+    ``inclusive`` forced to ``False``.
     At equal versions, ``v)`` sorts before ``v]`` because an exclusive
     bound ends earlier.
     """
@@ -244,6 +298,10 @@ class UpperBound:
     __slots__ = ("_below", "inclusive", "version")
 
     def __init__(self, version: _VersionOrBoundary, inclusive: bool) -> None:
+        # Two spellings of +inf would sort above each other under total_ordering.
+        if version is None:
+            inclusive = False
+
         self.version = version
         self.inclusive = inclusive
         # Pre-bind a predicate "is parsed at or below this upper
@@ -273,15 +331,41 @@ class UpperBound:
     def __lt__(self, other: UpperBound) -> bool:
         if not isinstance(other, UpperBound):
             return NotImplemented
-        # Nothing < +inf (except +inf itself).
+        # An unbounded upper endpoint does not sort before any endpoint.
         if self.version is None:
             return False
         if other.version is None:
             return True
-        if self.version != other.version:
-            return self.version < other.version
+
+        # Use cached keys when both exist; cold versions and boundaries use operators.
+        self_key = self.version._key_cache
+        other_key = other.version._key_cache
+        if self_key is None or other_key is None:
+            if self.version != other.version:
+                return self.version < other.version
+        elif self_key != other_key:
+            return self_key < other_key
+
         # v) < v]: exclusive ends earlier.
         return not self.inclusive and other.inclusive
+
+    def __gt__(self, other: UpperBound) -> bool:
+        if not isinstance(other, UpperBound):
+            return NotImplemented
+        if self.version is None:
+            return other.version is not None
+        if other.version is None:
+            return False
+
+        self_key = self.version._key_cache
+        other_key = other.version._key_cache
+        if self_key is None or other_key is None:
+            if self.version != other.version:
+                return other.version < self.version
+        elif self_key != other_key:
+            return other_key < self_key
+
+        return self.inclusive and not other.inclusive
 
     def __hash__(self) -> int:
         return hash((self.version, self.inclusive))
@@ -524,6 +608,26 @@ def intersect_ranges(
             right_index += 1
 
     return result
+
+
+def ranges_are_disjoint(left: Sequence[Interval], right: Sequence[Interval]) -> bool:
+    """Test whether two sorted, non-overlapping interval lists are disjoint.
+
+    Each interval must contain at least one version; empty input lists are allowed.
+    """
+    left_index = right_index = 0
+    while left_index < len(left) and right_index < len(right):
+        left_lower, left_upper = left[left_index]
+        right_lower, right_upper = right[right_index]
+
+        if range_is_empty(left_lower, right_upper):
+            right_index += 1
+        elif range_is_empty(right_lower, left_upper):
+            left_index += 1
+        else:
+            return False
+
+    return True
 
 
 def filter_by_ranges(

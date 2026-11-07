@@ -1045,49 +1045,32 @@ class TestExtraMerge:
 
 
 def test_new_resolver_build_directory_error_zazo_19(script: PipTestEnvironment) -> None:
-    """https://github.com/pradyunsg/zazo/issues/19#issuecomment-631615674
-
-    This will first resolve like this:
-
-    1. Pin pkg-b==2.0.0 (since pkg-b has fewer choices)
-    2. Pin pkg-a==3.0.0 -> Conflict due to dependency pkg-b<2
-    3. Pin pkg-b==1.0.0
-
-    Since pkg-b is only available as sdist, both the first and third steps
-    would trigger building from source. This ensures the preparer can build
-    different versions of a package for the resolver.
-
-    The preparer would fail with the following message if the different
-    versions end up using the same build directory::
-
-        ERROR: pip can't proceed with requirements 'pkg-b ...' due to a
-        pre-existing build directory (...). This is likely due to a previous
-        installation that failed. pip is being responsible and not assuming it
-        can delete this. Please delete it and try again.
-    """
+    """Build two backtracked sdist versions in separate directories."""
     create_basic_wheel_for_package(
         script,
         "pkg_a",
         "3.0.0",
         depends=["pkg-b<2"],
     )
-    create_basic_wheel_for_package(script, "pkg_a", "2.0.0")
-    create_basic_wheel_for_package(script, "pkg_a", "1.0.0")
+    create_basic_wheel_for_package(script, "pkg_a", "2.0.0", depends=["pkg-b<1"])
+    create_basic_wheel_for_package(script, "pkg_a", "1.0.0", depends=["pkg-b<1"])
 
     create_basic_sdist_for_package(script, "pkg_b", "2.0.0")
     create_basic_sdist_for_package(script, "pkg_b", "1.0.0")
 
-    script.pip(
+    result = script.pip(
         "install",
         "--no-build-isolation",
         "--no-cache-dir",
         "--no-index",
         "--find-links",
         script.scratch_path,
-        "pkg-a",
         "pkg-b",
+        "pkg-a",
     )
     script.assert_installed(pkg_a="3.0.0", pkg_b="1.0.0")
+    assert "pkg_b-2.0.0.tar.gz" in result.stdout
+    assert "pkg_b-1.0.0.tar.gz" in result.stdout
 
 
 def test_new_resolver_upgrade_same_version(script: PipTestEnvironment) -> None:
