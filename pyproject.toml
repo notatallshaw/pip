@@ -178,6 +178,8 @@ substitute = [
 ]
 drop = [
   '^nab_resolver/(?:diagnostics|testing|version_spans)\.py$',
+  # Keep native callbacks and candidate iteration.
+  '^nab_provider/(?!(?:__init__|_compat|callbacks|candidate_stream)\.py$|py\.typed$|LICENSE(?:\.[^/]+)?$).*',
   # Don't include dist-info directories in the vendored code
   "*.dist-info/",
   # contains unnecessary scripts

@@ -99,10 +99,13 @@ Modifications
   rather than ``appdirs``.
 * ``packaging`` has been modified to import its dependencies from
   ``pip._vendor``.
-* ``nab-resolver`` carries predicate ranges and deferred candidate queries.
-  Its patch is based on release 0.0.26;
-  see ``nab_resolver/PROVENANCE.md``.
-  This prototype snapshot contains unreleased APIs and does not satisfy the
+* ``nab-resolver`` carries the generic solver, predicate ranges, proof and
+  deferred-query APIs from the same source snapshot as the provider subset.
+  Its patch is based on release 0.0.26; see ``nab_resolver/PROVENANCE.md``.
+* ``nab-provider`` retains native requirement callbacks and lazy candidate-group
+  iteration, with its compatibility helper and a minimal initializer.
+  Its patch is based on release 0.0.26; see ``nab_provider/PROVENANCE.md``.
+  These prototype snapshots contain unreleased APIs and do not satisfy the
   release-only policy above.
 * ``CacheControl`` has been modified to import its dependencies from
   ``pip._vendor``.
