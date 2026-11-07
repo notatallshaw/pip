@@ -1,0 +1,1415 @@
+diff --git a/src/pip/_vendor/nab_resolver/PROVENANCE.md b/src/pip/_vendor/nab_resolver/PROVENANCE.md
+new file mode 100644
+--- /dev/null
++++ b/src/pip/_vendor/nab_resolver/PROVENANCE.md
+@@ -0,0 +1,7 @@
++# Resolver source snapshot
++
++The base distribution is nab-resolver 0.0.26. The patch selects source from `nab-resolver/src/nab_resolver` at signed Nab commit `9810c84c2d9485bbdb220972764894978031b54b` (tree `853724456ed5afe7d6ad1fe257ce2b0627925b19`), based on main `53112670b7ec73f98bd986bd290406b954792627`. Pip's vendoring tool redirects imports to `pip._vendor`.
++
++The subset includes predicate ranges, deferred availability, decision reconsideration, shared values, proof traversal and selection traversal. It omits `diagnostics.py`, `testing.py` and `version_spans.py`, and uses a minimal initializer. Pip supplies its own error rendering; the omitted modules remain in Nab.
++
++These prototype changes are not released in 0.0.26.
+diff --git a/src/pip/_vendor/nab_resolver/__init__.py b/src/pip/_vendor/nab_resolver/__init__.py
+--- a/src/pip/_vendor/nab_resolver/__init__.py
++++ b/src/pip/_vendor/nab_resolver/__init__.py
+@@ -1,21 +1 @@
+-"""PubGrub dependency resolver.
+-
+-The supported API is the module paths below.  They will not move without a
+-major version bump.  Everything else in the package is internal and may be
+-renamed or relocated in any release.
+-
+-    nab_resolver.diagnostics DiagnosticMessage, Suggestion, error_message,
+-                             suggestion_lines
+-    nab_resolver.errors     ResolutionError, ResolutionInvariantError,
+-                            ResolutionLimitError,
+-                            ResolutionStalledError, ResolutionTerminatedError
+-    nab_resolver.ranges     Range
+-    nab_resolver.resolver   BaseProvider, DEFAULT_MAX_ITERATIONS, Resolver,
+-                            ResolverObserver, ResolverProvider, Solution
+-    nab_resolver.root       ROOT
+-    nab_resolver.types      Incompatibility, IncompatibilityCause,
+-                            RangeProtocol, RootRequirement, Term
+-
+-The package root binds no names, so importing ``nab_resolver`` pulls in no
+-submodules and a caller loads only what it imports.
+-"""
++"""Generic PubGrub resolution used by pip."""
+diff --git a/src/pip/_vendor/nab_resolver/decide.py b/src/pip/_vendor/nab_resolver/decide.py
+--- a/src/pip/_vendor/nab_resolver/decide.py
++++ b/src/pip/_vendor/nab_resolver/decide.py
+@@ -16,10 +16,13 @@
+ from typing import TYPE_CHECKING, Any
+ 
+ from .incompat_index import add_incompatibility
++from .root import ROOT
+ from .types import Incompatibility, IncompatibilityCause, RangeProtocol, Term
+ 
+ if TYPE_CHECKING:
+-    from .resolver import Resolver
++    from collections.abc import Set as AbstractSet
++
++    from .resolver import Resolver, ResolverProvider
+ 
+ __all__ = [
+     "absorb_pending_clauses",
+@@ -27,11 +30,14 @@
+     "choose_package_to_decide",
+     "choose_version",
+     "record_no_versions",
++    "refresh_provider_hint",
+ ]
+ 
+ 
+-def choose_package_to_decide(resolver: Resolver[Any, Any]) -> Any | None:
+-    """Choose the next undecided package, or None if all decided.
++def choose_package_to_decide(
++    resolver: Resolver[Any, Any], excluded: AbstractSet[Any] | None = None
++) -> Any | None:
++    """Choose the next undecided package outside ``excluded``, or None.
+ 
+     Prefers ``is_ready`` packages so resolution keeps making progress while
+     other listings/metadata are still in flight.  ``begin_decision_scan`` marks
+@@ -41,12 +47,18 @@
+     across scans, so one that moves without the solution or ``priority_epoch``
+     moving is never read again.
+ 
++    Dynamic queries recompute eligible keys after availability refresh.
++
+     ``ROOT`` never turns up in the undecided set: it is decided at level 1, a
+     targeted backtrack never aims lower, and conflict resolution raises rather
+     than backjumping to level 0.
+     """
+     undecided = resolver.solution.undecided_packages()
++    if excluded is not None and excluded:
++        undecided = undecided - excluded
+     if not undecided:
++        if excluded is not None and resolver.solution.undecided_packages():
++            resolver.provider.begin_decision_scan()
+         return None
+ 
+     # Readiness can depend on decisions changed by propagation or backtracking.
+@@ -84,21 +96,32 @@
+             tiebreak_cache[package] = tiebreak
+         return (ready_penalty, priority, tiebreak)
+ 
++    if excluded is not None:
++        resolver.solution.take_changed_packages()
++        return min(undecided, key=sort_key)
++
++    changed = resolver.solution.take_changed_packages()
+     return resolver.decision_queue.pick(
+         undecided,
+         sort_key,
+-        resolver.solution.take_changed_packages(),
++        changed,
+         resolver.priority_epoch,
+         key_inputs_arrived,
+     )
+ 
+ 
+-def choose_version(resolver: Resolver[Any, Any], package: Any) -> Any | None:
++def choose_version(
++    resolver: Resolver[Any, Any],
++    package: Any,
++    *,
++    hinted_provider: ResolverProvider[Any, Any] | None = None,
++) -> Any | None:
+     """Ask the provider to pick a version within the allowed range.
+ 
+     A user constraint narrows the acceptable range here rather than acting
+     as an incompatibility: it restricts which version is picked but never
+-    forces the package into the solution.
++    forces the package into the solution. A provider already refreshed for
++    this decision phase needs no second hint.
+     """
+     current_range = resolver.solution.get(package) or resolver.range_type.full()
+     constraint = resolver.constraints.get(package)
+@@ -106,15 +129,23 @@
+         current_range = current_range & constraint
+ 
+     provider = resolver.provider
+-    # The hint costs two snapshots of the solution, so it is skipped for the
+-    # provider whose hook is ``BaseProvider``'s discarding no-op.
++    if provider is not hinted_provider:
++        refresh_provider_hint(resolver)
++    return provider.choose_version(package, current_range)
++
++
++def refresh_provider_hint(resolver: Resolver[Any, Any]) -> ResolverProvider[Any, Any]:
++    """Return the current provider, delivering snapshots unless its hint is a no-op."""
++    provider = resolver.provider
++
++    # The inherited no-op cannot read either snapshot.
+     if provider is not resolver._hint_ignoring_provider:  # noqa: SLF001
+         provider.receive_partial_solution_hint(
+             resolver.solution.positive_ranges(),
+             resolver.solution.decisions(),
+         )
+ 
+-    return provider.choose_version(package, current_range)
++    return provider
+ 
+ 
+ def _normalize_terms(
+@@ -142,6 +173,8 @@
+     the default ``NO_VERSIONS`` clause this turn.
+     """
+     clauses = list(resolver.provider.consume_pending_clauses())
++    if clauses and resolver.deferred is not None:
++        resolver.deferred.clear()
+     for incompatibility in clauses:
+         _normalize_terms(resolver, incompatibility)
+         add_incompatibility(resolver, incompatibility)
+@@ -191,15 +224,22 @@
+ 
+ 
+ def record_no_versions(
+-    resolver: Resolver[Any, Any], package: Any, *, had_pending: bool
++    resolver: Resolver[Any, Any],
++    package: Any,
++    *,
++    had_pending: bool,
++    deferrable: bool = True,
+ ) -> None:
+-    """Add the default ``NO_VERSIONS`` clause for ``package``.
++    """Defer a failed query or record its default absence clause.
+ 
+     Skipped when the provider already supplied context-aware clauses;
+     otherwise the broad clause would persist past the backjump that lifts
+     the supporting decisions.
+     """
+     if had_pending:
++        return
++    if deferrable and resolver.deferred is not None:
++        resolver.deferred.packages[package] = None
+         return
+ 
+     current_range = resolver.solution.get(package) or resolver.term_top
+@@ -224,3 +264,32 @@
+             constraint_range=constraint_range,
+         ),
+     )
++
++
++def record_contextual_no_versions(resolver: Resolver[Any, Any], package: Any) -> None:
++    """Guard an exhausted availability query by every other current decision."""
++    decisions = resolver.solution.decisions()
++    guards = [
++        Term(name, resolver.range_type.singleton(version), positive=True)
++        for name, version in decisions.items()
++        if name is not ROOT
++    ]
++    if not guards:
++        record_no_versions(resolver, package, had_pending=False, deferrable=False)
++        return
++
++    current_range = resolver.solution.get(package) or resolver.term_top
++    resolver.observer.on_no_versions(package, current_range)
++    constraint = resolver.constraints.get(package)
++    if constraint is None or not _constraint_hid_a_version(
++        resolver, package, current_range
++    ):
++        constraint = None
++    add_incompatibility(
++        resolver,
++        Incompatibility(
++            [Term(package, current_range, positive=True), *guards],
++            cause=IncompatibilityCause.CONTEXTUAL_NO_VERSIONS,
++            constraint_range=constraint,
++        ),
++    )
+diff --git a/src/pip/_vendor/nab_resolver/deferred.py b/src/pip/_vendor/nab_resolver/deferred.py
+new file mode 100644
+--- /dev/null
++++ b/src/pip/_vendor/nab_resolver/deferred.py
+@@ -0,0 +1,39 @@
++"""Track a stable sweep of queries whose candidates may be discovered later."""
++
++from __future__ import annotations
++
++from typing import TYPE_CHECKING, Generic
++
++if TYPE_CHECKING:
++    from collections.abc import Callable
++
++from .types import PackageType
++
++
++class DeferredChoices(Generic[PackageType]):
++    """Remember unavailable packages until resolution or availability progresses."""
++
++    def __init__(self, generation: Callable[[], int]) -> None:
++        """Start with no deferred queries at the provider's current generation."""
++        self.read_generation = generation
++        self.packages: dict[PackageType, None] = {}
++        self.generation = generation()
++        self.derivations = 0
++        self.decisions = 0
++
++    def clear(self) -> None:
++        """Start another sweep after a decision, backjump or queued clause."""
++        self.packages.clear()
++
++    def refresh(self, derivations: int, decisions: int) -> None:
++        """Invalidate failed queries when their allowed ranges or candidates change."""
++        generation = self.read_generation()
++        if (
++            generation != self.generation
++            or derivations != self.derivations
++            or decisions != self.decisions
++        ):
++            self.packages.clear()
++        self.generation = generation
++        self.derivations = derivations
++        self.decisions = decisions
+diff --git a/src/pip/_vendor/nab_resolver/predicate_ranges.py b/src/pip/_vendor/nab_resolver/predicate_ranges.py
+new file mode 100644
+--- /dev/null
++++ b/src/pip/_vendor/nab_resolver/predicate_ranges.py
+@@ -0,0 +1,317 @@
++"""Boolean restrictions over host predicates and exact candidate identities."""
++
++from __future__ import annotations
++
++from collections.abc import Callable, Hashable, Iterable
++from typing import Generic, TypeAlias, TypeVar
++
++from ._compat import override
++from .types import RangeRelation
++
++__all__ = ["PredicateAlgebra", "PredicateRange"]
++
++CandidateType = TypeVar("CandidateType", bound=Hashable)
++PredicateNode: TypeAlias = "bool | Decision[CandidateType]"
++
++
++class _Predicate(Generic[CandidateType]):
++    """One stable host predicate in an operation's Boolean ordering."""
++
++    __slots__ = ("matches", "order")
++
++    def __init__(self, order: int, matches: Callable[[CandidateType], bool]) -> None:
++        """Retain one predicate and its stable order."""
++        self.order = order
++        self.matches = matches
++
++
++class Decision(Generic[CandidateType]):
++    """A shared Boolean decision with distinct false and true continuations."""
++
++    __slots__ = ("high", "low", "predicate")
++
++    def __init__(
++        self,
++        predicate: _Predicate[CandidateType],
++        low: PredicateNode[CandidateType],
++        high: PredicateNode[CandidateType],
++    ) -> None:
++        """Retain the predicate and its two continuations."""
++        self.predicate = predicate
++        self.low = low
++        self.high = high
++
++
++def matches(node: PredicateNode[CandidateType], candidate: CandidateType) -> bool:
++    """Evaluate a Boolean path against one real host candidate."""
++    while isinstance(node, Decision):
++        node = node.high if node.predicate.matches(candidate) else node.low
++    return node
++
++
++class PredicateAlgebra(Generic[CandidateType]):
++    """Own canonical Boolean nodes and operation memoization for one solve."""
++
++    def __init__(self) -> None:
++        """Start operation-owned node and calculation caches."""
++        self.predicates: list[_Predicate[CandidateType]] = []
++        self.nodes: dict[
++            tuple[
++                _Predicate[CandidateType],
++                PredicateNode[CandidateType],
++                PredicateNode[CandidateType],
++            ],
++            Decision[CandidateType],
++        ] = {}
++        self.negations: dict[
++            PredicateNode[CandidateType], PredicateNode[CandidateType]
++        ] = {True: False, False: True}
++        self.operations: dict[
++            tuple[str, PredicateNode[CandidateType], PredicateNode[CandidateType]],
++            PredicateNode[CandidateType],
++        ] = {}
++
++    def node(
++        self,
++        predicate: _Predicate[CandidateType],
++        low: PredicateNode[CandidateType],
++        high: PredicateNode[CandidateType],
++    ) -> PredicateNode[CandidateType]:
++        """Reuse the canonical node for two distinct continuations."""
++        if low is high:
++            return low
++
++        key = predicate, low, high
++        if key not in self.nodes:
++            self.nodes[key] = Decision(predicate, low, high)
++        return self.nodes[key]
++
++    def combine(
++        self,
++        operation: str,
++        left: PredicateNode[CandidateType],
++        right: PredicateNode[CandidateType],
++    ) -> PredicateNode[CandidateType]:
++        """Apply a Boolean operation in predicate order."""
++        initial = operation, left, right
++        pending = [(left, right)]
++        while pending:
++            left, right = pending[-1]
++            key = operation, left, right
++            if key in self.operations:
++                pending.pop()
++                continue
++            if left is right:
++                self.operations[key] = left
++            elif isinstance(left, bool):
++                self.operations[key] = right if left == (operation == "and") else left
++            elif isinstance(right, bool):
++                self.operations[key] = left if right == (operation == "and") else right
++            else:
++                predicate = min(
++                    left.predicate, right.predicate, key=lambda item: item.order
++                )
++                low = (
++                    left.low if left.predicate is predicate else left,
++                    right.low if right.predicate is predicate else right,
++                )
++                high = (
++                    left.high if left.predicate is predicate else left,
++                    right.high if right.predicate is predicate else right,
++                )
++                low_key = operation, *low
++                high_key = operation, *high
++                if low_key not in self.operations:
++                    pending.append(low)
++                elif high_key not in self.operations:
++                    pending.append(high)
++                else:
++                    self.operations[key] = self.node(
++                        predicate, self.operations[low_key], self.operations[high_key]
++                    )
++        return self.operations[initial]
++
++    def negate(
++        self, node: PredicateNode[CandidateType]
++    ) -> PredicateNode[CandidateType]:
++        """Complement a shared formula without using the interpreter call stack."""
++        pending = [node]
++        while pending:
++            current = pending[-1]
++            if current in self.negations:
++                pending.pop()
++                continue
++            assert isinstance(current, Decision)
++            if current.low not in self.negations:
++                pending.append(current.low)
++            elif current.high not in self.negations:
++                pending.append(current.high)
++            else:
++                self.negations[current] = self.node(
++                    current.predicate,
++                    self.negations[current.low],
++                    self.negations[current.high],
++                )
++        return self.negations[node]
++
++    def restriction(
++        self, matches: Callable[[CandidateType], bool]
++    ) -> PredicateRange[CandidateType]:
++        """Bind a native predicate in this operation's stable variable order."""
++        predicate = _Predicate(len(self.predicates), matches)
++        self.predicates.append(predicate)
++        return PredicateRange(self.node(predicate, low=False, high=True), algebra=self)
++
++
++class PredicateRange(Generic[CandidateType]):
++    """A Boolean predicate with finite exact-candidate exceptions."""
++
++    __slots__ = ("_hash", "algebra", "default", "overrides")
++
++    def __init__(
++        self,
++        default: PredicateNode[CandidateType],
++        overrides: Iterable[tuple[CandidateType, bool]] = (),
++        *,
++        algebra: PredicateAlgebra[CandidateType] | None = None,
++    ) -> None:
++        """Snapshot the formula and exact candidate exceptions."""
++        self.default = default
++        self.overrides = frozenset(
++            (candidate, accepted)
++            for candidate, accepted in dict(overrides).items()
++            if accepted != matches(default, candidate)
++        )
++        self.algebra = algebra
++        self._hash = hash((default, self.overrides))
++
++    @classmethod
++    def empty(cls) -> PredicateRange[CandidateType]:
++        """Exclude every predicate assignment and candidate."""
++        return cls(default=False)
++
++    @classmethod
++    def full(cls) -> PredicateRange[CandidateType]:
++        """Admit every predicate assignment and candidate."""
++        return cls(default=True)
++
++    @classmethod
++    def singleton(cls, version: CandidateType) -> PredicateRange[CandidateType]:
++        """Admit one exact candidate identity."""
++        return cls(default=False, overrides=((version, True),))
++
++    @property
++    def is_empty(self) -> bool:
++        """Report an empty formula with no admitted exceptions."""
++        return self.default is False and not any(value for _, value in self.overrides)
++
++    def __contains__(self, candidate: CandidateType) -> bool:
++        """Evaluate the exact exception or native predicate formula."""
++        for known, accepted in self.overrides:
++            if candidate == known:
++                return accepted
++        return matches(self.default, candidate)
++
++    def _combine(
++        self, other: PredicateRange[CandidateType], operation: str
++    ) -> PredicateRange[CandidateType]:
++        algebra = self.algebra or other.algebra
++        if (
++            self.algebra is not None
++            and other.algebra is not None
++            and self.algebra is not other.algebra
++        ):
++            message = "predicate ranges belong to different operations"
++            raise ValueError(message)
++
++        default: PredicateNode[CandidateType]
++        if algebra is None:
++            assert isinstance(self.default, bool)
++            assert isinstance(other.default, bool)
++            default = (
++                self.default and other.default
++                if operation == "and"
++                else self.default or other.default
++            )
++        else:
++            default = algebra.combine(operation, self.default, other.default)
++
++        candidates = {candidate for candidate, _ in self.overrides | other.overrides}
++        overrides = (
++            (
++                candidate,
++                (candidate in self and candidate in other)
++                if operation == "and"
++                else (candidate in self or candidate in other),
++            )
++            for candidate in candidates
++        )
++        return PredicateRange(default, overrides, algebra=algebra)
++
++    def __and__(self, other: object) -> PredicateRange[CandidateType]:
++        """Intersect two symbolic candidate restrictions."""
++        if not isinstance(other, PredicateRange):
++            return NotImplemented
++        return self._combine(other, "and")
++
++    def __or__(self, other: object) -> PredicateRange[CandidateType]:
++        """Unite two symbolic candidate restrictions."""
++        if not isinstance(other, PredicateRange):
++            return NotImplemented
++        return self._combine(other, "or")
++
++    def __invert__(self) -> PredicateRange[CandidateType]:
++        """Complement the formula and candidate exceptions."""
++        default: PredicateNode[CandidateType]
++        if self.algebra is None:
++            assert isinstance(self.default, bool)
++            default = not self.default
++        else:
++            default = self.algebra.negate(self.default)
++        return PredicateRange(
++            default,
++            ((candidate, not accepted) for candidate, accepted in self.overrides),
++            algebra=self.algebra,
++        )
++
++    def __sub__(self, other: object) -> PredicateRange[CandidateType]:
++        """Exclude the other symbolic restriction."""
++        if not isinstance(other, PredicateRange):
++            return NotImplemented
++        return self & ~other
++
++    def is_subset(self, other: PredicateRange[CandidateType]) -> bool:
++        """Prove symbolic containment in the other restriction."""
++        return (self - other).is_empty
++
++    def is_superset(self, other: PredicateRange[CandidateType]) -> bool:
++        """Prove symbolic containment of the other restriction."""
++        return other.is_subset(self)
++
++    def is_disjoint(self, other: PredicateRange[CandidateType]) -> bool:
++        """Prove that two symbolic restrictions cannot overlap."""
++        return (self & other).is_empty
++
++    def relation(self, other: PredicateRange[CandidateType]) -> RangeRelation:
++        """Return the resolver subset and disjoint conclusions."""
++        subset, disjoint = self.is_subset(other), self.is_disjoint(other)
++        if subset:
++            return RangeRelation.EMPTY if disjoint else RangeRelation.SUBSET
++        return RangeRelation.DISJOINT if disjoint else RangeRelation.OVERLAPPING
++
++    @override
++    def __eq__(self, other: object) -> bool:
++        """Compare canonical formulas and exact exceptions."""
++        if not isinstance(other, PredicateRange):
++            return NotImplemented
++        return self.default is other.default and self.overrides == other.overrides
++
++    @override
++    def __hash__(self) -> int:
++        """Return the snapshot hash."""
++        return self._hash
++
++    @override
++    def __str__(self) -> str:
++        """Label the opaque restriction for generic diagnostics."""
++        return "host candidate restriction"
+diff --git a/src/pip/_vendor/nab_resolver/priority.py b/src/pip/_vendor/nab_resolver/priority.py
+new file mode 100644
+--- /dev/null
++++ b/src/pip/_vendor/nab_resolver/priority.py
+@@ -0,0 +1,64 @@
++"""Rank resolution decisions using conflict and culprit evidence."""
++
++from __future__ import annotations
++
++from typing import TYPE_CHECKING
++
++if TYPE_CHECKING:
++    from collections.abc import Mapping
++
++    from .types import PackageType
++
++__all__ = [
++    "CONFLICT_THRESHOLD",
++    "CULPRIT_DEMOTE_THRESHOLD",
++    "TIER_AFFECTED",
++    "TIER_CULPRIT",
++    "TIER_NORMAL",
++    "compute_tier",
++    "is_dominant_culprit",
++]
++
++
++CONFLICT_THRESHOLD = 5
++
++# Minimum culprit count and lead required for count-based demotion.
++CULPRIT_DEMOTE_THRESHOLD = 5
++
++# Lower number = higher priority.
++TIER_AFFECTED = 0
++TIER_NORMAL = 1
++TIER_CULPRIT = 2
++
++
++def compute_tier(
++    package: PackageType,
++    affected_count: int,
++    culprit_count: int,
++    culprit_counts: Mapping[PackageType, int] | None,
++    *,
++    force_backtracked: bool = False,
++) -> int:
++    """Apply conflict promotion and culprit or forced-backtrack demotion."""
++    if affected_count >= CONFLICT_THRESHOLD:
++        return TIER_AFFECTED
++    if force_backtracked:
++        return TIER_CULPRIT
++    if is_dominant_culprit(package, culprit_count, culprit_counts):
++        return TIER_CULPRIT
++    return TIER_NORMAL
++
++
++def is_dominant_culprit(
++    package: PackageType,
++    package_count: int,
++    culprit_counts: Mapping[PackageType, int] | None,
++) -> bool:
++    """Identify the leading culprit when its gap reaches the demotion threshold."""
++    if culprit_counts is None or package_count < CULPRIT_DEMOTE_THRESHOLD:
++        return False
++    second_highest = max(
++        (count for other, count in culprit_counts.items() if other != package),
++        default=0,
++    )
++    return package_count - second_highest >= CULPRIT_DEMOTE_THRESHOLD
+diff --git a/src/pip/_vendor/nab_resolver/proofs.py b/src/pip/_vendor/nab_resolver/proofs.py
+new file mode 100644
+--- /dev/null
++++ b/src/pip/_vendor/nab_resolver/proofs.py
+@@ -0,0 +1,182 @@
++"""Recover original dependency requests from a PubGrub failure proof."""
++
++from __future__ import annotations
++
++from collections import Counter
++from collections.abc import Hashable, Sequence
++from typing import Generic, TypeVar
++
++from .root import ROOT
++from .types import Incompatibility, IncompatibilityCause, RangeProtocol, Term
++
++__all__ = [
++    "DependencyCause",
++    "dependency_terms",
++    "external_clauses",
++    "select_dependency_causes",
++]
++
++PackageType = TypeVar("PackageType", bound=Hashable)
++VersionType = TypeVar("VersionType", bound=Hashable)
++
++
++class DependencyCause(Generic[PackageType, VersionType]):
++    """An original request and the parent versions responsible for it."""
++
++    parent: PackageType | None
++    package: PackageType
++    parent_range: RangeProtocol[VersionType] | None
++    constraint: RangeProtocol[VersionType]
++
++    __slots__ = ("constraint", "package", "parent", "parent_range")
++
++    def __init__(
++        self,
++        parent: PackageType | None,
++        package: PackageType,
++        parent_range: RangeProtocol[VersionType] | None,
++        constraint: RangeProtocol[VersionType],
++    ) -> None:
++        """Retain one original request without changing its ranges."""
++        self.parent = parent
++        self.package = package
++        self.parent_range = parent_range
++        self.constraint = constraint
++
++
++_DEPENDENCY_TERMS = 2
++
++
++def external_clauses(
++    derivation: Incompatibility[PackageType, VersionType] | None,
++    *,
++    left_first: bool = True,
++) -> list[Incompatibility[PackageType, VersionType]]:
++    """Return original facts once in the caller's chosen proof order."""
++    if derivation is None:
++        return []
++
++    return [
++        clause
++        for clause in derivation.walk(left_first=left_first)
++        if clause.cause is not IncompatibilityCause.DERIVED
++    ]
++
++
++def dependency_terms(
++    clause: Incompatibility[PackageType, VersionType],
++    terms: Sequence[Term[PackageType, VersionType]] | None = None,
++) -> tuple[Term[PackageType, VersionType], Term[PackageType, VersionType]] | None:
++    """Recover dependency sides, including merged self-dependency terms."""
++    if clause.cause is not IncompatibilityCause.DEPENDENCY:
++        return None
++
++    terms = clause.terms if terms is None else terms
++    if len(terms) == _DEPENDENCY_TERMS:
++        return terms[0], terms[1]
++
++    if len(terms) != 1 or clause.dependency_range is None:
++        return None
++
++    parent = terms[0]
++    return parent, Term(parent.package, clause.dependency_range, positive=False)
++
++
++def _requested_cause(
++    clause: Incompatibility[PackageType, VersionType],
++) -> DependencyCause[PackageType, VersionType] | None:
++    """Read a root or dependency clause without treating guards as requests."""
++    positive = [term for term in clause.terms if term.is_positive()]
++    negative = [term for term in clause.terms if not term.is_positive()]
++
++    # A merged self-dependency keeps its requested range on the clause.
++    if len(positive) == 1 and clause.dependency_range is not None:
++        parent = positive[0]
++        return DependencyCause(
++            parent.package, parent.package, parent.constraint, clause.dependency_range
++        )
++
++    if len(positive) != 1 or len(negative) != 1:
++        return None
++
++    parent, requested = positive[0], negative[0]
++    return DependencyCause(
++        None if parent.package is ROOT else parent.package,
++        requested.package,
++        None if parent.package is ROOT else parent.constraint,
++        requested.constraint,
++    )
++
++
++def _unavailable_ranges(
++    clauses: Sequence[Incompatibility[PackageType, VersionType]],
++) -> tuple[set[PackageType], dict[PackageType, RangeProtocol[VersionType]]]:
++    """Collect blamed packages and proven absence domains."""
++    unavailable: dict[PackageType, RangeProtocol[VersionType]] = {}
++    blamed: set[PackageType] = set()
++    for clause in clauses:
++        # Contextual absence names its unavailable package before its guards.
++        if clause.cause is IncompatibilityCause.CONTEXTUAL_NO_VERSIONS:
++            package = clause.terms[0].package
++        else:
++            positive = [term for term in clause.terms if term.is_positive()]
++            if len(positive) != 1:
++                continue
++            package = positive[0].package
++
++        if clause.cause is IncompatibilityCause.CONSTRAINT:
++            blamed.add(package)
++        elif clause.cause in {
++            IncompatibilityCause.NO_VERSIONS,
++            IncompatibilityCause.CONTEXTUAL_NO_VERSIONS,
++        }:
++            bounds = clause.terms[0].constraint
++            previous = unavailable.get(package)
++            unavailable[package] = bounds if previous is None else previous | bounds
++
++    return blamed, unavailable
++
++
++def select_dependency_causes(
++    clauses: Sequence[Incompatibility[PackageType, VersionType]],
++) -> list[DependencyCause[PackageType, VersionType]]:
++    """Attribute absence and contradictory requests to original dependency edges."""
++    blamed, unavailable = _unavailable_ranges(clauses)
++    requested: list[DependencyCause[PackageType, VersionType]] = []
++    impossible: set[
++        tuple[PackageType | None, PackageType, RangeProtocol[VersionType] | None]
++    ] = set()
++
++    for clause in clauses:
++        if clause.cause not in {
++            IncompatibilityCause.ROOT,
++            IncompatibilityCause.DEPENDENCY,
++        }:
++            continue
++        cause = _requested_cause(clause)
++        if cause is None:
++            continue
++        requested.append(cause)
++        if clause.cause is IncompatibilityCause.DEPENDENCY and any(
++            not term.is_positive() and term.constraint.is_empty for term in clause.terms
++        ):
++            impossible.add((cause.parent, cause.package, cause.parent_range))
++
++        absent = unavailable.get(cause.package)
++        if absent is not None and cause.constraint.is_subset(absent):
++            blamed.add(cause.package)
++
++    # An impossible dependency already explains why its parent cannot be selected.
++    upstream = {parent for parent, package, _ in impossible if parent != package}
++    selected = [
++        cause
++        for cause in requested
++        if (cause.parent, cause.package, cause.parent_range) in impossible
++        or (cause.package in blamed and cause.package not in upstream)
++    ]
++    if selected or not requested:
++        return selected
++
++    counts = Counter(cause.package for cause in requested)
++    most_requested = max(counts.values())
++    return [cause for cause in requested if counts[cause.package] == most_requested]
+diff --git a/src/pip/_vendor/nab_resolver/report.py b/src/pip/_vendor/nab_resolver/report.py
+--- a/src/pip/_vendor/nab_resolver/report.py
++++ b/src/pip/_vendor/nab_resolver/report.py
+@@ -13,6 +13,7 @@
+ 
+ from typing import TYPE_CHECKING, Any, TypeAlias
+ 
++from .proofs import dependency_terms
+ from .root import ROOT
+ from .types import IncompatibilityCause, PackageType, Term, VersionType
+ 
+@@ -129,7 +130,10 @@
+     The comparison runs on exactly what the reader sees, so a requirement is
+     read as printed, un-narrowed, the way the line states it.
+     """
+-    if incompatibility.cause is IncompatibilityCause.NO_VERSIONS:
++    if incompatibility.cause in {
++        IncompatibilityCause.NO_VERSIONS,
++        IncompatibilityCause.CONTEXTUAL_NO_VERSIONS,
++    }:
+         return {term.package: term for term in incompatibility.terms}
+     return {
+         term.package: _narrow_positive(term, narrow) for term in incompatibility.terms
+@@ -241,31 +245,6 @@
+     return found
+ 
+ 
+-def _dependency_pair(
+-    incompatibility: Incompatibility[Any, Any], terms: Sequence[Term[Any, Any]]
+-) -> tuple[Term[Any, Any], Term[Any, Any]] | None:
+-    """Return the parent and dependency terms of a DEPENDENCY clause, else None.
+-
+-    ``terms`` are the clause's terms as the line renders them, which is not
+-    ``incompatibility.terms`` once narrowing has been applied.  A package
+-    depending on itself merges the two terms into one, so the dependency side
+-    is rebuilt from the range the clause carries.
+-    """
+-    if incompatibility.cause is not IncompatibilityCause.DEPENDENCY:
+-        return None
+-
+-    if len(terms) == _ATTRIBUTION_CLAUSE_TERMS:
+-        parent, dependency = terms
+-        return parent, dependency
+-
+-    dependency_range = incompatibility.dependency_range
+-    if len(terms) != 1 or dependency_range is None:
+-        return None
+-
+-    (parent,) = terms
+-    return parent, Term(parent.package, dependency_range, positive=False)
+-
+-
+ def _render_line(
+     incompatibility: Incompatibility[Any, Any],
+     narrow: _NarrowFn | None,
+@@ -276,10 +255,16 @@
+     terms = incompatibility.terms
+     # An availability line renders its own range: narrowing it onto the listing
+     # is what let it stop covering the requirement it closes against.
+-    if narrow is not None and cause is not IncompatibilityCause.NO_VERSIONS:
++    if narrow is not None and cause not in {
++        IncompatibilityCause.NO_VERSIONS,
++        IncompatibilityCause.CONTEXTUAL_NO_VERSIONS,
++    }:
+         terms = [_narrow_positive(term, narrow) for term in terms]
+ 
+-    attributed = _dependency_pair(incompatibility, terms)
++    if cause is IncompatibilityCause.CONTEXTUAL_NO_VERSIONS:
++        return _render_contextual_no_versions(incompatibility, format_range)
++
++    attributed = dependency_terms(incompatibility, terms)
+     if attributed is not None:
+         parent, dep = attributed
+         plural = _is_full(parent)
+@@ -308,6 +293,21 @@
+         return f"because the user constrained {subject}"
+ 
+     return _render_prefix_line(cause, terms, format_range)
++
++
++def _render_contextual_no_versions(
++    incompatibility: Incompatibility[PackageType, VersionType], format_range: _FormatFn
++) -> str:
++    """Render an absence with its supporting decisions."""
++    unavailable, *guards = incompatibility.terms
++    context = " and ".join(format_term(term, format_range) for term in guards)
++    if incompatibility.constraint_range is not None:
++        requirement = _with_range(
++            str(unavailable.package), format_range(incompatibility.constraint_range)
++        )
++        return f"because the user constrained {requirement} with {context} selected"
++    requirement = _format_requirement(unavailable, format_range)
++    return f"because no versions of {requirement} are available with {context} selected"
+ 
+ 
+ def _render_prefix_line(
+diff --git a/src/pip/_vendor/nab_resolver/resolver.py b/src/pip/_vendor/nab_resolver/resolver.py
+--- a/src/pip/_vendor/nab_resolver/resolver.py
++++ b/src/pip/_vendor/nab_resolver/resolver.py
+@@ -38,12 +38,14 @@
+ from . import conflict, decide, incompat_index, propagate
+ from ._compat import override
+ from .decision_queue import DecisionQueue
++from .deferred import DeferredChoices
+ from .errors import ResolutionError, ResolutionLimitError
+ from .partial_solution import PartialSolution
+ from .ranges import Range
+ from .result import build_solution_data
+ from .root import ROOT
+ from .types import (
++    DecisionRetreat,
+     Incompatibility,
+     IncompatibilityCause,
+     IncompatibilityState,
+@@ -267,8 +269,9 @@
+     ) -> None:
+         """Accept a snapshot of positive ranges and decisions.
+ 
+-        Called before ``choose_version`` so providers can forward-check the
+-        candidate's dependencies against accumulated constraints.
++        Delivered after propagation when undecided packages remain, before
++        availability refresh and package ordering. The following version query
++        uses the same snapshot unless the provider is replaced.
+         ``decisions`` is the subset with concrete versions (not derivations);
+         decision-based reasoning is safer because decisions cannot be undone
+         in isolation.  Default is a no-op.
+@@ -287,16 +290,15 @@
+         """
+         ...
+ 
+-    def consume_force_backtrack_targets(self) -> list[PackageType]:
+-        """Return packages the provider wants force-backtracked.
+-
+-        Drained after every ``choose_version`` call. When non-empty,
+-        the resolver bumps each package's culprit count past the
+-        demote threshold, queues it, and fires
+-        ``apply_targeted_backtrack`` without waiting for the normal
+-        conflict-count threshold.
+-
+-        Providers without a force-backtrack signal return an empty list.
++    def consume_force_backtrack_targets(
++        self,
++    ) -> Sequence[PackageType | DecisionRetreat[PackageType]]:
++        """Return culprit packages or selected decisions to reconsider.
++
++        Drained after every ``choose_version`` call. Plain package keys use
++        culprit promotion and ``apply_targeted_backtrack``. A
++        ``DecisionRetreat(package)`` retains bounds derived before its decision.
++        Providers without a signal return an empty sequence.
+         """
+         ...
+ 
+@@ -340,7 +342,7 @@
+ 
+ 
+ class BaseProvider(Generic[PackageType, VersionType]):
+-    """Defaults for the six provider methods a synchronous provider does not need.
++    """Defaults for optional provider behavior.
+ 
+     Supplies ``begin_decision_scan``, ``is_ready``,
+     ``receive_partial_solution_hint``, ``consume_pending_clauses``,
+@@ -383,7 +385,9 @@
+         """Return no clauses: ``choose_version`` queues none."""
+         return []
+ 
+-    def consume_force_backtrack_targets(self) -> list[PackageType]:
++    def consume_force_backtrack_targets(
++        self,
++    ) -> Sequence[PackageType | DecisionRetreat[PackageType]]:
+         """Return no targets: there is no force-backtrack signal to give."""
+         return []
+ 
+@@ -656,6 +660,8 @@
+         range_type: type[RangeProtocol[Any]] = Range,
+         root_version: Any = 1,
+         format_range: Callable[[Any], str] = str,
++        *,
++        availability_generation: Callable[[], int] | None = None,
+     ) -> None:
+         """Create a resolver with the given provider and optional observer.
+ 
+@@ -666,6 +672,18 @@
+         :class:`packaging.ranges.VersionRange` requires a parseable
+         version string or :class:`~packaging.version.Version` here.
+ 
++        ``availability_generation`` defers failed queries when candidate
++        availability depends on current decisions.
++        Its monotonically increasing result invalidates deferred queries when
++        provider operations reveal candidates; reading it must not change
++        availability. Missing packages are retried
++        after other decisions, and an exhausted sweep records absence guarded
++        by all current decisions. The provider must ensure such an absence
++        remains true whenever those decisions and requirements hold, regardless
++        of later cache population. Availability must not change asynchronously
++        between the final generation check and clause recording. Omitting this
++        callback keeps the static candidate-universe contract.
++
+         ``format_range`` renders a constraint in a failure report.  It travels
+         with ``range_type``: the default ``str`` reads well for
+         :class:`~nab_resolver.ranges.Range`, while a range type whose ``str``
+@@ -673,6 +691,11 @@
+         """
+         self.provider = provider
+         self.preferred_trial_consumed = False
++        self.deferred = (
++            None
++            if availability_generation is None
++            else DeferredChoices[PackageType](availability_generation)
++        )
+ 
+         # Recording the provider rather than a flag keeps the answer tied to
+         # the object it was asked about, so a provider swapped into
+@@ -815,7 +838,8 @@
+         ``~range_type.empty()``, which may be strictly narrower; see
+         :class:`~nab_resolver.types.RangeProtocol`.
+ 
+-        Raises ``ResolutionError`` if no solution exists.
++        Raises ``ResolutionError`` if resolution fails.
++        A limit does not prove unsatisfiability.
+         """
+         if self.preferred_trial_consumed:
+             message = (
+@@ -851,13 +875,32 @@
+                 continue
+ 
+             # Phase 3: Decision making.
+-            next_package = decide.choose_package_to_decide(self)
++            hinted_provider = (
++                decide.refresh_provider_hint(self)
++                if self.solution.undecided_packages()
++                else None
++            )
++
++            deferred = self.deferred
++            if deferred is not None:
++                deferred.refresh(self.stats.derivations, self.stats.decisions)
++            next_package = decide.choose_package_to_decide(
++                self, None if deferred is None else deferred.packages.keys()
++            )
+             if next_package is None:
+-                # All packages decided; the spec requires filtering out
+-                # any unreachable extras before returning.
++                if deferred is not None and deferred.packages:
++                    deferred.refresh(self.stats.derivations, self.stats.decisions)
++                    if not deferred.packages:
++                        continue
++                    changed_package = next(iter(deferred.packages))
++                    decide.record_contextual_no_versions(self, changed_package)
++                    deferred.clear()
++                    continue
+                 return self._build_result()
+ 
+-            changed_package = self._decide_next(next_package)
++            changed_package = self._decide_next(
++                next_package, hinted_provider=hinted_provider
++            )
+ 
+         exceeded_message = f"Resolution exceeded {self.max_iterations} iterations"
+         raise ResolutionLimitError(exceeded_message)
+@@ -1014,7 +1057,7 @@
+                 ],
+                 cause=IncompatibilityCause.DEPENDENCY,
+             )
+-            incompat_index.add_incompatibility(self, clause)
++            # The derived range enforces this edge without a search clause.
+             narrowed = self.solution.derive(
+                 dependency, dependency_range, positive=True, cause=clause
+             )
+@@ -1060,6 +1103,8 @@
+         restarts_remaining: int,
+     ) -> tuple[Any, int, int]:
+         """Run conflict resolution, targeted backtrack, and restart phases."""
++        if self.deferred is not None:
++            self.deferred.clear()
+         self.stats.conflicts += 1
+         self.observer.on_conflict(conflicting_incompatibility)
+         learned = conflict.conflict_resolution(self, conflicting_incompatibility)
+@@ -1077,9 +1122,51 @@
+             changed_package = ROOT
+         return changed_package, restart_threshold, restarts_remaining
+ 
+-    def _decide_next(self, next_package: Any) -> Any:
++    def _retreat_decisions(
++        self, requests: Sequence[DecisionRetreat[PackageType]]
++    ) -> PackageType | None:
++        """Retreat before a requested decision while retaining its prior bounds."""
++        level = self.solution.decision_level
++        triggering = None
++        for request in requests:
++            for assignment in self.solution.assignments_for(request.package):
++                if assignment.is_decision and assignment.package is not ROOT:
++                    before = assignment.decision_level - 1
++                    if before < level:
++                        level, triggering = before, request.package
++                    break
++        if triggering is not None:
++            self.solution.backtrack(level)
++            self.stats.targeted_backtracks += 1
++        return triggering
++
++    def _apply_force_requests(self, targets: list[Any]) -> Any | None:
++        """Apply requested retreats and clear deferred queries after a backtrack."""
++        self.priority_epoch += 1
++        culprits = [
++            target for target in targets if not isinstance(target, DecisionRetreat)
++        ]
++        decisions = [
++            target for target in targets if isinstance(target, DecisionRetreat)
++        ]
++        triggering = conflict.force_targeted_backtrack(self, culprits)
++        decision = self._retreat_decisions(decisions)
++        if decision is not None:
++            triggering = decision
++        if triggering is not None and self.deferred is not None:
++            self.deferred.clear()
++        return triggering
++
++    def _decide_next(
++        self,
++        next_package: Any,
++        *,
++        hinted_provider: ResolverProvider[Any, Any] | None = None,
++    ) -> Any:
+         """Run the decision phase for ``next_package``. Return next changed package."""
+-        chosen_version = decide.choose_version(self, next_package)
++        chosen_version = decide.choose_version(
++            self, next_package, hinted_provider=hinted_provider
++        )
+         had_pending = decide.absorb_pending_clauses(self)
+ 
+         # Provider-driven force back-track. When the provider returns
+@@ -1087,8 +1174,7 @@
+         # blockers before the candidate is decided.
+         force_targets = list(self.provider.consume_force_backtrack_targets())
+         if force_targets:
+-            self.priority_epoch += 1
+-            triggering = conflict.force_targeted_backtrack(self, force_targets)
++            triggering = self._apply_force_requests(force_targets)
+             if triggering is not None:
+                 return triggering
+ 
+@@ -1185,6 +1271,8 @@
+         constraints: Mapping[PackageType, RangeProtocol[VersionType]] | None,
+     ) -> None:
+         """Reset solver state for a new resolution."""
++        if self.deferred is not None:
++            self.deferred.clear()
+         self.incompatibilities.clear()
+         self.package_to_incompatibilities.clear()
+         self.clause_contradicted_at.clear()
+diff --git a/src/pip/_vendor/nab_resolver/result.py b/src/pip/_vendor/nab_resolver/result.py
+--- a/src/pip/_vendor/nab_resolver/result.py
++++ b/src/pip/_vendor/nab_resolver/result.py
+@@ -17,16 +17,61 @@
+ )
+ 
+ from collections import deque
+-from typing import TYPE_CHECKING, Any
++from typing import TYPE_CHECKING, Any, TypeVar
+ 
+ from .types import IncompatibilityCause, PackageType, VersionType
+ 
+ if TYPE_CHECKING:
+-    from collections.abc import Callable, Iterable, Mapping
++    from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
+ 
+     from .types import Incompatibility, RangeProtocol
+ 
+-__all__ = ["build_solution_data"]
++__all__ = ["IncompleteSelectionError", "build_solution_data", "walk_selected"]
++
++SelectedCandidateType = TypeVar("SelectedCandidateType")
++
++
++class IncompleteSelectionError(Exception):
++    """A reachable package lacks a selected candidate or readable dependencies."""
++
++    def __init__(self, package: object) -> None:
++        """Retain the first incomplete package in traversal order."""
++        self.package = package
++        super().__init__(f"Incomplete selected metadata for {package!r}")
++
++
++def walk_selected(
++    roots: Iterable[PackageType],
++    selected: Mapping[PackageType, SelectedCandidateType],
++    dependency_names: Callable[
++        [PackageType, SelectedCandidateType], Collection[PackageType] | None
++    ],
++    *,
++    depth_first: bool = False,
++) -> Iterator[tuple[PackageType, SelectedCandidateType, Collection[PackageType]]]:
++    """Visit the selected reachable graph once using the caller's metadata policy.
++
++    None from ``dependency_names`` means unread metadata; callback exceptions propagate.
++    """
++    seen: set[PackageType] = set()
++    pending: deque[PackageType] = deque(roots)
++    while pending:
++        package = pending.pop() if depth_first else pending.popleft()
++        if package in seen:
++            continue
++
++        candidate = selected.get(package)
++        if candidate is None:
++            raise IncompleteSelectionError(package)
++
++        dependencies = dependency_names(package, candidate)
++        if dependencies is None:
++            raise IncompleteSelectionError(package)
++
++        # Revisit suppression applies only after the caller has supplied metadata.
++        seen.add(package)
++        yield package, candidate, dependencies
++        pending.extend(child for child in dependencies if child not in seen)
+ 
+ 
+ def build_solution_data(
+@@ -66,22 +111,15 @@
+     # recording each dependency crossed on the way.
+     edges: list[tuple[PackageType, PackageType]] = []
+     reachable: set[PackageType] = set()
+-    queue: deque[PackageType] = deque(root_required)
+-    while queue:
+-        package = queue.popleft()
+-        if package in reachable:
+-            continue
+-        reachable.add(package)
+-
+-        version = all_decisions.get(package)
+-        if version is None:  # pragma: no cover
+-            unreachable = f"Bug: reachable package {package!r} has no decision"
+-            raise RuntimeError(unreachable)
+-
+-        for dep_package in get_dependencies(package, version):
+-            edges.append((package, dep_package))
+-            if dep_package not in reachable:
+-                queue.append(dep_package)
++    try:
++        for package, _, dependencies in walk_selected(
++            root_required, all_decisions, get_dependencies
++        ):
++            reachable.add(package)
++            edges.extend((package, child) for child in dependencies)
++    except IncompleteSelectionError as error:
++        unreachable = f"Bug: reachable package {error.package!r} has no decision"
++        raise RuntimeError(unreachable) from error
+ 
+     return (
+         {
+diff --git a/src/pip/_vendor/nab_resolver/types.py b/src/pip/_vendor/nab_resolver/types.py
+--- a/src/pip/_vendor/nab_resolver/types.py
++++ b/src/pip/_vendor/nab_resolver/types.py
+@@ -23,6 +23,7 @@
+     from typing_extensions import Self
+ 
+ __all__ = [
++    "DecisionRetreat",
+     "Incompatibility",
+     "IncompatibilityCause",
+     "IncompatibilityState",
+@@ -45,6 +46,16 @@
+ VersionType_contra = TypeVar("VersionType_contra", bound=Hashable, contravariant=True)
+ 
+ 
++class DecisionRetreat(Generic[PackageType]):
++    """Reconsider a selected value while retaining its earlier derived bounds."""
++
++    __slots__ = ("package",)
++
++    def __init__(self, package: PackageType) -> None:
++        """Retain the package decision to reconsider."""
++        self.package = package
++
++
+ class RangeProtocol(Protocol[VersionType_contra]):
+     """Contract for version range types used by the resolver.
+ 
+@@ -379,6 +390,9 @@
+     """Derived from two other incompatibilities via resolution.
+     See: https://github.com/dart-lang/pub/blob/master/doc/solver.md#conflict-resolution
+     """
++
++    CONTEXTUAL_NO_VERSIONS = enum.auto()
++    """No version is available under the other positive terms in this clause."""
+ 
+ 
+ class Incompatibility(Generic[PackageType, VersionType]):
+@@ -437,8 +451,10 @@
+         self.origin = origin
+         self.dependency_range = dependency_range
+ 
+-    def walk(self) -> Iterator[Incompatibility[PackageType, VersionType]]:
+-        """Visit each derivation node once, with left causes before right causes."""
++    def walk(
++        self, *, left_first: bool = True
++    ) -> Iterator[Incompatibility[PackageType, VersionType]]:
++        """Visit each derivation node once in the chosen cause order."""
+         pending: list[Incompatibility[PackageType, VersionType]] = [self]
+         seen: set[int] = set()
+         while pending:
+@@ -448,10 +464,15 @@
+             seen.add(id(node))
+             yield node
+ 
+-            if node.cause_right is not None:
+-                pending.append(node.cause_right)
+-            if node.cause_left is not None:
+-                pending.append(node.cause_left)
++            first, second = (
++                (node.cause_left, node.cause_right)
++                if left_first
++                else (node.cause_right, node.cause_left)
++            )
++            if second is not None:
++                pending.append(second)
++            if first is not None:
++                pending.append(first)
+ 
+     @override
+     def __repr__(self) -> str:
+diff --git a/src/pip/_vendor/nab_resolver/values.py b/src/pip/_vendor/nab_resolver/values.py
+new file mode 100644
+--- /dev/null
++++ b/src/pip/_vendor/nab_resolver/values.py
+@@ -0,0 +1,45 @@
++"""Immutable slotted values with explicit field and identity declarations."""
++
++from __future__ import annotations
++
++from typing import ClassVar
++
++from ._compat import override
++
++__all__ = ["SlottedValue"]
++
++
++class SlottedValue:
++    """Equality, hashing and repr over a subclass's declared immutable identity.
++
++    ``__match_args__`` declares field order. Override :meth:`identity` to refine
++    field equality. This class installs no runtime write guard.
++    """
++
++    __slots__ = ()
++    __match_args__: ClassVar[tuple[str, ...]]
++
++    def identity(self) -> tuple[object, ...]:
++        """Return the immutable values used for equality and hashing."""
++        return tuple(getattr(self, name) for name in self.__match_args__)
++
++    @override
++    def __eq__(self, other: object) -> bool:
++        """Compare identities within the exact value class."""
++        if not isinstance(other, SlottedValue) or type(other) is not type(self):
++            return NotImplemented
++
++        return self.identity() == other.identity()
++
++    @override
++    def __hash__(self) -> int:
++        """Hash the identity used by equality."""
++        return hash(self.identity())
++
++    @override
++    def __repr__(self) -> str:
++        """Render the declared fields in their construction order."""
++        fields = ", ".join(
++            f"{name}={getattr(self, name)!r}" for name in self.__match_args__
++        )
++        return f"{type(self).__qualname__}({fields})"
