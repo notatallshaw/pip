@@ -123,6 +123,7 @@ class InstallRequirement:
         if self.link and self.link.is_file:
             self.local_file_path = self.link.file_path
 
+        self.extras: Collection[str]
         if extras:
             self.extras = extras
         elif req:
