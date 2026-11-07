@@ -178,6 +178,8 @@ substitute = [
 ]
 drop = [
   '^nab_resolver/(?:diagnostics|testing|version_spans)\.py$',
+  # Keep the provider's supported preference subset without universal machinery.
+  '^nab_provider/(?!(?:__init__|_compat|preference|preference_provider|prepared_resolution|value|version_candidates)\.py$|py\.typed$|LICENSE(?:\.[^/]+)?$).*',
   # Don't include dist-info directories in the vendored code
   "*.dist-info/",
   # contains unnecessary scripts
