@@ -99,6 +99,11 @@ Modifications
   rather than ``appdirs``.
 * ``packaging`` has been modified to import its dependencies from
   ``pip._vendor``.
+* ``nab-resolver`` carries a source snapshot for preferred resolution and
+  deferred queries. Its patch is based on release 0.0.26;
+  see ``nab_resolver/PROVENANCE.md``.
+  This prototype snapshot contains unreleased APIs and does not satisfy the
+  release-only policy above.
 * ``CacheControl`` has been modified to import its dependencies from
   ``pip._vendor``.
 * ``requests`` has been modified to import its other dependencies from
