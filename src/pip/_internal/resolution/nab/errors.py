@@ -7,7 +7,8 @@ from typing import TYPE_CHECKING
 
 from pip._vendor.nab_resolver.errors import ResolutionError, ResolutionTerminatedError
 from pip._vendor.nab_resolver.proofs import select_dependency_causes
-from pip._vendor.packaging.ranges import VersionRange
+from pip._vendor.nab_resolver.ranges import Range
+from pip._vendor.packaging.version import Version
 
 from pip._internal.exceptions import InstallationError
 from pip._internal.resolution.nab.base import RequirementCause
@@ -16,8 +17,8 @@ from pip._internal.resolution.nab.requirements import UnsatisfiableRequirement
 if TYPE_CHECKING:
     from pip._vendor.nab_provider.preference_provider import PreferenceProvider
     from pip._vendor.nab_resolver.types import RangeProtocol
+    from pip._vendor.packaging.ranges import VersionRange
     from pip._vendor.packaging.requirements import Requirement as PinDeclaration
-    from pip._vendor.packaging.version import Version
 
     from pip._internal.resolution.nab.catalogue import Candidate, PipCatalogue
 
@@ -76,7 +77,7 @@ def catalogue_installation_error(
         proxy.project_requirements(
             error.incompatibility,
             version_of=lambda candidate: candidate.version,
-            range_type=VersionRange,
+            range_type=Range[Version],
             left_first=False,
         )
     )
