@@ -7,14 +7,13 @@ from __future__ import annotations
 import logging
 import os
 import pathlib
-import shutil
 from unittest.mock import Mock, patch
 
 import pytest
 
 from pip._internal.models.link import Link
 from pip._internal.operations.prepare import unpack_vcs_link
-from pip._internal.utils.misc import HiddenText
+from pip._internal.utils.misc import HiddenText, rmtree
 from pip._internal.utils.temp_dir import (
     TempDirectoryKind,
     global_tempdir_manager,
@@ -550,8 +549,8 @@ def test_reused_git_objects_keep_worktrees_and_revisions_independent(
     assert (second / file.name).read_text() == "new"
     assert get_head_sha(script, str(first)) == older
     assert get_head_sha(script, str(second)) == current
-    shutil.rmtree(first)
-    shutil.rmtree(source)
+    rmtree(str(first))
+    rmtree(str(source))
     (second / file.name).write_text("modified again")
     script.run("git", "checkout", "--", file.name, cwd=second)
     assert (second / file.name).read_text() == "new"
@@ -579,8 +578,8 @@ def test_git_object_pool_follows_source_cleanup_policy(
         borrowed = second / ".git" / "objects" / "info" / "alternates"
         objects = pathlib.Path(borrowed.read_text().strip())
         assert objects.is_dir()
-        shutil.rmtree(first)
-        shutil.rmtree(source)
+        rmtree(str(first))
+        rmtree(str(source))
         (second / "package.txt").write_text("changed")
         script.run("git", "checkout", "--", "package.txt", cwd=second)
         assert (second / "package.txt").read_text() == "original"
