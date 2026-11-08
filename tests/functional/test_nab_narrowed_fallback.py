@@ -154,7 +154,7 @@ def test_fixed_url_conflict_reports_both_requirements(
     assert "ResolutionImpossible" in result.stderr
     assert "app 1 depends on dep" in result.stdout
     assert str(direct) in result.stdout
-    assert str(other) in result.stdout
+    assert other.as_uri() in result.stdout
     assert "Nab source-domain restart" not in result.stdout
 
 
