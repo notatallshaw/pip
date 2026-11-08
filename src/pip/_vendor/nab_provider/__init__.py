@@ -1,1 +1,1 @@
-"""Native host callbacks and candidate iteration from nab-provider."""
+"""Prepared candidate resolution from nab-provider."""

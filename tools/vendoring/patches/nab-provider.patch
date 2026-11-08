@@ -3,11 +3,11 @@ new file mode 100644
 --- /dev/null
 +++ b/src/pip/_vendor/nab_provider/PROVENANCE.md
 @@ -0,0 +1,7 @@
-+# Native callback source snapshot
++# Prepared resolution source snapshot
 +
-+The base distribution is nab-provider 0.0.26. The patch selects `_compat.py`, `callbacks.py`, `candidate_stream.py` and `py.typed` from `nab-provider/src/nab_provider` at signed Nab commit `9810c84c2d9485bbdb220972764894978031b54b` (tree `853724456ed5afe7d6ad1fe257ce2b0627925b19`), based on main `53112670b7ec73f98bd986bd290406b954792627`. The resolver uses the same source commit.
++The base distribution is nab-provider 0.0.26. The patch selects `_compat.py`, `preference.py`, `preference_provider.py`, `prepared_resolution.py`, `value.py`, `version_candidates.py` and `py.typed` from `nab-provider/src/nab_provider` at signed Nab commit `f5550702cb034e8908ce45d463d1ab6006bb2d34` (tree `408328524c3e75b0120d8df8d7ddbe5b60992a24`), based on main `3a92b9ad22a15d12f563608864d004145984b312`. The resolver uses the same source commit.
 +
-+Pip retains native matching, acquisition, input policy and installation. The provider subset supplies native candidate queries, dependency scopes and original failure causes. A minimal initializer omits the index-backed and version-catalogue providers, universal resolution and the private packaging copy. The original license files are retained.
++Pip retains native acquisition, declarations, source policy and installation. The provider subset owns candidate identities, prepared dependency encoding, live-release trials, withdrawal admission and scoped preference proofs. It uses a minimal initializer and Pip's packaging namespace. The index-backed provider, universal resolution and private packaging copy are excluded. The original license files are retained.
 +
 +The prototype APIs are not released in 0.0.26. The matching resolver is recorded in `nab_resolver/PROVENANCE.md`.
 diff --git a/src/pip/_vendor/nab_provider/__init__.py b/src/pip/_vendor/nab_provider/__init__.py
@@ -22,632 +22,2394 @@ diff --git a/src/pip/_vendor/nab_provider/__init__.py b/src/pip/_vendor/nab_prov
 -    nab_provider.priority  compute_tier
 -    nab_provider.environment  classify_dependency
 -"""
-+"""Native host callbacks and candidate iteration from nab-provider."""
-diff --git a/src/pip/_vendor/nab_provider/callbacks.py b/src/pip/_vendor/nab_provider/callbacks.py
++"""Prepared candidate resolution from nab-provider."""
+diff --git a/src/pip/_vendor/nab_provider/preference.py b/src/pip/_vendor/nab_provider/preference.py
 new file mode 100644
 --- /dev/null
-+++ b/src/pip/_vendor/nab_provider/callbacks.py
-@@ -0,0 +1,561 @@
-+"""Resolve opaque requirements using a host's native candidate callbacks."""
++++ b/src/pip/_vendor/nab_provider/preference.py
+@@ -0,0 +1,861 @@
++"""Coordinate grounded withdrawn-candidate preference over a host catalogue."""
 +
 +from __future__ import annotations
 +
-+from collections import defaultdict, deque
-+from collections.abc import Hashable, Iterable, Iterator, Mapping, Sequence
-+from typing import Generic, Protocol, TypeVar
++from abc import ABC, abstractmethod
++from collections import deque
++from collections.abc import Hashable
++from dataclasses import dataclass
++from enum import Enum, auto
++from typing import TYPE_CHECKING, Final, Generic, Protocol, TypeVar
 +
-+from nab_resolver.predicate_ranges import PredicateAlgebra, PredicateRange
-+from nab_resolver.priority import compute_tier
-+from nab_resolver.proofs import external_clauses, select_dependency_causes
-+from nab_resolver.resolver import BaseProvider
-+from nab_resolver.types import (
-+    DecisionRetreat,
-+    Incompatibility,
-+    IncompatibilityCause,
-+    RangeProtocol,
-+    RootRequirement,
-+    Term,
++from nab_resolver.errors import (
++    ResolutionError,
++    ResolutionInvariantError,
++    ResolutionLimitError,
++    ResolutionTerminatedError,
 +)
++from nab_resolver.ranges import Range
++from nab_resolver.resolver import BaseProvider, Resolver, ResolverStats
 +
-+from ._compat import override
++if TYPE_CHECKING:
++    from collections.abc import Callable, Mapping, Sequence
++    from collections.abc import Set as AbstractSet
 +
-+__all__ = ["CallbackHost", "CallbackProvider", "CandidateQuery", "RequirementCause"]
++    from typing_extensions import override as _override
 +
-+PackageType = TypeVar("PackageType", bound=Hashable)
-+RequirementType = TypeVar("RequirementType", bound=Hashable)
++    from nab_resolver.types import RangeProtocol
++else:
++    MethodType = TypeVar("MethodType")
++
++    def _override(method: MethodType) -> MethodType:
++        """Keep override annotations free of runtime dependencies on Python 3.10."""
++        return method
++
++
++__all__ = [
++    "CataloguePreference",
++    "DependencyData",
++    "IncompletePreferenceError",
++    "PreferenceCatalogue",
++    "PreferenceScope",
++    "PreferenceSearch",
++    "PreparationStatus",
++    "UnavailableMetadataError",
++]
++
++
 +CandidateType = TypeVar("CandidateType", bound=Hashable)
-+PriorityType = TypeVar("PriorityType")
-+CovariantPriorityType_co = TypeVar("CovariantPriorityType_co", covariant=True)
++RangeType = TypeVar("RangeType")
++PinnedRequirementType = TypeVar("PinnedRequirementType")
++CovariantRangeType = TypeVar(  # noqa: PLC0105 - spell out covariance.
++    "CovariantRangeType", covariant=True
++)
++CovariantPinnedRequirementType = TypeVar(  # noqa: PLC0105 - spell out covariance.
++    "CovariantPinnedRequirementType", covariant=True
++)
++StatisticsPackageType = TypeVar("StatisticsPackageType", bound=Hashable)
 +
 +
-+class CandidateQuery(Generic[CandidateType]):
-+    """A single candidate stream and its declaration-dependent exhaustion policy."""
++class DependencyData(Protocol[CovariantRangeType, CovariantPinnedRequirementType]):
++    """Prepared dependency ranges and original admission declarations."""
 +
-+    __slots__ = ("candidates", "may_expand")
++    @property
++    def dependencies(self) -> Mapping[str, CovariantRangeType]:
++        """Dependency ranges belonging to this exact candidate."""
++        ...
++
++    @property
++    def pins(self) -> Sequence[CovariantPinnedRequirementType]:
++        """Original exact-pin declarations from this candidate."""
++        ...
++
++
++class PreferenceCatalogue(Protocol[CandidateType, RangeType, PinnedRequirementType]):
++    """Use stable candidate lists and append-only, immutable dependency facts.
++
++    Each candidate's identity and existing dependency facts stay fixed.
++    Incomplete-proof caches use the fact count as their revision.
++    Record a listing failure before returning its query.
++    """
++
++    def candidate_package(self, candidate: CandidateType) -> str:
++        """Return the identifier decided by the resolver."""
++        ...
++
++    def candidate_base(self, candidate: CandidateType) -> str:
++        """Return the identifier without an extras proxy."""
++        ...
++
++    def candidate_label(self, candidate: CandidateType) -> str:
++        """Return the original version text for diagnostic messages."""
++        ...
++
++    def candidate_withdrawn(self, candidate: CandidateType) -> bool:
++        """Return whether preparation requires exact-pin permission."""
++        ...
++
++    @property
++    def facts(
++        self,
++    ) -> Mapping[
++        CandidateType, DependencyData[RangeType, PinnedRequirementType] | None
++    ]:
++        """Prepared candidate facts; None records rejected metadata."""
++        ...
++
++    @property
++    def missing_listings(self) -> AbstractSet[str]:
++        """Package listings whose absence has not been established."""
++        ...
++
++    @property
++    def unavailable(self) -> AbstractSet[CandidateType]:
++        """Candidate metadata whose absence has not been established."""
++        ...
++
++    @property
++    def unavailable_reason(self) -> str:
++        """Describe the latest listing or metadata uncertainty."""
++        ...
++
++    def prepare(
++        self, candidate: CandidateType
++    ) -> DependencyData[RangeType, PinnedRequirementType] | None:
++        """Prepare metadata only after the provider has established admission."""
++        ...
++
++    def choices(self, package: str) -> Sequence[CandidateType]:
++        """Return all fixed candidate identities for one package."""
++        ...
++
++    def ordered(self, package: str, allowed: RangeType, /) -> Sequence[CandidateType]:
++        """Order candidates within the supplied version bounds."""
++        ...
++
++    def full_range(self) -> RangeType:
++        """Return the identity for version-range intersection."""
++        ...
++
++    def intersect_ranges(self, left: RangeType, right: RangeType) -> RangeType:
++        """Intersect two ranges using the native version algebra."""
++        ...
++
++    def range_contains(self, candidate: CandidateType, allowed: RangeType) -> bool:
++        """Test a candidate version against native bounds."""
++        ...
++
++    def pin_allows(self, pin: PinnedRequirementType, candidate: CandidateType) -> bool:
++        """Check whether an original pin permits this withdrawn candidate."""
++        ...
++
++    def pin_project(self, pin: PinnedRequirementType) -> str:
++        """Return the normalized project named by an original pin."""
++        ...
++
++    def base_name(self, package: str) -> str:
++        """Remove an extras proxy from a package identifier."""
++        ...
++
++    def base_candidate(self, candidate: CandidateType) -> CandidateType:
++        """Return the matching base identity for an extra candidate."""
++        ...
++
++
++class UnavailableMetadataError(Exception):
++    """Unread metadata cannot establish the failure of a preferred choice."""
++
++
++class PreferenceScope(Generic[CandidateType]):
++    """Keep selected ancestors fixed and selected non-yanked packages non-yanked."""
++
++    __slots__ = ("_fixed", "_live", "_target")
 +
 +    def __init__(
-+        self, candidates: Iterable[CandidateType], *, may_expand: bool = False
-+    ) -> None:
-+        """Keep availability evidence with the query that establishes it."""
-+        self.candidates = candidates
-+        self.may_expand = may_expand
-+
-+    def __iter__(self) -> Iterator[CandidateType]:
-+        """Visit candidates in the producer's order."""
-+        return iter(self.candidates)
-+
-+
-+class CallbackHost(
-+    Protocol[PackageType, RequirementType, CandidateType, CovariantPriorityType_co]
-+):
-+    """Supply stable native meanings and a natively ordered candidate stream."""
-+
-+    def identify(
-+        self, requirement_or_candidate: RequirementType | CandidateType
-+    ) -> PackageType:
-+        """Return the package identifier of a native value."""
-+        ...
-+
-+    def find_matches(
 +        self,
-+        package: PackageType,
-+        requirements: Mapping[PackageType, Sequence[RequirementType]],
-+        incompatibilities: Mapping[PackageType, Sequence[CandidateType]],
-+    ) -> CandidateQuery[CandidateType]:
-+        """Return a native stream and its exhaustion policy for live declarations."""
-+        ...
-+
-+    def is_satisfied_by(
-+        self, requirement: RequirementType, candidate: CandidateType
-+    ) -> bool:
-+        """Evaluate a stable native requirement against a candidate."""
-+        ...
-+
-+    def exact_candidate(self, requirement: RequirementType) -> CandidateType | None:
-+        """Return a currently eligible identity forced by this declaration, if any."""
-+        ...
-+
-+    def get_dependencies(self, candidate: CandidateType) -> Iterable[RequirementType]:
-+        """Read original dependency declarations for a candidate."""
-+        ...
-+
-+    def preference(
-+        self,
-+        package: PackageType,
-+        requirements: Mapping[PackageType, Sequence[RequirementType]],
-+    ) -> CovariantPriorityType_co:
-+        """Return mutually orderable package priorities without preparation."""
-+        ...
-+
-+
-+class RequirementCause(Generic[RequirementType, CandidateType]):
-+    """Retain one original declaration and its selected parent."""
-+
-+    __slots__ = ("parent", "requirement")
-+
-+    def __init__(
-+        self, requirement: RequirementType, parent: CandidateType | None
++        fixed: frozenset[CandidateType] = frozenset(),
++        live: frozenset[str] = frozenset(),
++        target: str = "",
 +    ) -> None:
-+        """Retain the original declaration and its parent."""
-+        self.requirement = requirement
-+        self.parent = parent
++        """Fix selected ancestors and preserve the required non-yanked choices."""
++        self._fixed: Final[frozenset[CandidateType]] = fixed
++        self._live: Final[frozenset[str]] = live
++        self._target: Final[str] = target
 +
++    @property
++    def fixed(self) -> frozenset[CandidateType]:
++        """Candidate identities fixed by independently grounded ancestors."""
++        return self._fixed
 +
-+class _RetreatChoice(Generic[PackageType, CandidateType]):
-+    """A native choice awaiting a selected child decision."""
++    @property
++    def live(self) -> frozenset[str]:
++        """Package bases restricted to non-yanked choices."""
++        return self._live
 +
-+    __slots__ = ("candidate", "child")
++    @property
++    def target(self) -> str:
++        """Package whose non-yanked alternatives this query must retain."""
++        return self._target
 +
-+    def __init__(self, candidate: CandidateType, child: PackageType) -> None:
-+        self.candidate = candidate
-+        self.child = child
++    @_override
++    def __hash__(self) -> int:
++        """Hash the immutable query restrictions."""
++        return hash((self.fixed, self.live, self.target))
 +
-+
-+class CallbackProvider(
-+    BaseProvider[PackageType, CandidateType],
-+    Generic[PackageType, RequirementType, CandidateType, PriorityType],
-+):
-+    """Own predicate ranges, dependency facts and live declaration scope."""
-+
-+    def __init__(
-+        self,
-+        host: CallbackHost[PackageType, RequirementType, CandidateType, PriorityType],
-+        roots: Sequence[RequirementType],
-+    ) -> None:
-+        """Start fresh predicate, declaration and proof state."""
-+        self.host = host
-+        self.roots = tuple(roots)
-+        self.root_packages = frozenset(
-+            host.identify(requirement) for requirement in roots
++    @_override
++    def __eq__(self, other: object) -> bool:
++        """Compare each restriction without inspecting candidate metadata."""
++        if not isinstance(other, PreferenceScope):
++            return NotImplemented
++        return (self.fixed, self.live, self.target) == (
++            other.fixed,
++            other.live,
++            other.target,
 +        )
-+        self.support_order: dict[PackageType, int] | None = None
-+        self.algebra = PredicateAlgebra[CandidateType]()
-+        self.requirement_ranges: dict[
-+            RequirementType, PredicateRange[CandidateType]
-+        ] = {}
-+        self.dependencies: dict[CandidateType, tuple[RequirementType, ...]] = {}
-+        self.dependency_ranges: dict[
-+            CandidateType, dict[PackageType, PredicateRange[CandidateType]]
-+        ] = {}
-+        self.decisions: Mapping[PackageType, CandidateType] = {}
-+        self.positive_ranges: Mapping[PackageType, RangeProtocol[CandidateType]] = {}
-+        self.active: dict[PackageType, tuple[RequirementType, ...]] | None = None
-+        self.pending: list[Incompatibility[PackageType, CandidateType]] = []
-+        self.failed_queries: set[PackageType] = set()
-+        self.force_targets: list[DecisionRetreat[PackageType]] = []
-+        self.considered: set[CandidateType] = set()
-+        self.matches: dict[tuple[RequirementType, CandidateType], bool] = {}
 +
-+    def restriction(
-+        self, requirement: RequirementType
-+    ) -> PredicateRange[CandidateType]:
-+        """Memoize the exact native meaning of a declaration."""
-+        if requirement not in self.requirement_ranges:
-+            exact = self.host.exact_candidate(requirement)
-+            self.requirement_ranges[requirement] = (
-+                PredicateRange.singleton(exact)
-+                if exact is not None
-+                else self.algebra.restriction(
-+                    lambda candidate: self.is_satisfied_by(requirement, candidate)
-+                )
-+            )
-+        return self.requirement_ranges[requirement]
 +
-+    def is_satisfied_by(
-+        self, requirement: RequirementType, candidate: CandidateType
-+    ) -> bool:
-+        """Cache immutable host requirement meanings within this operation."""
-+        key = requirement, candidate
-+        if key not in self.matches:
-+            self.matches[key] = self.host.is_satisfied_by(requirement, candidate)
-+        return self.matches[key]
++class PreparationStatus(Enum):
++    """Whether non-yanked alternatives allow preparing a yanked candidate."""
 +
-+    def incompatibilities(
-+        self, package: PackageType, allowed: RangeProtocol[CandidateType]
-+    ) -> dict[PackageType, tuple[CandidateType, ...]]:
-+        """Let native streams skip candidates already excluded by learned bounds."""
-+        return {
-+            package: tuple(
-+                candidate
-+                for candidate in self.considered
-+                if self.host.identify(candidate) == package and candidate not in allowed
-+            )
-+        }
++    ALLOWED = auto()
++    IMPOSSIBLE = auto()
++    INCOMPLETE = auto()
 +
-+    def root_requirements(self) -> list[RootRequirement[PackageType, CandidateType]]:
-+        """Bind original roots to native predicate restrictions."""
-+        return [
-+            RootRequirement(
-+                self.host.identify(requirement),
-+                self.restriction(requirement),
-+                requirement,
-+            )
-+            for requirement in self.roots
++
++class IncompletePreferenceError(ResolutionError):
++    """An interrupted or unknown query cannot prove that live choices fail."""
++
++
++class _NeedLiveProofError(Exception):
++    pass
++
++
++@dataclass(frozen=True, slots=True)
++class _Context(Generic[CandidateType]):
++    """A selected assignment whose known metadata may already establish failure."""
++
++    scope: PreferenceScope[CandidateType]
++    selected: frozenset[CandidateType]
++
++
++class _NeedContextProofError(Exception):
++    pass
++
++
++class PreferenceSearch(ABC, Generic[CandidateType, RangeType, PinnedRequirementType]):
++    """Schedule scoped preference proofs against one catalogue snapshot."""
++
++    def __init__(
++        self,
++        roots: Mapping[str, RangeType],
++        input_pins: Sequence[PinnedRequirementType],
++        constraints: Mapping[str, RangeType],
++        *,
++        max_steps: int = 100_000,
++        refresh_incomplete: bool = False,
++        exact_dependencies: Callable[[CandidateType], Sequence[CandidateType]]
++        | None = None,
++    ) -> None:
++        """Retain shared facts and the original target declarations."""
++        self.roots = roots
++        self.input_pins = input_pins
++        self.constraints = constraints
++        self.remaining = max_steps
++        self.refresh_incomplete = refresh_incomplete
++        self.exact_dependencies = exact_dependencies
++        self.stats: ResolverStats[Hashable] = ResolverStats()
++
++        self.outcomes: dict[PreferenceScope[CandidateType], PreparationStatus] = {}
++        self.incomplete_facts: dict[PreferenceScope[CandidateType], int] = {}
++        self.refuted: set[_Context[CandidateType]] = set()
++        self.possible: dict[_Context[CandidateType], int] = {}
++
++        # These typed requests survive unwinding the active resolver callback.
++        self.requested_scope: PreferenceScope[CandidateType] | None = None
++        self.requested_context: _Context[CandidateType] | None = None
++
++    def spend(self, steps: int) -> None:
++        """Charge work from any resolver query against the cumulative limit."""
++        self.remaining -= steps
++        if self.remaining < 0:
++            message = "live preference analysis is incomplete: search limit reached"
++            raise ResolutionLimitError(message)
++
++    @property
++    @abstractmethod
++    def catalogue(
++        self,
++    ) -> PreferenceCatalogue[CandidateType, RangeType, PinnedRequirementType]:
++        """Return the host catalogue retained for this search."""
++        ...
++
++    def record_solver_stats(self, stats: ResolverStats[StatisticsPackageType]) -> None:
++        """Accumulate scalar and per-package work across all scoped queries."""
++        for name in ResolverStats.__slots__:
++            value = getattr(stats, name)
++            if isinstance(value, int):
++                setattr(self.stats, name, getattr(self.stats, name) + value)
++            else:
++                target = getattr(self.stats, name)
++                for package, count in value.items():
++                    target[package] += count
++
++    def parents(
++        self, candidate: CandidateType, selected: Mapping[str, CandidateType]
++    ) -> frozenset[CandidateType]:
++        """Find ancestors reachable from roots without the candidate's metadata."""
++        demand = set(self.roots)
++        pins = list(self.input_pins)
++        expanded: set[str] = set()
++
++        # The target's metadata must not establish its own admission.
++        while True:
++            before = len(expanded)
++            for name, parent in selected.items():
++                if (
++                    self.catalogue.candidate_base(parent)
++                    == self.catalogue.candidate_base(candidate)
++                    or name not in demand
++                    or name in expanded
++                ):
++                    continue
++
++                data = self.catalogue.facts.get(parent)
++                if data is None:
++                    continue
++
++                if self.catalogue.candidate_withdrawn(parent) and not any(
++                    self.catalogue.pin_allows(req, parent) for req in pins
++                ):
++                    continue
++
++                expanded.add(name)
++                demand.update(data.dependencies)
++                pins.extend(data.pins)
++            if len(expanded) == before:
++                break
++
++        ancestors: set[str] = set()
++        pending = [
++            name
++            for name, value in selected.items()
++            if self.catalogue.candidate_base(value)
++            == self.catalogue.candidate_base(candidate)
 +        ]
-+
-+    def active_requirements(self) -> Mapping[PackageType, tuple[RequirementType, ...]]:
-+        """Rebuild live declarations after a decision or dependency read."""
-+        if self.active is None:
-+            grouped: dict[PackageType, list[RequirementType]] = defaultdict(list)
-+            for requirement in self.roots:
-+                grouped[self.host.identify(requirement)].append(requirement)
-+            for package, candidate in self.decisions.items():
-+                if self._root_order(package) == len(self.roots):
-+                    continue
-+                for requirement in self.dependencies.get(candidate, ()):
-+                    grouped[self.host.identify(requirement)].append(requirement)
-+            self.active = {
-+                package: tuple(requirements)
-+                for package, requirements in grouped.items()
-+            }
-+        return self.active
-+
-+    @override
-+    def receive_partial_solution_hint(
-+        self,
-+        positive_ranges: Mapping[PackageType, RangeProtocol[CandidateType]],
-+        decisions: Mapping[PackageType, CandidateType],
-+    ) -> None:
-+        """Replace the live selection and discard its declaration view."""
-+        self.positive_ranges = positive_ranges
-+        self.decisions = decisions
-+        self.active = None
-+        self.support_order = None
-+
-+    def choose_version(
-+        self, package: PackageType, version_range: RangeProtocol[CandidateType]
-+    ) -> CandidateType | None:
-+        """Choose a native match or exclude only this live context."""
-+        requirements = self.active_requirements()
-+        query = (
-+            self.host.find_matches(
-+                package, requirements, self.incompatibilities(package, version_range)
++        pending.extend(
++            (
++                self.catalogue.candidate_base(candidate),
++                self.catalogue.candidate_package(candidate),
 +            )
-+            if package in requirements
-+            else CandidateQuery[CandidateType](())
 +        )
-+        chosen = self._choose_candidate(package, version_range, query)
-+        if chosen is not None:
-+            return chosen
++        while pending:
++            child = pending.pop()
++            for name in expanded - ancestors:
++                data = self.catalogue.facts[selected[name]]
++                assert data is not None
++                if child in data.dependencies:
++                    ancestors.add(name)
++                    pending.append(name)
++        return frozenset(selected[name] for name in ancestors)
 +
-+        self.failed_queries.add(package)
-+        if self.pending:
-+            return None
-+        if not query.may_expand and not self.unread_exact_dependencies(requirements):
-+            terms = [Term(package, version_range, positive=True)]
-+            terms.extend(
-+                Term(
-+                    parent,
-+                    PredicateRange[CandidateType].singleton(candidate),
-+                    positive=True,
-+                )
-+                for parent, candidate in self.decisions.items()
++    def fixed_range(
++        self, candidate: CandidateType, parents: frozenset[CandidateType]
++    ) -> RangeType:
++        """Intersect target requirements from inputs and reachable selected parents."""
++        required = {
++            self.catalogue.candidate_base(candidate),
++            self.catalogue.candidate_package(candidate),
++        }
++        allowed = self.catalogue.full_range()
++        declarations = [self.roots]
++        for parent in parents:
++            data = self.catalogue.facts[parent]
++            assert data is not None
++            declarations.append(data.dependencies)
++        for dependencies in declarations:
++            for package, version_range in dependencies.items():
++                if self.catalogue.base_name(package) == self.catalogue.candidate_base(
++                    candidate
++                ):
++                    required.add(package)
++                    allowed = self.catalogue.intersect_ranges(allowed, version_range)
++        for package in required:
++            allowed = self.catalogue.intersect_ranges(
++                allowed, self.constraints.get(package, self.catalogue.full_range())
 +            )
-+            self.pending.append(
-+                Incompatibility(
-+                    terms, cause=IncompatibilityCause.CONTEXTUAL_NO_VERSIONS
-+                )
-+            )
-+        return None
++        return allowed
 +
-+    def _choose_candidate(
-+        self,
-+        package: PackageType,
-+        version_range: RangeProtocol[CandidateType],
-+        query: CandidateQuery[CandidateType],
-+    ) -> CandidateType | None:
-+        """Try native alternatives before reconsidering an earlier input."""
-+        fallback: _RetreatChoice[PackageType, CandidateType] | None = None
-+        for candidate in query:
-+            self.considered.add(candidate)
-+            if candidate not in version_range:
-+                continue
-+            accepted = self.dependencies_allow(package, candidate)
-+            if isinstance(accepted, _RetreatChoice):
-+                if accepted.child in self.root_packages and self._root_order(
-+                    package
-+                ) > self._root_order(accepted.child):
-+                    if fallback is None:
-+                        fallback = accepted
-+                    continue
-+                self.force_targets.append(DecisionRetreat(accepted.child))
-+                self.failed_queries.add(package)
-+                return candidate
-+            if accepted:
-+                self.failed_queries.discard(package)
-+                return candidate
-+        if fallback is not None:
-+            self.force_targets.append(DecisionRetreat(fallback.child))
-+            self.failed_queries.add(package)
-+            return fallback.candidate
-+        return None
-+
-+    def unread_exact_dependencies(
-+        self, declarations: Mapping[PackageType, Sequence[RequirementType]]
++    def _has_exact_parent(
++        self, candidate: CandidateType, parents: frozenset[CandidateType]
 +    ) -> bool:
-+        """Wait for forced, eligible identities whose dependency facts remain unread."""
-+        for package, requirements in declarations.items():
-+            for requirement in requirements:
-+                choice = self.host.exact_candidate(requirement)
-+                if choice is None or choice in self.dependencies:
-+                    continue
-+                allowed = self.positive_ranges.get(package)
-+                if allowed is not None and not allowed.__contains__(choice):
-+                    continue
-+                if all(self.is_satisfied_by(item, choice) for item in requirements):
++        """Check whether an ancestor fixes this identity or an extra's base."""
++        exact_dependencies = self.exact_dependencies
++        if exact_dependencies is None:
++            return False
++
++        for parent in parents:
++            for child in exact_dependencies(parent):
++                if child == candidate:
++                    return True
++
++                # An extra constrains only its own base artifact.
++                if (
++                    self.catalogue.candidate_package(child)
++                    != self.catalogue.candidate_base(child)
++                    and self.catalogue.base_candidate(child) == candidate
++                ):
 +                    return True
 +        return False
 +
-+    def _root_order(self, package: PackageType) -> int:
-+        """Find the earliest input supporting this package's current demand."""
-+        if self.support_order is None:
-+            order: dict[PackageType, int] = {}
-+            pending: deque[PackageType] = deque()
-+            for position, requirement in enumerate(self.roots):
-+                root = self.host.identify(requirement)
-+                if root not in order:
-+                    order[root] = position
-+                    pending.append(root)
-+            while pending:
-+                parent = pending.popleft()
-+                candidate = self.decisions.get(parent)
-+                if candidate is None:
-+                    continue
-+                for requirement in self.dependencies.get(candidate, ()):
-+                    child = self.host.identify(requirement)
-+                    if child not in order or order[child] > order[parent]:
-+                        order[child] = order[parent]
-+                        pending.append(child)
-+            self.support_order = order
-+        return self.support_order.get(package, len(self.roots))
-+
-+    def _reject_candidate(
++    def check(
 +        self,
-+        package: PackageType,
 +        candidate: CandidateType,
-+        child: PackageType,
-+        required: RangeProtocol[CandidateType],
-+        allowed: RangeProtocol[CandidateType],
-+    ) -> None:
-+        """Keep the original dependency and scoped absence behind a parent rejection."""
-+        parent_term = Term(
-+            package, PredicateRange[CandidateType].singleton(candidate), positive=True
-+        )
-+        dependency = Incompatibility(
-+            [parent_term, Term(child, required, positive=False)],
-+            cause=IncompatibilityCause.DEPENDENCY,
-+        )
-+        guards = [
-+            Term(name, PredicateRange[CandidateType].singleton(value), positive=True)
-+            for name, value in self.decisions.items()
-+        ]
-+        absence = Incompatibility(
-+            [Term(child, allowed, positive=True), parent_term, *guards],
-+            cause=IncompatibilityCause.CONTEXTUAL_NO_VERSIONS,
-+        )
-+        self.pending.append(
-+            Incompatibility(
-+                [parent_term, *guards],
-+                cause=IncompatibilityCause.DERIVED,
-+                cause_left=dependency,
-+                cause_right=absence,
++        selected: Mapping[str, CandidateType],
++        scope: PreferenceScope[CandidateType],
++    ) -> PreparationStatus:
++        """Request non-yanked alternatives before preparing yanked metadata."""
++        if not self.catalogue.candidate_withdrawn(candidate):
++            return PreparationStatus.ALLOWED
++
++        parents = self.parents(candidate, selected)
++        allowed = self.fixed_range(candidate, parents)
++        if not self.catalogue.range_contains(candidate, allowed):
++            return PreparationStatus.IMPOSSIBLE
++
++        exact_parent = self._has_exact_parent(candidate, parents)
++        # A fixed exact edge needs the scoped proof, without an unrelated listing.
++        if not exact_parent and not any(
++            not self.catalogue.candidate_withdrawn(choice)
++            for choice in self.catalogue.ordered(
++                self.catalogue.candidate_base(candidate), allowed
 +            )
++        ):
++            return PreparationStatus.ALLOWED
++
++        live = (
++            scope.live
++            | {self.catalogue.candidate_base(candidate)}
++            | {
++                self.catalogue.candidate_base(value)
++                for value in selected.values()
++                if not self.catalogue.candidate_withdrawn(value)
++            }
++        )
++        query = PreferenceScope(
++            parents,
++            frozenset(live),
++            self.catalogue.candidate_base(candidate),
 +        )
 +
-+    def dependencies_allow(
-+        self, package: PackageType, candidate: CandidateType
-+    ) -> bool | _RetreatChoice[PackageType, CandidateType]:
-+        """Check child declarations without discarding an earlier input's choices."""
-+        dependencies = self.get_dependencies(package, candidate)
-+        declarations = {
-+            name: list(values) for name, values in self.active_requirements().items()
-+        }
-+        for requirement in self.dependencies[candidate]:
-+            declarations.setdefault(self.host.identify(requirement), []).append(
-+                requirement
-+            )
++        # Append-only fact counts identify the revision behind each proof.
++        outcome = self.outcomes.get(query)
++        if outcome is PreparationStatus.INCOMPLETE:
++            if not self.refresh_incomplete or self.incomplete_facts.get(query) == len(
++                self.catalogue.facts
++            ):
++                return outcome
++            outcome = None
++        if outcome is None:
++            if not scope.live < query.live:
++                message = "live preference analysis is incomplete: cyclic query"
++                raise ResolutionInvariantError(message)
++            self.requested_scope = query
++            raise _NeedLiveProofError
 +
-+        retreat: _RetreatChoice[PackageType, CandidateType] | None = None
-+        for child, required in dependencies.items():
-+            existing = self.positive_ranges.get(child)
-+            allowed = required if existing is None else required & existing
-+            exclusions = required if child in self.decisions else allowed
-+            query = self.host.find_matches(
-+                child, declarations, self.incompatibilities(child, exclusions)
-+            )
-+            alternative = False
-+            for choice in query:
-+                self.considered.add(choice)
-+                if choice in allowed:
-+                    break
-+                if child in self.decisions and choice in required:
-+                    alternative = True
++        context = _Context(scope, frozenset(selected.values()))
++        if context in self.refuted:
++            return PreparationStatus.IMPOSSIBLE
++        if self.possible.get(context) != len(self.catalogue.facts):
++            self.requested_context = context
++            raise _NeedContextProofError
++        return PreparationStatus.ALLOWED
++
++    def run(
++        self,
++        callback: Callable[[PreferenceScope[CandidateType]], dict[str, CandidateType]],
++    ) -> dict[str, CandidateType]:
++        """Retry scopes after failed proofs and return a complete solution."""
++        stack = [PreferenceScope[CandidateType]()]
++        while True:
++            self.spend(0)
++            if not self.remaining:
++                message = "live preference analysis is incomplete: search limit reached"
++                raise ResolutionLimitError(message)
++
++            scope = stack[-1]
++            # Unwind the callback before a prerequisite consumes the shared budget.
++            try:
++                selected = callback(scope)
++            except _NeedLiveProofError:
++                assert self.requested_scope is not None
++                stack.append(self.requested_scope)
++            except _NeedContextProofError:
++                assert self.requested_context is not None
++                self.check_context(self.requested_context)
++            except ResolutionTerminatedError:
++                raise
++            except ResolutionError as exc:
++                if len(stack) == 1:
++                    raise
++
++                self.record_failure(scope, exc)
++                stack.pop()
 +            else:
-+                if alternative:
-+                    if (
-+                        child not in self.root_packages
-+                        or package in self.root_packages
-+                        or self._root_order(package) <= self._root_order(child)
-+                    ):
-+                        if retreat is None:
-+                            retreat = _RetreatChoice(candidate, child)
-+                        self.pending.append(
-+                            Incompatibility(
-+                                [
-+                                    Term(
-+                                        package,
-+                                        PredicateRange[CandidateType].singleton(
-+                                            candidate
-+                                        ),
-+                                        positive=True,
-+                                    ),
-+                                    Term(child, required, positive=False),
-+                                ],
-+                                cause=IncompatibilityCause.DEPENDENCY,
-+                            )
++                if scope.target and not any(
++                    self.catalogue.candidate_base(value) == scope.target
++                    for value in selected.values()
++                ):
++                    message = (
++                        "live preference analysis is incomplete: target disappeared"
++                    )
++                    raise ResolutionInvariantError(message)
++                return selected
++
++    def record_failure(
++        self, scope: PreferenceScope[CandidateType], error: ResolutionError
++    ) -> None:
++        """Retain a failed scope and the metadata revision supporting its result."""
++        incomplete = isinstance(error, IncompletePreferenceError)
++        self.outcomes[scope] = (
++            PreparationStatus.INCOMPLETE if incomplete else PreparationStatus.IMPOSSIBLE
++        )
++        if incomplete:
++            self.incomplete_facts[scope] = len(self.catalogue.facts)
++
++    def explain(
++        self, selected: Mapping[str, CandidateType]
++    ) -> dict[str, tuple[str, ...]]:
++        """Find an allowing input or dependency pin for each selected yank."""
++        declarations: dict[str, list[tuple[PinnedRequirementType, str]]] = {}
++        for requirement in self.input_pins:
++            declarations.setdefault(self.catalogue.pin_project(requirement), []).append(
++                (requirement, f"input pin {requirement}")
++            )
++
++        pending = deque(self.roots)
++        demanded = set(self.roots)
++        expanded: set[str] = set()
++        waiting: dict[str, set[str]] = {}
++        sources: dict[str, tuple[str, ...]] = {}
++
++        while pending:
++            package = pending.popleft()
++            candidate = selected.get(package)
++            data = (
++                self.catalogue.facts.get(candidate) if candidate is not None else None
++            )
++            if data is None:
++                message = (
++                    f"cannot explain yanked admission: missing metadata for {package}"
++                )
++                raise ResolutionInvariantError(message)
++
++            assert candidate is not None
++            # An unadmitted yanked parent cannot supply pins to its children.
++            if self.catalogue.candidate_withdrawn(candidate):
++                source = next(
++                    (
++                        text
++                        for requirement, text in declarations.get(
++                            self.catalogue.candidate_base(candidate), ()
 +                        )
++                        if self.catalogue.pin_allows(requirement, candidate)
++                    ),
++                    None,
++                )
++                if source is None:
++                    waiting.setdefault(
++                        self.catalogue.candidate_base(candidate), set()
++                    ).add(package)
++                    continue
++                sources.setdefault(self.catalogue.candidate_base(candidate), (source,))
++
++            expanded.add(package)
++            for child in data.dependencies:
++                if child not in demanded:
++                    demanded.add(child)
++                    pending.append(child)
++
++            for requirement in data.pins:
++                base = self.catalogue.pin_project(requirement)
++                name = self.catalogue.candidate_package(candidate)
++                label = self.catalogue.candidate_label(candidate)
++                text = f"{name}=={label} requires {requirement}"
++                declarations.setdefault(base, []).append((requirement, text))
++                pending.extend(sorted(waiting.pop(base, ())))
++
++        if expanded != set(selected):
++            message = "cannot explain yanked admission: selection is not rooted"
++            raise ResolutionInvariantError(message)
++        return sources
++
++    def check_context(self, context: _Context[CandidateType]) -> None:
++        """Check for known conflicts after the requesting solver unwinds."""
++        provider = _KnownFacts(
++            self.catalogue,
++            self.constraints,
++            context,
++            exact_dependencies=self.exact_dependencies,
++        )
++        solver: Resolver[str, int] = Resolver(provider, max_iterations=self.remaining)
++        refuted = False
++        try:
++            roots = {
++                name: provider.encode(name, allowed)
++                for name, allowed in self.roots.items()
++            }
++            solver.resolve(roots)
++        except UnavailableMetadataError:
++            # Missing listings cannot refute this selected context.
++            pass
++        except ResolutionTerminatedError:
++            raise
++        except ResolutionError as exc:
++            if exc.incompatibility is None:
++                message = (
++                    "live preference analysis is incomplete: context check stopped"
++                )
++                raise IncompletePreferenceError(message) from exc
++            refuted = True
++        finally:
++            self.record_solver_stats(solver.stats)
++            self.spend(solver.stats.rounds)
++
++        if refuted:
++            self.refuted.add(context)
++        else:
++            self.possible[context] = len(self.catalogue.facts)
++
++
++def encode_dependencies(
++    catalogue: PreferenceCatalogue[CandidateType, RangeType, PinnedRequirementType],
++    candidate: CandidateType,
++    dependencies: Mapping[str, RangeType],
++    exact_dependencies: Callable[[CandidateType], Sequence[CandidateType]] | None,
++    encode_range: Callable[[str, RangeType], Range[int]],
++    encode_candidate: Callable[[CandidateType, RangeType], Range[int]],
++) -> dict[str, Range[int]]:
++    """Refine prepared dependency edges with conjunctive candidate identities."""
++    exact: dict[str, Range[int]] = {}
++    if exact_dependencies is not None:
++        for child in exact_dependencies(candidate):
++            package = catalogue.candidate_package(child)
++            if package not in dependencies:
++                message = f"Exact candidate {child!r} has no prepared dependency edge"
++                raise ResolutionInvariantError(message)
++
++            # Different identities are simultaneous requirements, even at one version.
++            encoded = encode_candidate(child, dependencies[package])
++            exact[package] = exact.get(package, Range[int].full()) & encoded
++
++    return {
++        package: exact[package] if package in exact else encode_range(package, allowed)
++        for package, allowed in dependencies.items()
++    }
++
++
++class _KnownFacts(
++    BaseProvider[str, int], Generic[CandidateType, RangeType, PinnedRequirementType]
++):
++    """Keep selected candidates fixed and leave unread dependencies unconstrained."""
++
++    def __init__(
++        self,
++        catalogue: PreferenceCatalogue[CandidateType, RangeType, PinnedRequirementType],
++        constraints: Mapping[str, RangeType],
++        context: _Context[CandidateType],
++        *,
++        exact_dependencies: Callable[[CandidateType], Sequence[CandidateType]]
++        | None = None,
++    ) -> None:
++        self.catalogue = catalogue
++        self.constraints = constraints
++        self.exact_dependencies = exact_dependencies
++
++        self.fixed = {
++            self.catalogue.candidate_package(value): value
++            for value in context.scope.fixed
++        }
++        self.fixed.update(
++            (self.catalogue.candidate_package(value), value)
++            for value in context.selected
++        )
++        self.live = context.scope.live
++
++        # Unread metadata stays unconstrained throughout this proof snapshot.
++        self.facts = dict(catalogue.facts)
++
++        self.items: dict[int, CandidateType] = {}
++        self.identities: dict[CandidateType, int] = {}
++
++    def identify(self, candidate: CandidateType) -> int:
++        token = self.identities.get(candidate)
++        if token is None:
++            token = len(self.items) + 1
++            self.items[token] = candidate
++            self.identities[candidate] = token
++        return token
++
++    def choices(self, package: str, allowed: RangeType) -> list[CandidateType]:
++        candidates = self.catalogue.ordered(
++            package,
++            self.catalogue.intersect_ranges(
++                allowed, self.constraints.get(package, self.catalogue.full_range())
++            ),
++        )
++
++        if package in self.catalogue.missing_listings:
++            raise UnavailableMetadataError(package)
++
++        return [candidate for candidate in candidates if self.eligible(candidate)]
++
++    def eligible(self, candidate: CandidateType) -> bool:
++        """Keep frozen choices, live restrictions and known metadata rejections."""
++        package = self.catalogue.candidate_package(candidate)
++        return (
++            self.fixed.get(package, candidate) == candidate
++            and not (
++                self.catalogue.candidate_withdrawn(candidate)
++                and self.catalogue.candidate_base(candidate) in self.live
++            )
++            and (candidate not in self.facts or self.facts[candidate] is not None)
++        )
++
++    def encode_candidate(
++        self, candidate: CandidateType, allowed: RangeType
++    ) -> Range[int]:
++        """Encode one known identity while retaining frozen proof restrictions."""
++        package = self.catalogue.candidate_package(candidate)
++        allowed = self.catalogue.intersect_ranges(
++            allowed, self.constraints.get(package, self.catalogue.full_range())
++        )
++        if not self.eligible(candidate) or not self.catalogue.range_contains(
++            candidate, allowed
++        ):
++            return Range[int].empty()
++
++        return Range[int].singleton(self.identify(candidate))
++
++    def singleton_token(self, package: str, allowed: RangeProtocol[int]) -> int | None:
++        """Recognize a registered exact domain without consulting the catalogue."""
++        return next(
++            (
++                token
++                for token, candidate in self.items.items()
++                if self.catalogue.candidate_package(candidate) == package
++                and allowed == Range.singleton(token)
++            ),
++            None,
++        )
++
++    def encode(self, package: str, allowed: RangeType) -> Range[int]:
++        return Range[int].from_versions(
++            self.identify(candidate) for candidate in self.choices(package, allowed)
++        )
++
++    def prioritize(
++        self,
++        package: str,
++        version_range: RangeProtocol[int],
++        conflict_counts: Mapping[str, int],
++        culprit_counts: Mapping[str, int] | None = None,
++    ) -> int:
++        del conflict_counts, culprit_counts
++        if (
++            self.exact_dependencies is not None
++            and self.singleton_token(package, version_range) is not None
++        ):
++            return 1
++
++        return len(self.catalogue.choices(package))
++
++    def choose_version(
++        self, package: str, version_range: RangeProtocol[int]
++    ) -> int | None:
++        if self.exact_dependencies is not None:
++            token = self.singleton_token(package, version_range)
++            if token is not None:
++                # Registration already applied this frozen proof's restrictions.
++                return token
++
++        return next(
++            (
++                self.identify(value)
++                for value in self.choices(package, self.catalogue.full_range())
++                if self.identify(value) in version_range
++            ),
++            None,
++        )
++
++    def has_satisfying_version(
++        self, package: str, version_range: RangeProtocol[int]
++    ) -> bool:
++        return self.choose_version(package, version_range) is not None
++
++    def widen_decision(self, package: str, version: int) -> None:
++        del package, version
++
++    def get_dependencies(self, package: str, version: int) -> dict[str, Range[int]]:
++        candidate = self.items[version]
++        data = self.facts.get(candidate)
++        result = (
++            {}
++            if data is None
++            else encode_dependencies(
++                self.catalogue,
++                candidate,
++                data.dependencies,
++                self.exact_dependencies,
++                self.encode,
++                self.encode_candidate,
++            )
++        )
++
++        # Extra metadata belongs to exactly the same base artifact.
++        base = self.catalogue.base_name(package)
++        if base != package:
++            underlying = self.catalogue.base_candidate(candidate)
++            if self.exact_dependencies is None:
++                result[base] = Range.singleton(self.identify(underlying))
++            else:
++                result[base] = result.get(
++                    base, Range[int].full()
++                ) & self.encode_candidate(underlying, self.catalogue.full_range())
++        return result
++
++
++class CataloguePreference(
++    PreferenceSearch[CandidateType, RangeType, PinnedRequirementType]
++):
++    """Run scoped preference proofs against a supplied candidate catalogue."""
++
++    def __init__(
++        self,
++        catalogue: PreferenceCatalogue[CandidateType, RangeType, PinnedRequirementType],
++        roots: Mapping[str, RangeType],
++        input_pins: Sequence[PinnedRequirementType],
++        constraints: Mapping[str, RangeType],
++        *,
++        max_steps: int = 100_000,
++        refresh_incomplete: bool = False,
++        exact_dependencies: Callable[[CandidateType], Sequence[CandidateType]]
++        | None = None,
++    ) -> None:
++        """Keep one host snapshot and a shared budget for its preference proofs."""
++        super().__init__(
++            roots,
++            input_pins,
++            constraints,
++            max_steps=max_steps,
++            refresh_incomplete=refresh_incomplete,
++            exact_dependencies=exact_dependencies,
++        )
++        self._catalogue = catalogue
++
++    @property
++    @_override
++    def catalogue(
++        self,
++    ) -> PreferenceCatalogue[CandidateType, RangeType, PinnedRequirementType]:
++        """Return the catalogue whose immutable facts the search shares."""
++        return self._catalogue
+diff --git a/src/pip/_vendor/nab_provider/preference_provider.py b/src/pip/_vendor/nab_provider/preference_provider.py
+new file mode 100644
+--- /dev/null
++++ b/src/pip/_vendor/nab_provider/preference_provider.py
+@@ -0,0 +1,716 @@
++"""Enforce grounded candidate admission using shared PubGrub proxy packages."""
++
++from __future__ import annotations
++
++from collections import deque
++from collections.abc import Hashable
++from dataclasses import dataclass
++from typing import TYPE_CHECKING, Generic, TypeVar
++
++from nab_resolver.errors import ResolutionError, ResolutionTerminatedError
++from nab_resolver.priority import compute_tier
++from nab_resolver.proofs import external_clauses
++from nab_resolver.ranges import Range
++from nab_resolver.resolver import BaseProvider, Resolver
++from nab_resolver.root import ROOT
++from nab_resolver.types import Incompatibility, IncompatibilityCause, Term
++
++from ._compat import override
++from .preference import (
++    CataloguePreference,
++    IncompletePreferenceError,
++    PreferenceCatalogue,
++    PreferenceScope,
++    PreferenceSearch,
++    PreparationStatus,
++    encode_dependencies,
++)
++
++if TYPE_CHECKING:
++    from collections.abc import Callable, Iterator, Mapping, Sequence
++
++    from nab_resolver.resolver import ResolverProvider
++    from nab_resolver.types import RangeProtocol
++
++__all__ = ["MetadataProxy", "Package", "PermissionProxy", "PreferenceProvider"]
++
++CandidateType = TypeVar("CandidateType", bound=Hashable)
++RangeType = TypeVar("RangeType")
++PinnedRequirementType = TypeVar("PinnedRequirementType")
++ProjectedVersionType = TypeVar("ProjectedVersionType", bound=Hashable)
++ClausePackageType = TypeVar("ClausePackageType", bound=Hashable)
++
++
++@dataclass(frozen=True, slots=True)
++class PermissionProxy:
++    """Choose selected parents that permit a yanked candidate."""
++
++    candidate: int
++
++
++@dataclass(frozen=True, slots=True)
++class MetadataProxy:
++    """Expose a candidate's dependencies after establishing permission."""
++
++    candidate: int
++
++
++Package = str | PermissionProxy | MetadataProxy
++Support = frozenset[int]
++
++
++class PreferenceProvider(
++    BaseProvider[Package, int],
++    Generic[CandidateType, RangeType, PinnedRequirementType],
++):
++    """Resolve a host catalogue with grounded admission and scoped preference proofs."""
++
++    def __init__(
++        self,
++        preference: PreferenceSearch[CandidateType, RangeType, PinnedRequirementType],
++        *,
++        scope: PreferenceScope[CandidateType] | None = None,
++        metadata_is_admitted: Callable[
++            [CandidateType, Mapping[str, CandidateType]], bool
++        ]
++        | None = None,
++        query_is_complete: Callable[[PreferenceScope[CandidateType]], bool]
++        | None = None,
++        resolver_factory: Callable[
++            [ResolverProvider[Package, int], int], Resolver[Package, int]
++        ]
++        | None = None,
++        preferred_candidate: Callable[[str], CandidateType | None] | None = None,
++        on_candidate_considered: Callable[[CandidateType], None] | None = None,
++    ) -> None:
++        """Retain one search and the host's metadata and completeness policies."""
++        self.preference = preference
++        self.catalogue = preference.catalogue
++        self.roots = preference.roots
++        self.constraints = preference.constraints
++        self.input_pins = preference.input_pins
++
++        self.scope: PreferenceScope[CandidateType] = (
++            PreferenceScope() if scope is None else scope
++        )
++        self.fixed: dict[str, CandidateType] = {
++            self.catalogue.candidate_package(candidate): candidate
++            for candidate in self.scope.fixed
++        }
++
++        self.items: dict[int, CandidateType] = {}
++        self.identities: dict[CandidateType, int] = {}
++        self.package_tokens: dict[str, set[int]] = {}
++        self.matching_counts: dict[tuple[str, RangeProtocol[int]], int] = {}
++        self._metadata_dependencies: dict[int, dict[Package, Range[int]]] = {}
++        self.proofs: dict[PermissionProxy, dict[Support, int]] = {}
++        self.supports: dict[int, Support] = {}
++        self._grounded_choices: dict[str, int] | None = None
++        self._grounded_revision: int | None = None
++        self.decisions: Mapping[Package, int] = {}
++        self.positive: Mapping[Package, RangeProtocol[int]] = {}
++        self.pending: list[Incompatibility[Package, int]] = []
++        self.incomplete = False
++        self.stats = preference.stats
++
++        self._metadata_is_admitted = metadata_is_admitted
++        self._query_is_complete = query_is_complete
++        self.resolver_factory = resolver_factory
++        self.preferred_candidate = preferred_candidate
++        self.on_candidate_considered = on_candidate_considered
++
++    @staticmethod
++    def from_catalogue(  # noqa: PLR0913 - preserve independent public host hooks
++        catalogue: PreferenceCatalogue[CandidateType, RangeType, PinnedRequirementType],
++        roots: Mapping[str, RangeType],
++        input_pins: Sequence[PinnedRequirementType],
++        constraints: Mapping[str, RangeType],
++        *,
++        refresh_incomplete: bool = False,
++        metadata_is_admitted: Callable[
++            [CandidateType, Mapping[str, CandidateType]], bool
++        ]
++        | None = None,
++        query_is_complete: Callable[[PreferenceScope[CandidateType]], bool]
++        | None = None,
++        resolver_factory: Callable[
++            [ResolverProvider[Package, int], int], Resolver[Package, int]
++        ]
++        | None = None,
++        on_candidate_considered: Callable[[CandidateType], None] | None = None,
++        exact_dependencies: Callable[[CandidateType], Sequence[CandidateType]]
++        | None = None,
++    ) -> PreferenceProvider[CandidateType, RangeType, PinnedRequirementType]:
++        """Own the default preference search and its cumulative query lifetime."""
++        preference = CataloguePreference(
++            catalogue,
++            roots,
++            input_pins,
++            constraints,
++            refresh_incomplete=refresh_incomplete,
++            exact_dependencies=exact_dependencies,
++        )
++
++        return PreferenceProvider(
++            preference,
++            metadata_is_admitted=metadata_is_admitted,
++            query_is_complete=query_is_complete,
++            resolver_factory=resolver_factory,
++            on_candidate_considered=on_candidate_considered,
++        )
++
++    def empty_requirements(
++        self, clause: Incompatibility[Package, int]
++    ) -> Iterator[tuple[str, RangeType]]:
++        """Recover original requirements whose encoded candidate domains are empty."""
++        if clause.cause not in {
++            IncompatibilityCause.ROOT,
++            IncompatibilityCause.DEPENDENCY,
++        }:
++            return
++
++        parent = clause.terms[0].package
++        for term in clause.terms[1:]:
++            if not isinstance(term.package, str) or not term.constraint.is_empty:
++                continue
++
++            if isinstance(parent, MetadataProxy):
++                data = self.catalogue.facts[self.items[parent.candidate]]
++                assert data is not None
++                allowed = data.dependencies[term.package]
++            else:
++                allowed = self.roots[term.package]
++            yield (
++                term.package,
++                self.catalogue.intersect_ranges(
++                    allowed,
++                    self.constraints.get(term.package, self.catalogue.full_range()),
++                ),
++            )
++
++    def project_requirements(
++        self,
++        derivation: Incompatibility[ClausePackageType, int] | None,
++        *,
++        version_of: Callable[[CandidateType], ProjectedVersionType],
++        range_type: type[RangeProtocol[ProjectedVersionType]],
++        left_first: bool = True,
++    ) -> list[Incompatibility[object, ProjectedVersionType]]:
++        """Decode original request clauses into the host's candidate version domain."""
++        projected: list[Incompatibility[object, ProjectedVersionType]] = []
++        for clause in external_clauses(derivation, left_first=left_first):
++            if clause.cause not in {
++                IncompatibilityCause.ROOT,
++                IncompatibilityCause.DEPENDENCY,
++            }:
++                continue
++
++            terms: list[Term[object, ProjectedVersionType]] = []
++            for term in clause.terms:
++                # Solver-root terms share the proof with encoded catalogue packages.
++                package: object = term.package
++                if isinstance(package, MetadataProxy):
++                    candidate = self.items[package.candidate]
++                    named: object = self.catalogue.candidate_package(candidate)
++                    allowed = range_type.singleton(version_of(candidate))
++                elif isinstance(package, str):
++                    named = package
++                    allowed = range_type.empty()
++                    for token, candidate in self.items.items():
++                        if (
++                            self.catalogue.candidate_package(candidate) == package
++                            and token in term.constraint
++                        ):
++                            allowed |= range_type.singleton(version_of(candidate))
++                elif package is ROOT:
++                    named = ROOT
++                    allowed = range_type.full()
++                else:
++                    break
++                terms.append(Term(named, allowed, positive=term.is_positive()))
++            else:
++                if terms:
++                    projected.append(Incompatibility(terms, cause=clause.cause))
++        return projected
++
++    def identify(self, candidate: CandidateType) -> int:
++        """Assign a stable identity without relying on the size of the catalogue."""
++        token = self.identities.get(candidate)
++        if token is None:
++            token = len(self.items) + 1
++            self.identities[candidate] = token
++            self.items[token] = candidate
++            package = self.catalogue.candidate_package(candidate)
++            self.package_tokens.setdefault(package, set()).add(token)
++        return token
++
++    def encode_range(self, package: str, allowed: RangeType) -> Range[int]:
++        """Translate a version constraint into distinct candidate choices."""
++        self.catalogue.choices(package)
++        if package in self.catalogue.missing_listings:
++            self.incomplete = True
++        allowed = self.catalogue.intersect_ranges(
++            allowed, self.constraints.get(package, self.catalogue.full_range())
++        )
++        return Range[int].from_versions(
++            self.identify(candidate)
++            for candidate in self.catalogue.ordered(package, allowed)
++            if self.eligible(candidate)
++        )
++
++    def encode_candidate(
++        self, candidate: CandidateType, allowed: RangeType
++    ) -> Range[int]:
++        """Encode a known exact identity while retaining scope and input bounds."""
++        package = self.catalogue.candidate_package(candidate)
++        allowed = self.catalogue.intersect_ranges(
++            allowed, self.constraints.get(package, self.catalogue.full_range())
++        )
++        if not self.eligible(candidate) or not self.catalogue.range_contains(
++            candidate, allowed
++        ):
++            return Range[int].empty()
++
++        return Range[int].singleton(self.identify(candidate))
++
++    def receive_decision_scan_hint(
++        self,
++        positive_ranges: Mapping[Package, RangeProtocol[int]],
++        decisions: Mapping[Package, int],
++    ) -> None:
++        """Refresh permission and readiness after propagation or backtracking."""
++        self.decisions = decisions
++        self.positive = positive_ranges
++        choices = {
++            name: token for name, token in decisions.items() if isinstance(name, str)
++        }
++        revision = len(self.catalogue.facts)
++        if choices == self._grounded_choices and revision == self._grounded_revision:
++            return
++        if any(
++            self.catalogue.candidate_withdrawn(self.items[token])
++            for token in choices.values()
++        ):
++            self.supports = self.ground()
++        else:
++            self.supports = self._ground_live()
++        self._grounded_choices = choices
++        self._grounded_revision = revision
++        for token, support in self.supports.items():
++            if self.catalogue.candidate_withdrawn(self.items[token]):
++                proofs = self.proofs.setdefault(PermissionProxy(token), {})
++                if support not in proofs:
++                    proofs[support] = len(proofs) + 1
++
++    def ground(self) -> dict[int, Support]:
++        """Derive permission from input pins and already-permitted parents."""
++        demand: dict[str, Support] = {name: frozenset() for name in self.roots}
++        pins: list[tuple[PinnedRequirementType, Support]] = [
++            (req, frozenset()) for req in self.input_pins
++        ]
++        admitted: dict[int, Support] = {}
++        expanded: set[int] = set()
++        while True:
++            changed = False
++            for package, demand_support in tuple(demand.items()):
++                token = self.decisions.get(package)
++                if token is None:
++                    continue
++                candidate = self.items[token]
++                if token not in admitted:
++                    support = self.admission_support(candidate, demand_support, pins)
++                    if support is None:
 +                        continue
-+                    self._reject_candidate(package, candidate, child, required, allowed)
-+                    return False
-+                self.failed_queries.add(child)
-+                if query.may_expand or self.unread_exact_dependencies(declarations):
-+                    return retreat if retreat is not None else True
-+                self._reject_candidate(package, candidate, child, required, allowed)
-+                return False
-+        return retreat if retreat is not None else True
++                    admitted[token] = support
++                    changed = True
++
++                data = self.catalogue.facts.get(candidate)
++                if token in expanded or data is None:
++                    continue
++                expanded.add(token)
++                support = admitted[token] | {token}
++
++                for child in data.dependencies:
++                    if child not in demand:
++                        demand[child] = support
++                        changed = True
++                pins.extend((req, support) for req in data.pins)
++                changed |= bool(data.pins)
++
++            if not changed:
++                return admitted
++
++    def _ground_live(self) -> dict[int, Support]:
++        """Find rooted support when every selected candidate is live."""
++        demand: dict[str, Support] = {name: frozenset() for name in self.roots}
++        pending = deque(self.roots)
++        admitted: dict[int, Support] = {}
++        while pending:
++            package = pending.popleft()
++            token = self.decisions.get(package)
++            if token is None or token in admitted:
++                continue
++            admitted[token] = demand[package]
++            data = self.catalogue.facts.get(self.items[token])
++            if data is None:
++                continue
++            support = admitted[token] | {token}
++            for child in data.dependencies:
++                if child not in demand:
++                    demand[child] = support
++                    pending.append(child)
++        return admitted
++
++    def admission_support(
++        self,
++        candidate: CandidateType,
++        demand: Support,
++        pins: Sequence[tuple[PinnedRequirementType, Support]],
++    ) -> Support | None:
++        """Combine the parents requiring a candidate with those supplying its pin."""
++        if not self.catalogue.candidate_withdrawn(candidate):
++            return demand
++        for requirement, support in pins:
++            if self.catalogue.pin_allows(requirement, candidate):
++                return demand | support
++        return None
 +
 +    @override
-+    def consume_pending_clauses(
++    def begin_decision_scan(self) -> Callable[[Package], bool]:
++        """Permission readiness can change when another package is decided."""
++        return lambda _package: True
++
++    @override
++    def is_ready(self, package: Package) -> bool:
++        """Wait for an exact-pin reason before preparing yanked metadata."""
++        if isinstance(package, MetadataProxy):
++            return package.candidate in self.supports
++        if isinstance(package, PermissionProxy):
++            allowed: RangeProtocol[int] = self.positive.get(package, Range[int].full())
++            return any(v in allowed for v in self.proofs.get(package, {}).values())
++        return True
++
++    def prioritize(
 +        self,
-+    ) -> list[Incompatibility[PackageType, CandidateType]]:
-+        """Drain host-final absence clauses without waiting for unrelated metadata."""
++        package: Package,
++        version_range: RangeProtocol[int],
++        conflict_counts: Mapping[Package, int],
++        culprit_counts: Mapping[Package, int] | None = None,
++    ) -> tuple[int, int, int, int]:
++        """Propagate live metadata, then rank forced and preferred package choices."""
++        if isinstance(package, str):
++            # Restarts must revise real-package order while permission stays lazy.
++            tier = compute_tier(
++                package,
++                conflict_counts.get(package, 0),
++                0 if culprit_counts is None else culprit_counts.get(package, 0),
++                culprit_counts,
++            )
++            token = self._preferred_token(package)
++            preferred_rank = int(token is None or token not in version_range)
++            return (
++                0,
++                tier,
++                min(self._matching_count(package, version_range), 2),
++                preferred_rank,
++            )
++        if isinstance(package, MetadataProxy):
++            return (-1, 0, 0, 0)
++        return (2, 0, 0, 0)
++
++    def _matching_count(self, package: str, allowed: RangeProtocol[int]) -> int:
++        """Count up to two identities; priority only distinguishes forced domains."""
++        key = package, allowed
++        if key not in self.matching_counts:
++            count = 0
++            for token in self.package_tokens.get(package, ()):
++                if token in allowed:
++                    count += 1
++                    if count > 1:
++                        break
++            self.matching_counts[key] = count
++        return self.matching_counts[key]
++
++    def _preferred_token(self, package: str) -> int | None:
++        """Find an already registered host preference without preparing it."""
++        preferred = (
++            None
++            if self.preferred_candidate is None
++            else self.preferred_candidate(package)
++        )
++        return None if preferred is None else self.identities.get(preferred)
++
++    def block_context(self, package: Package) -> None:
++        """Reject selected choices without excluding a candidate globally."""
++        terms: list[Term[Package, int]] = [
++            Term(package, Range[int].full(), positive=True)
++        ]
++        terms.extend(
++            Term(name, Range.singleton(value), positive=True)
++            for name, value in self.decisions.items()
++            if isinstance(name, str)
++        )
++        self.pending.append(
++            Incompatibility(terms, cause=IncompatibilityCause.NO_VERSIONS)
++        )
++
++    @override
++    def consume_pending_clauses(self) -> list[Incompatibility[Package, int]]:
++        """Return incompatibilities that depend on the selected candidates."""
 +        pending = self.pending
 +        self.pending = []
 +        return pending
 +
-+    @override
-+    def consume_force_backtrack_targets(self) -> list[DecisionRetreat[PackageType]]:
-+        """Revisit a selected child when a new parent supplies a native match."""
-+        targets = self.force_targets
-+        self.force_targets = []
-+        return targets
++    def eligible(self, candidate: CandidateType) -> bool:
++        """Apply this check's parent versions and non-yanked restrictions."""
++        if self.catalogue.candidate_base(
++            candidate
++        ) in self.scope.live and self.catalogue.candidate_withdrawn(candidate):
++            return False
++
++        return (
++            self.fixed.get(self.catalogue.candidate_package(candidate), candidate)
++            == candidate
++        )
++
++    def choose_version(
++        self, package: Package, version_range: RangeProtocol[int]
++    ) -> int | None:
++        """Choose a candidate or explain why its current context cannot proceed."""
++        if not self.is_ready(package):
++            self.block_context(package)
++            return None
++        if isinstance(package, str):
++            # Cached dependencies need incompatibilities before excluding candidates.
++            token = self.candidate_token(package, version_range)
++            # Choice probes can repeat before metadata is prepared.
++            if token is not None and self.on_candidate_considered is not None:
++                self.on_candidate_considered(self.items[token])
++            return token
++        if isinstance(package, PermissionProxy):
++            return next(
++                (
++                    v
++                    for v in self.proofs.get(package, {}).values()
++                    if v in version_range
++                ),
++                None,
++            )
++        return self.prepare_candidate(package, version_range)
++
++    def candidate_token(
++        self, package: str, version_range: RangeProtocol[int]
++    ) -> int | None:
++        """Choose an identity without listing an already registered exact domain."""
++        allowed = self.constraints.get(package, self.catalogue.full_range())
++        if self.preference.exact_dependencies is not None:
++            for token in self.package_tokens.get(package, ()):
++                if version_range == Range.singleton(token):
++                    candidate = self.items[token]
++                    if (
++                        candidate in self.catalogue.facts
++                        and self.catalogue.facts[candidate] is None
++                    ):
++                        self._reject_candidates(package, [token])
++                        return None
++                    return (
++                        token
++                        if self.eligible(candidate)
++                        and self.catalogue.range_contains(candidate, allowed)
++                        else None
++                    )
++
++        rejected: list[int] = []
++        chosen: int | None = None
++        for candidate in self.catalogue.ordered(package, allowed):
++            if not self.eligible(candidate):
++                continue
++            token = self.identify(candidate)
++            if token not in version_range:
++                continue
++            if (
++                candidate in self.catalogue.facts
++                and self.catalogue.facts[candidate] is None
++            ):
++                rejected.append(token)
++                continue
++            chosen = token
++            break
++        if rejected:
++            self._reject_candidates(package, rejected)
++        return chosen
++
++    def _reject_candidates(self, package: str, tokens: Sequence[int]) -> None:
++        """Publish final catalogue rejections before skipping their identities."""
++        self.pending.append(
++            Incompatibility(
++                [Term(package, Range[int].from_versions(tokens), positive=True)],
++                cause=IncompatibilityCause.NO_VERSIONS,
++            )
++        )
++
++    def prepare_candidate(
++        self, package: MetadataProxy, version_range: RangeProtocol[int]
++    ) -> int | None:
++        """Prepare admitted metadata and apply the host's selected-plan policy."""
++        token = package.candidate
++        candidate = self.items[token]
++        if self.catalogue.candidate_withdrawn(candidate):
++            selected = {
++                name: self.items[value]
++                for name, value in self.decisions.items()
++                if isinstance(name, str)
++            }
++            status = self.preference.check(candidate, selected, self.scope)
++            if status is not PreparationStatus.ALLOWED:
++                self.incomplete |= status is PreparationStatus.INCOMPLETE
++                if (
++                    status is not PreparationStatus.INCOMPLETE
++                    or not self.preference.refresh_incomplete
++                ):
++                    self.block_context(package)
++                return None
++
++        data = self.catalogue.prepare(candidate)
++        if data is None:
++            if candidate in self.catalogue.unavailable:
++                self.incomplete = True
++            else:
++                rejected_versions = Range[int].full()
++                self.pending.append(
++                    Incompatibility(
++                        [Term(package, rejected_versions, positive=True)],
++                        cause=IncompatibilityCause.NO_VERSIONS,
++                    )
++                )
++            return None
++
++        if self._metadata_is_admitted is not None:
++            selected = {
++                name: self.items[value]
++                for name, value in self.decisions.items()
++                if isinstance(name, str)
++            }
++            if not self._metadata_is_admitted(candidate, selected):
++                self.block_context(package)
++                return None
++
++        return 0 if 0 in version_range else None
 +
 +    def has_satisfying_version(
-+        self, package: PackageType, version_range: RangeProtocol[CandidateType]
++        self, package: Package, version_range: RangeProtocol[int]
 +    ) -> bool:
-+        """Probe native matches without recording a decision."""
-+        requirements = self.active_requirements()
-+        return package in requirements and any(
-+            candidate in version_range
-+            for candidate in self.host.find_matches(
-+                package, requirements, self.incompatibilities(package, version_range)
-+            )
-+        )
++        """Probe the same domain used by candidate selection."""
++        return self.choose_version(package, version_range) is not None
 +
 +    def get_dependencies(
-+        self, package: PackageType, version: CandidateType
-+    ) -> Mapping[PackageType, RangeProtocol[CandidateType]]:
-+        """Cache original declarations and their conjunctive restrictions."""
-+        del package
-+        candidate = version
-+        if candidate not in self.dependency_ranges:
-+            requirements = tuple(self.host.get_dependencies(candidate))
-+            dependencies: dict[PackageType, PredicateRange[CandidateType]] = {}
-+            for requirement in requirements:
-+                child = self.host.identify(requirement)
-+                allowed = self.restriction(requirement)
-+                dependencies[child] = (
-+                    dependencies.get(child, PredicateRange.full()) & allowed
-+                )
-+            self.dependencies[candidate] = requirements
-+            self.dependency_ranges[candidate] = dependencies
-+            self.active = None
-+            self.support_order = None
-+        return self.dependency_ranges[candidate]
-+
-+    def prioritize(
-+        self,
-+        package: PackageType,
-+        version_range: RangeProtocol[CandidateType],
-+        conflict_counts: Mapping[PackageType, int],
-+        culprit_counts: Mapping[PackageType, int] | None = None,
-+    ) -> tuple[int, bool, PriorityType]:
-+        """Apply shared conflict feedback before native package preference."""
-+        del version_range
-+        tier = compute_tier(
-+            package,
-+            conflict_counts.get(package, 0),
-+            culprit_counts.get(package, 0) if culprit_counts is not None else 0,
-+            culprit_counts,
++        self, package: Package, version: int
++    ) -> dict[Package, Range[int]]:
++        """Return dependencies for a candidate or selected permission reason."""
++        if isinstance(package, str):
++            candidate = self.items[version]
++            result: dict[Package, Range[int]] = {
++                MetadataProxy(version): Range.singleton(0)
++            }
++            if self.catalogue.candidate_withdrawn(candidate):
++                result[PermissionProxy(version)] = Range.full()
++            base = self.catalogue.candidate_base(candidate)
++            if base != package:
++                # The extra must bind to the same version text and withdrawn files.
++                underlying = self.catalogue.base_candidate(candidate)
++                result[base] = Range.singleton(self.identify(underlying))
++            return result
++        if isinstance(package, PermissionProxy):
++            support = next(s for s, v in self.proofs[package].items() if v == version)
++            return {
++                self.catalogue.candidate_package(self.items[i]): Range.singleton(i)
++                for i in support
++            }
++        token = package.candidate
++        cached = self._metadata_dependencies.get(token)
++        if cached is not None:
++            return cached.copy()
++        data = self.catalogue.facts[self.items[token]]
++        assert data is not None
++        dependencies = encode_dependencies(
++            self.catalogue,
++            self.items[token],
++            data.dependencies,
++            self.preference.exact_dependencies,
++            self.encode_range,
++            self.encode_candidate,
 +        )
-+        return (
-+            tier,
-+            package not in self.failed_queries,
-+            self.host.preference(package, self.active_requirements()),
-+        )
++        # Metadata and registered identities keep their meaning within this query.
++        encoded: dict[Package, Range[int]] = dict(dependencies.items())
++        self._metadata_dependencies[token] = encoded
++        return encoded.copy()
 +
-+    @override
-+    def is_ready(self, package: PackageType) -> bool:
-+        """Refresh priorities while active native declarations can still change."""
-+        del package
-+        return False
-+
-+    def widen_decision(self, package: PackageType, version: CandidateType) -> None:
-+        """Keep dependency clauses tied to exact candidate identities."""
++    def widen_decision(self, package: Package, version: int) -> None:
++        """Keep incompatibilities specific to a candidate or permission reason."""
 +        del package, version
 +
-+    def availability_generation(self) -> int:
-+        """Let the resolver defer empty queries until pending declarations are read."""
-+        return len(self.dependencies)
++    def select(self) -> dict[str, CandidateType]:
++        """Resolve the catalogue with all admission proofs and one shared budget."""
++        return self.preference.run(self.run_query)
 +
-+    def causes(self) -> Iterable[RequirementCause[RequirementType, CandidateType]]:
-+        """Expose original declarations retained for host error rendering."""
-+        yield from (
-+            RequirementCause[RequirementType, CandidateType](requirement, None)
-+            for requirement in self.roots
++    def new_query(
++        self, scope: PreferenceScope[CandidateType]
++    ) -> PreferenceProvider[CandidateType, RangeType, PinnedRequirementType]:
++        """Share candidate identities and host policies with a scoped query."""
++        query = PreferenceProvider(
++            self.preference,
++            scope=scope,
++            metadata_is_admitted=self._metadata_is_admitted,
++            query_is_complete=self._query_is_complete,
++            resolver_factory=self.resolver_factory,
++            preferred_candidate=self.preferred_candidate,
++            on_candidate_considered=self.on_candidate_considered,
 +        )
-+        for candidate, requirements in self.dependencies.items():
-+            yield from (
-+                RequirementCause[RequirementType, CandidateType](requirement, candidate)
-+                for requirement in requirements
-+            )
 +
-+    def failure_causes(
-+        self, derivation: Incompatibility[PackageType, CandidateType]
-+    ) -> list[RequirementCause[RequirementType, CandidateType]]:
-+        """Recover original declarations represented by the final failure proof."""
-+        selected = select_dependency_causes(
-+            external_clauses(derivation, left_first=False)
++        # Scopes use one candidate snapshot and retain each choice's token identity.
++        query.items = self.items
++        query.identities = self.identities
++        query.package_tokens = self.package_tokens
++
++        return query
++
++    def run_query(
++        self, scope: PreferenceScope[CandidateType]
++    ) -> dict[str, CandidateType]:
++        """Resolve under one set of restrictions with the shared work budget."""
++        query = self.new_query(scope)
++        solver = (
++            Resolver(query, max_iterations=self.preference.remaining)
++            if self.resolver_factory is None
++            else self.resolver_factory(query, self.preference.remaining)
 +        )
-+        result: list[RequirementCause[RequirementType, CandidateType]] = []
-+        seen: set[tuple[RequirementType, CandidateType | None]] = set()
-+        for edge in selected:
-+            for cause in self.causes():
-+                if self.host.identify(cause.requirement) != edge.package:
-+                    continue
-+                if edge.parent is None:
-+                    if cause.parent is not None:
-+                        continue
-+                elif (
-+                    cause.parent is None
-+                    or self.host.identify(cause.parent) != edge.parent
-+                    or edge.parent_range is None
-+                    or not edge.parent_range.__contains__(cause.parent)
-+                ):
-+                    continue
-+
-+                key = cause.requirement, cause.parent
-+                if key not in seen:
-+                    seen.add(key)
-+                    result.append(cause)
-+        packages = {self.host.identify(cause.requirement) for cause in result}
-+        for requirement in self.roots:
-+            key = requirement, None
-+            if self.host.identify(requirement) in packages and key not in seen:
-+                seen.add(key)
-+                result.append(
-+                    RequirementCause[RequirementType, CandidateType](requirement, None)
++        roots: dict[Package, Range[int]] = {
++            name: query.encode_range(name, allowed)
++            for name, allowed in query.roots.items()
++        }
++        try:
++            selected = solver.resolve(roots)
++        except ResolutionTerminatedError:
++            raise
++        except ResolutionError as exc:
++            if (
++                query.incomplete
++                or exc.incompatibility is None
++                or (
++                    self._query_is_complete is not None
++                    and not self._query_is_complete(scope)
 +                )
-+        return result
-diff --git a/src/pip/_vendor/nab_provider/candidate_stream.py b/src/pip/_vendor/nab_provider/candidate_stream.py
++            ):
++                message = "yanked dependency resolution is incomplete"
++                if query.incomplete:
++                    message += ": " + self.catalogue.unavailable_reason
++                raise IncompletePreferenceError(message) from exc
++            raise
++        finally:
++            self.preference.record_solver_stats(solver.stats)
++            self.preference.spend(solver.stats.rounds)
++        return {
++            name: self.items[token]
++            for name, token in selected.items()
++            if isinstance(name, str)
++        }
+diff --git a/src/pip/_vendor/nab_provider/prepared_resolution.py b/src/pip/_vendor/nab_provider/prepared_resolution.py
 new file mode 100644
 --- /dev/null
-+++ b/src/pip/_vendor/nab_provider/candidate_stream.py
-@@ -0,0 +1,57 @@
-+"""Visit lazy candidate groups while retaining an optional incumbent."""
++++ b/src/pip/_vendor/nab_provider/prepared_resolution.py
+@@ -0,0 +1,469 @@
++"""Resolve prepared catalogues and return their selected dependency graph."""
 +
 +from __future__ import annotations
 +
-+from collections.abc import Callable, Collection, Hashable, Iterable, Iterator
-+from typing import TypeVar
++from collections.abc import Hashable, Mapping
++from itertools import islice
++from typing import TYPE_CHECKING, Generic, TypeVar
 +
-+__all__ = ["CandidateGroupRejectedError", "ordered_candidates"]
++from nab_resolver.errors import (
++    ResolutionError,
++    ResolutionInvariantError,
++    ResolutionLimitError,
++    ResolutionTerminatedError,
++)
++from nab_resolver.ranges import Range
++from nab_resolver.resolver import Resolver
++from nab_resolver.result import IncompleteSelectionError, walk_selected
 +
-+CandidateType = TypeVar("CandidateType")
-+GroupType = TypeVar("GroupType", bound=Hashable)
++from ._compat import override
++from .preference_provider import MetadataProxy, Package, PreferenceProvider
++
++if TYPE_CHECKING:
++    from collections.abc import Callable, Collection, Iterable, Iterator, Sequence
++
++    from nab_resolver.resolver import ResolverProvider, ResolverStats
++    from nab_resolver.types import RangeProtocol
++
++    from .preference import PreferenceCatalogue, PreferenceSearch
++
++__all__ = ["PreparedResolution", "PreparedSolution"]
++
++CandidateType = TypeVar("CandidateType", bound=Hashable)
++RangeType = TypeVar("RangeType")
++PinnedRequirementType = TypeVar("PinnedRequirementType")
 +
 +
-+class CandidateGroupRejectedError(Exception):
-+    """Preparation established that no alternate in this group should be read."""
++class PreparedSolution(Generic[CandidateType]):
++    """Selected candidate identities, dependency edges and admission reasons."""
++
++    __slots__ = ("admission_sources", "candidates", "edges", "roots")
++
++    def __init__(
++        self,
++        candidates: dict[str, CandidateType],
++        edges: tuple[tuple[str, str], ...],
++        roots: tuple[str, ...],
++        admission_sources: dict[str, tuple[str, ...]],
++    ) -> None:
++        """Retain one exact selected model and its host-facing graph."""
++        self.candidates = candidates
++        self.edges = edges
++        self.roots = roots
++        self.admission_sources = admission_sources
 +
 +
-+def ordered_candidates(
-+    groups: Iterable[tuple[GroupType, Callable[[], CandidateType | None]]],
-+    *,
-+    incumbent: tuple[GroupType, CandidateType] | None,
-+    prefer_incumbent: bool,
-+    precedes: Callable[[GroupType, GroupType], bool],
-+    excluded: Collection[CandidateType] = (),
-+) -> Iterator[CandidateType]:
-+    """Yield the first usable candidate in each group, with native incumbent order."""
-+    if incumbent is not None and incumbent[1] in excluded:
-+        incumbent = None
-+    seen: set[GroupType] = set()
-+    if incumbent is not None and prefer_incumbent:
-+        yield incumbent[1]
-+        seen.add(incumbent[0])
++class PreparedResolution(Generic[CandidateType, RangeType, PinnedRequirementType]):
++    """Keep one prepared snapshot and its preference-query lifetime together."""
 +
-+    for group, prepare in groups:
-+        if group in seen:
-+            continue
++    def __init__(
++        self,
++        provider: PreferenceProvider[CandidateType, RangeType, PinnedRequirementType],
++        *,
++        metadata_admission: Callable[[CandidateType, Mapping[str, CandidateType]], bool]
++        | None = None,
++        preferred_candidate: Callable[[str], CandidateType | None] | None = None,
++        try_live: bool = False,
++    ) -> None:
++        """Own query wiring while the supplied provider retains its facts."""
++        self.provider = provider
++        self.metadata_admission = metadata_admission
++        self.preferred_candidate = preferred_candidate
++        self.try_live = try_live
++        if preferred_candidate is not None:
++            provider.preferred_candidate = preferred_candidate
 +
-+        if (
-+            incumbent is not None
-+            and incumbent[0] not in seen
-+            and precedes(incumbent[0], group)
-+        ):
-+            yield incumbent[1]
-+            seen.add(incumbent[0])
++    @classmethod
++    def from_catalogue(  # noqa: PLR0913 - preserve independent public host hooks
++        cls,
++        catalogue: PreferenceCatalogue[CandidateType, RangeType, PinnedRequirementType],
++        roots: Mapping[str, RangeType],
++        input_pins: Sequence[PinnedRequirementType],
++        constraints: Mapping[str, RangeType],
++        *,
++        refresh_incomplete: bool = False,
++        selection_policy: Callable[[Mapping[str, CandidateType]], bool] | None = None,
++        preferred_candidate: Callable[[str], CandidateType | None] | None = None,
++        on_candidate_considered: Callable[[CandidateType], None] | None = None,
++        exact_dependencies: Callable[[CandidateType], Sequence[CandidateType]]
++        | None = None,
++        max_rounds: int | None = None,
++        try_live: bool = False,
++    ) -> PreparedResolution[CandidateType, RangeType, PinnedRequirementType]:
++        """Use the shared query engine with the host's preparation and policy.
 +
++        ``try_live`` first excludes withdrawn choices, returning to admission
++        proofs when a matching exact pin could permit one.
++        """
++        admission = (
++            None
++            if selection_policy is None
++            else _SelectedAdmission(catalogue, roots, selection_policy)
++        )
++        provider = PreferenceProvider.from_catalogue(
++            catalogue,
++            roots,
++            input_pins,
++            constraints,
++            refresh_incomplete=refresh_incomplete,
++            metadata_is_admitted=admission,
++            on_candidate_considered=on_candidate_considered,
++            exact_dependencies=exact_dependencies,
++        )
++        if max_rounds is not None:
++            provider.preference.remaining = max_rounds
++        session = cls(
++            provider,
++            metadata_admission=admission,
++            preferred_candidate=preferred_candidate,
++            try_live=try_live,
++        )
++        if refresh_incomplete:
++            provider.resolver_factory = session._new_resolver
++        return session
++
++    @property
++    def stats(self) -> ResolverStats[Hashable]:
++        """Return cumulative work across preferred and ordinary queries."""
++        return self.provider.stats
++
++    @property
++    def remaining_rounds(self) -> int:
++        """Return the solver rounds remaining across this session's queries."""
++        return self.provider.preference.remaining
++
++    def _check_round_budget(self) -> None:
++        """Stop before another host callback when the cumulative budget is spent."""
++        if self.remaining_rounds <= 0:
++            message = "live preference analysis is incomplete: search limit reached"
++            raise ResolutionLimitError(message)
++
++    def _new_resolver(
++        self, provider: ResolverProvider[Package, int], limit: int
++    ) -> Resolver[Package, int]:
++        """Refresh deferred queries only when this snapshot gains a real fact."""
++        return Resolver(
++            provider,
++            max_iterations=limit,
++            availability_generation=lambda: len(self.provider.catalogue.facts),
++        )
++
++    def _try_preferred(self) -> dict[str, CandidateType] | None:
++        """Validate a disposable incumbent-only view without proving global absence."""
++        preferred = self.preferred_candidate
++        if preferred is None or not self.provider.roots:
++            return None
++
++        trial = _PreferredProvider(
++            self.provider.preference,
++            preferred,
++            metadata_is_admitted=self.metadata_admission,
++            on_candidate_considered=self.provider.on_candidate_considered,
++        )
++        if any(trial.preferred(package) is None for package in self.provider.roots):
++            return None
++
++        resolver = Resolver(trial, max_iterations=self.provider.preference.remaining)
++        roots: dict[Package, RangeProtocol[int]] = {
++            package: trial.encode_range(package, allowed)
++            for package, allowed in self.provider.roots.items()
++        }
 +        try:
-+            candidate = prepare()
-+        except CandidateGroupRejectedError:
-+            seen.add(group)
-+            continue
++            selected = resolver.try_resolve_preferred(roots, _PreferredTokens(trial))
++        except ResolutionTerminatedError:
++            raise
++        except ResolutionError:
++            return None
++        finally:
++            self.provider.preference.record_solver_stats(resolver.stats)
++            self.provider.preference.spend(resolver.stats.rounds)
 +
-+        if candidate is not None and candidate not in excluded:
-+            yield candidate
-+            seen.add(group)
++        if selected is None:
++            return None
++        return {
++            package: trial.items[token]
++            for package, token in selected.items()
++            if isinstance(package, str)
++        }
 +
-+    if incumbent is not None and incumbent[0] not in seen:
-+        yield incumbent[1]
++    def _try_live(self) -> dict[str, CandidateType] | None:
++        """Try live choices, yielding to admission proofs when an exact pin matters."""
++        self._check_round_budget()
++        trial = _LiveProvider(
++            self.provider.preference,
++            preferred_candidate=self.preferred_candidate,
++            on_candidate_considered=self.provider.on_candidate_considered,
++        )
++        trial.items = self.provider.items
++        trial.identities = self.provider.identities
++        trial.package_tokens = self.provider.package_tokens
++        resolver = self._new_resolver(trial, self.remaining_rounds)
++        try:
++            roots: dict[Package, Range[int]] = {
++                name: trial.encode_range(name, allowed)
++                for name, allowed in trial.roots.items()
++            }
++            pins = resolver.resolve(roots)
++        except _WithdrawalProofRequiredError:
++            return None
++        except ResolutionTerminatedError:
++            raise
++        except ResolutionError:
++            return None
++        finally:
++            self.provider.preference.record_solver_stats(resolver.stats)
++            self.provider.preference.spend(resolver.stats.rounds)
++
++        selected = {
++            name: trial.items[token]
++            for name, token in pins.items()
++            if isinstance(name, str)
++        }
++        if trial.incomplete:
++            return None
++        admission = self.metadata_admission
++        if admission is not None:
++            subjects: Iterable[CandidateType] = selected.values()
++            if isinstance(admission, _SelectedAdmission):
++                # A requested root validates the whole reachable model in one call.
++                subjects = (selected[name] for name in islice(self.provider.roots, 1))
++            if any(not admission(candidate, selected) for candidate in subjects):
++                return None
++        return selected
++
++    def solve(self) -> PreparedSolution[CandidateType]:
++        """Resolve once, retaining exact choices for host adoption and diagnostics."""
++        self._check_round_budget()
++        try:
++            selected = self._try_preferred()
++            if selected is None and self.try_live:
++                selected = self._try_live()
++            if selected is None:
++                selected = self.provider.select()
++        except ResolutionTerminatedError:
++            raise
++        except Exception:
++            self._check_round_budget()
++            raise
++        edges: list[tuple[str, str]] = []
++        for package, candidate in selected.items():
++            data = self.provider.catalogue.facts.get(candidate)
++            if data is None:
++                message = f"Selected candidate {candidate!r} has no prepared metadata"
++                raise ResolutionInvariantError(message)
++            edges.extend((package, child) for child in data.dependencies)
++
++        return PreparedSolution(
++            selected,
++            tuple(edges),
++            tuple(self.provider.roots),
++            self.provider.preference.explain(selected),
++        )
++
++
++class _WithdrawalProofRequiredError(Exception):
++    """An observed exact declaration can permit a withdrawn candidate."""
++
++
++class _LiveProvider(
++    PreferenceProvider[CandidateType, RangeType, PinnedRequirementType]
++):
++    """Keep metadata sequencing while trying live choices before admission proofs."""
++
++    def __init__(
++        self,
++        preference: PreferenceSearch[CandidateType, RangeType, PinnedRequirementType],
++        *,
++        preferred_candidate: Callable[[str], CandidateType | None] | None,
++        on_candidate_considered: Callable[[CandidateType], None] | None,
++    ) -> None:
++        super().__init__(
++            preference,
++            preferred_candidate=preferred_candidate,
++            on_candidate_considered=on_candidate_considered,
++        )
++        self.pins: Sequence[PinnedRequirementType] = self.input_pins
++
++    @override
++    def receive_decision_scan_hint(
++        self,
++        positive_ranges: Mapping[Package, RangeProtocol[int]],
++        decisions: Mapping[Package, int],
++    ) -> None:
++        self.positive = positive_ranges
++        self.decisions = decisions
++
++    @override
++    def is_ready(self, package: Package) -> bool:
++        """Live metadata needs no withdrawal-permission proof."""
++        del package
++        return True
++
++    @override
++    def eligible(self, candidate: CandidateType) -> bool:
++        if self.catalogue.candidate_withdrawn(candidate):
++            if any(self.catalogue.pin_allows(pin, candidate) for pin in self.pins):
++                raise _WithdrawalProofRequiredError
++            return False
++        return super().eligible(candidate)
++
++    @override
++    def get_dependencies(
++        self, package: Package, version: int
++    ) -> dict[Package, Range[int]]:
++        if not isinstance(package, MetadataProxy):
++            return super().get_dependencies(package, version)
++
++        data = self.catalogue.facts[self.items[package.candidate]]
++        assert data is not None
++        self.pins = (*self.input_pins, *data.pins)
++        try:
++            return super().get_dependencies(package, version)
++        finally:
++            self.pins = self.input_pins
++
++
++class _SelectedAdmission(Generic[CandidateType, RangeType, PinnedRequirementType]):
++    """Apply host admission to a complete selection of cached metadata."""
++
++    def __init__(
++        self,
++        catalogue: PreferenceCatalogue[CandidateType, RangeType, PinnedRequirementType],
++        roots: Mapping[str, RangeType],
++        selection_is_admitted: Callable[[Mapping[str, CandidateType]], bool],
++    ) -> None:
++        self.catalogue = catalogue
++        self.roots = roots
++        self.selection_is_admitted = selection_is_admitted
++
++    def _dependency_names(
++        self, _package: str, candidate: CandidateType
++    ) -> Collection[str] | None:
++        data = self.catalogue.facts.get(candidate)
++        return None if data is None else data.dependencies.keys()
++
++    def __call__(
++        self, candidate: CandidateType, selected: Mapping[str, CandidateType]
++    ) -> bool:
++        try:
++            reachable = {
++                name: choice
++                for name, choice, _ in walk_selected(
++                    self.roots, selected, self._dependency_names, depth_first=True
++                )
++            }
++        except IncompleteSelectionError:
++            return True
++
++        return candidate not in reachable.values() or self.selection_is_admitted(
++            reachable
++        )
++
++
++class _PreferredProvider(
++    PreferenceProvider[CandidateType, RangeType, PinnedRequirementType]
++):
++    """Offer one eligible incumbent per package only for a disposable SAT trial."""
++
++    def __init__(
++        self,
++        preference: PreferenceSearch[CandidateType, RangeType, PinnedRequirementType],
++        preferred: Callable[[str], CandidateType | None],
++        *,
++        metadata_is_admitted: Callable[
++            [CandidateType, Mapping[str, CandidateType]], bool
++        ]
++        | None,
++        on_candidate_considered: Callable[[CandidateType], None] | None = None,
++    ) -> None:
++        super().__init__(
++            preference,
++            metadata_is_admitted=metadata_is_admitted,
++            on_candidate_considered=on_candidate_considered,
++        )
++        self.read_preferred = preferred
++        self.preferred_choices: dict[str, CandidateType | None] = {}
++
++    def preferred(self, package: str) -> CandidateType | None:
++        if package not in self.preferred_choices:
++            candidate = self.read_preferred(package)
++            if candidate is not None and self.catalogue.candidate_withdrawn(candidate):
++                candidate = None
++            self.preferred_choices[package] = candidate
++        return self.preferred_choices[package]
++
++    @override
++    def receive_partial_solution_hint(
++        self,
++        positive_ranges: Mapping[Package, RangeProtocol[int]],
++        decisions: Mapping[Package, int],
++    ) -> None:
++        """Preferred validation queries directly instead of running a package scan."""
++        self.receive_decision_scan_hint(positive_ranges, decisions)
++
++    @override
++    def encode_range(self, package: str, allowed: RangeType) -> Range[int]:
++        candidate = self.preferred(package)
++        allowed = self.catalogue.intersect_ranges(
++            allowed, self.constraints.get(package, self.catalogue.full_range())
++        )
++        if candidate is None or not self.catalogue.range_contains(candidate, allowed):
++            return Range[int].empty()
++        return Range[int].singleton(self.identify(candidate))
++
++    @override
++    def choose_version(
++        self, package: Package, version_range: RangeProtocol[int]
++    ) -> int | None:
++        if not isinstance(package, str):
++            return super().choose_version(package, version_range)
++        candidate = self.preferred(package)
++        if candidate is None:
++            return None
++        token = self.identify(candidate)
++        if token not in version_range:
++            return None
++
++        # A refused trial still considered its real candidate choices.
++        if self.on_candidate_considered is not None:
++            self.on_candidate_considered(candidate)
++        return token
++
++
++class _PreferredTokens(
++    Mapping[Package, int], Generic[CandidateType, RangeType, PinnedRequirementType]
++):
++    """Discover expected tokens lazily as the incumbent model grows."""
++
++    def __init__(
++        self,
++        provider: _PreferredProvider[CandidateType, RangeType, PinnedRequirementType],
++    ) -> None:
++        self.provider = provider
++
++    @override
++    def __getitem__(self, package: Package) -> int:
++        if (
++            isinstance(package, MetadataProxy)
++            and package.candidate in self.provider.items
++        ):
++            return 0
++        if isinstance(package, str):
++            candidate = self.provider.preferred(package)
++            if candidate is not None:
++                return self.provider.identify(candidate)
++        raise KeyError(package)
++
++    @override
++    def __iter__(self) -> Iterator[Package]:
++        for package, candidate in self.provider.preferred_choices.items():
++            if candidate is not None:
++                yield package
++                yield MetadataProxy(self.provider.identify(candidate))
++
++    @override
++    def __len__(self) -> int:
++        return 2 * sum(
++            candidate is not None
++            for candidate in self.provider.preferred_choices.values()
++        )
+diff --git a/src/pip/_vendor/nab_provider/value.py b/src/pip/_vendor/nab_provider/value.py
+--- a/src/pip/_vendor/nab_provider/value.py
++++ b/src/pip/_vendor/nab_provider/value.py
+@@ -5,6 +5,8 @@
+ import dataclasses
+ from reprlib import recursive_repr
+ from typing import TYPE_CHECKING, ClassVar, TypeVar
++
++from nab_resolver.values import SlottedValue
+ 
+ from ._compat import override
+ 
+@@ -23,7 +25,7 @@
+     "replace",
+ ]
+ 
+-_T = TypeVar("_T")
++ValueType = TypeVar("ValueType")
+ 
+ 
+ class FactoryDefault:
+@@ -40,7 +42,9 @@
+ FACTORY = FactoryDefault()
+ 
+ 
+-def factory_value(value: _T | FactoryDefault, factory: Callable[[], _T]) -> _T:
++def factory_value(
++    value: ValueType | FactoryDefault, factory: Callable[[], ValueType]
++) -> ValueType:
+     """Allocate an omitted default, retaining explicitly supplied values."""
+     if isinstance(value, FactoryDefault):
+         return factory()
+@@ -121,7 +125,7 @@
+     raise TypeError(msg)
+ 
+ 
+-def replace(value: _T, /, **changes: object) -> _T:
++def replace(value: ValueType, /, **changes: object) -> ValueType:
+     """Reconstruct a record, retaining omitted constructor arguments."""
+     if isinstance(value, Record):
+         names = field_names(value)
+@@ -148,40 +152,5 @@
+         elif name not in changes:
+             changes[name] = getattr(value, name)
+ 
+-    constructor: Callable[..., _T] = type(value)
++    constructor: Callable[..., ValueType] = type(value)
+     return constructor(**changes)
+-
+-
+-class SlottedValue:
+-    """Equality, hashing and repr over a subclass's declared fields.
+-
+-    ``__match_args__`` sets field order. Equality checks the exact class.
+-    Subclasses using ``cached_property`` retain a ``__dict__``.
+-    """
+-
+-    __slots__ = ()
+-    __match_args__: ClassVar[tuple[str, ...]]
+-
+-    @override
+-    def __eq__(self, other: object) -> bool:
+-        """Compare every field against an instance of the same class."""
+-        if other.__class__ is not self.__class__:
+-            return NotImplemented
+-
+-        names = self.__match_args__
+-        return tuple(getattr(self, name) for name in names) == tuple(
+-            getattr(other, name) for name in names
+-        )
+-
+-    @override
+-    def __hash__(self) -> int:
+-        """Hash every field together."""
+-        return hash(tuple(getattr(self, name) for name in self.__match_args__))
+-
+-    @override
+-    def __repr__(self) -> str:
+-        """Return the class name and every field, in declaration order."""
+-        fields = ", ".join(
+-            f"{name}={getattr(self, name)!r}" for name in self.__match_args__
+-        )
+-        return f"{type(self).__qualname__}({fields})"
+diff --git a/src/pip/_vendor/nab_provider/version_candidates.py b/src/pip/_vendor/nab_provider/version_candidates.py
+new file mode 100644
+--- /dev/null
++++ b/src/pip/_vendor/nab_provider/version_candidates.py
+@@ -0,0 +1,241 @@
++"""PEP 440 candidate identities and exact-pin rules for prepared catalogues."""
++
++from __future__ import annotations
++
++from abc import ABC, abstractmethod
++from typing import TYPE_CHECKING, ClassVar, Final, Generic, TypeVar
++
++from .value import HashableRecord, Record
++
++if TYPE_CHECKING:
++    from collections.abc import Sequence
++
++    from packaging.ranges import VersionRange
++    from packaging.requirements import Requirement
++    from packaging.version import Version
++
++__all__ = [
++    "PreparedVersionCatalogue",
++    "VersionCandidate",
++    "VersionCandidateData",
++    "VersionCatalogue",
++    "is_pin",
++]
++
++
++class VersionCandidate(HashableRecord):
++    """A version-text identity whose metadata may require withdrawal permission.
++
++    Subclasses retain the ``(package, version, *, withdrawn)`` constructor.
++    """
++
++    __record_fields__: ClassVar[tuple[str, ...] | None]
++    __slots__ = __record_fields__ = ("package", "version", "withdrawn", "label")
++    __record_init_fields__: ClassVar[tuple[str, ...] | None] = (
++        "package",
++        "version",
++        "withdrawn",
++    )
++    __match_args__ = ("package", "version", "withdrawn")
++
++    package: Final[str]
++    version: Final[Version]
++    withdrawn: Final[bool]
++    label: Final[str]
++
++    def __init__(self, package: str, version: Version, *, withdrawn: bool) -> None:
++        """Retain the text distinguishing numerically equal artifact versions."""
++        self.package = package
++        self.version = version
++        self.withdrawn = withdrawn
++        self.label = str(version)
++
++    @property
++    def base(self) -> str:
++        """Return the project identifier for a candidate without an extras proxy."""
++        return self.package
++
++
++class VersionCandidateData(Record):
++    """Prepared dependency ranges and their original exact-pin declarations."""
++
++    __slots__ = __match_args__ = ("dependencies", "pins")
++
++    dependencies: dict[str, VersionRange]
++    pins: tuple[Requirement, ...]
++
++    def __init__(
++        self, dependencies: dict[str, VersionRange], pins: tuple[Requirement, ...]
++    ) -> None:
++        """Retain dependencies and their original admission declarations."""
++        self.dependencies = dependencies
++        self.pins = pins
++
++
++def is_pin(requirement: Requirement) -> bool:
++    """Recognize original exact equality syntax, including redundant conjuncts."""
++    return any(
++        item.operator == "==="
++        or (item.operator == "==" and not item.version.endswith(".*"))
++        for item in requirement.specifier
++    )
++
++
++CandidateType = TypeVar("CandidateType", bound=VersionCandidate)
++
++
++class VersionCatalogue(ABC, Generic[CandidateType]):
++    """Apply PEP 440 ranges and original pin syntax to prepared candidate identities."""
++
++    @staticmethod
++    def candidate_package(candidate: CandidateType) -> str:
++        """Return the resolver package identifier."""
++        return candidate.package
++
++    @staticmethod
++    def candidate_base(candidate: CandidateType) -> str:
++        """Return the project without an extras proxy."""
++        return candidate.base
++
++    @staticmethod
++    def candidate_label(candidate: CandidateType) -> str:
++        """Return the original version text."""
++        return candidate.label
++
++    @staticmethod
++    def candidate_withdrawn(candidate: CandidateType) -> bool:
++        """Return whether metadata requires withdrawal permission."""
++        return candidate.withdrawn
++
++    range_type: ClassVar[type[VersionRange]]
++
++    def full_range(self) -> VersionRange:
++        """Return unconstrained bounds in the host range namespace."""
++        return self.range_type.full()
++
++    @staticmethod
++    def intersect_ranges(left: VersionRange, right: VersionRange) -> VersionRange:
++        """Intersect bounds in the host range namespace."""
++        return left & right
++
++    @staticmethod
++    def range_contains(candidate: CandidateType, allowed: VersionRange) -> bool:
++        """Test the candidate against the host range."""
++        return candidate.version in allowed
++
++    def pin_allows(self, pin: Requirement, candidate: CandidateType) -> bool:
++        """Match the original pin against the candidate in its host namespace."""
++        return self.pin_project(pin) == candidate.base and pin.specifier.contains(
++            candidate.version, prereleases=True
++        )
++
++    @staticmethod
++    @abstractmethod
++    def pin_project(pin: Requirement) -> str:
++        """Normalize the project named by an original pin in the host namespace."""
++        ...
++
++    @staticmethod
++    @abstractmethod
++    def base_name(package: str) -> str:
++        """Remove the host's extras proxy from a package identifier."""
++        ...
++
++    @staticmethod
++    def base_candidate(candidate: CandidateType) -> CandidateType:
++        """Construct the same candidate type for its base project."""
++        return type(candidate)(
++            candidate.base, candidate.version, withdrawn=candidate.withdrawn
++        )
++
++    def candidate_prereleases(self, package: str) -> bool | None:
++        """Return the host's explicit prerelease policy, or automatic selection."""
++        del package
++        return None
++
++    def order_candidate_batch(
++        self, package: str, candidates: Sequence[CandidateType]
++    ) -> list[CandidateType]:
++        """Order a release batch, retaining equal-version file order."""
++        del package
++        return sorted(candidates, key=lambda candidate: candidate.version, reverse=True)
++
++    def order_candidates(
++        self,
++        package: str,
++        allowed: VersionRange,
++        choices: Sequence[CandidateType],
++    ) -> list[CandidateType]:
++        """Order live and withdrawn release batches using the host's policy."""
++        result: list[CandidateType] = []
++        prereleases = self.candidate_prereleases(package)
++        for withdrawn in (False, True):
++            remaining = [
++                candidate for candidate in choices if candidate.withdrawn == withdrawn
++            ]
++            while remaining:
++                accepted = list(
++                    allowed.filter(
++                        remaining,
++                        key=lambda candidate: candidate.version,
++                        prereleases=prereleases,
++                    )
++                )
++                if not accepted:
++                    break
++
++                # Automatic prerelease fallback is reconsidered after each batch.
++                result.extend(self.order_candidate_batch(package, accepted))
++                exhausted = set(accepted)
++                remaining = [
++                    candidate for candidate in remaining if candidate not in exhausted
++                ]
++        return result
++
++
++CandidateDataType = TypeVar("CandidateDataType", bound=VersionCandidateData)
++
++
++class PreparedVersionCatalogue(
++    VersionCatalogue[CandidateType], ABC, Generic[CandidateType, CandidateDataType]
++):
++    """Retain candidate lists and append-only metadata facts for one resolution."""
++
++    def __init__(self, *, unavailable_reason: str) -> None:
++        """Start one empty snapshot and its unavailable-read explanation."""
++        self.candidates: dict[str, tuple[CandidateType, ...]] = {}
++        self.facts: dict[CandidateType, CandidateDataType | None] = {}
++        self.unavailable: set[CandidateType] = set()
++        self.missing_listings: set[str] = set()
++        self.unavailable_reason = unavailable_reason
++
++    def choices(self, package: str) -> tuple[CandidateType, ...]:
++        """Reuse a complete listing without rereading the host's source."""
++        cached = self.candidates.get(package)
++        if cached is None:
++            cached = tuple(dict.fromkeys(self.read_choices(package)))
++            self.candidates[package] = cached
++        return cached
++
++    @abstractmethod
++    def read_choices(self, package: str) -> Sequence[CandidateType]:
++        """Read stable candidate identities without preparing their metadata."""
++        ...
++
++    def prepare(self, candidate: CandidateType) -> CandidateDataType | None:
++        """Cache final metadata outcomes while keeping unavailable reads unresolved."""
++        if candidate in self.facts:
++            return self.facts[candidate]
++        if candidate in self.unavailable:
++            return None
++
++        data = self.read_candidate(candidate)
++        # An unavailable read cannot certify that this candidate is rejected.
++        if candidate not in self.unavailable:
++            self.facts[candidate] = data
++        return data
++
++    @abstractmethod
++    def read_candidate(self, candidate: CandidateType) -> CandidateDataType | None:
++        """Prepare metadata or record why a read remains unavailable."""
++        ...
