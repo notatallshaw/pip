@@ -134,6 +134,7 @@ def test_metadata_only_source_checks_a_different_parent_hash(
         if request["REQUEST_METHOD"] == "GET" and not request.get("HTTP_RANGE")
     ]
     assert len(whole_downloads) <= 1
+    assert "Nab source-domain restart" not in result.stdout
     if not correct_hash:
         assert "THESE PACKAGES DO NOT MATCH THE HASHES" in result.stderr
         assert "sha512" in result.stderr
@@ -184,6 +185,7 @@ def test_constraint_url_fragment_hash_is_checked(
 
     if correct_hash:
         script.assert_installed(dep="1")
+        assert "Nab source-domain restart" not in result.stdout
         script.pip("check")
     else:
         assert "THESE PACKAGES DO NOT MATCH THE HASHES" in result.stderr
@@ -284,6 +286,7 @@ def test_selected_dependency_fragment_is_checked(
 
     if correct_hash:
         script.assert_installed(app="1", dep="1")
+        assert "Nab source-domain restart" not in result.stdout
         script.pip("check")
     else:
         assert "THESE PACKAGES DO NOT MATCH THE HASHES" in result.stderr

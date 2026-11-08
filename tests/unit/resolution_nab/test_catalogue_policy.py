@@ -1,23 +1,20 @@
 """Apply pip's upgrade and dependency policies at the catalogue boundary."""
 
 from io import BytesIO
-from pathlib import Path
 
 import pytest
 
 from pip._vendor.packaging.utils import canonicalize_name
 from pip._vendor.packaging.version import Version
 
-from pip._internal.index.package_finder import PackageFinder
 from pip._internal.metadata import BaseDistribution, MemoryWheel
 from pip._internal.metadata.importlib import Distribution
 from pip._internal.models.link import Link
-from pip._internal.models.search_scope import SearchScope
 from pip._internal.req.constructors import install_req_from_line
 from pip._internal.req.req_install import InstallRequirement
 from pip._internal.resolution.nab.candidates import LinkCandidate
+from pip._internal.resolution.nab.catalogue import PipCatalogue
 from pip._internal.resolution.nab.factory import Factory
-from pip._internal.resolution.nab.host import PipHost
 
 from tests.lib.wheel import make_wheel
 
@@ -34,27 +31,16 @@ from tests.lib.wheel import make_wheel
     ],
 )
 def test_upgrade_policy_uses_requested_base_names(
-    factory: Factory,
-    finder: PackageFinder,
-    tmp_path: Path,
-    strategy: str,
-    requested: list[str],
-    package: str,
-    expected: bool,
+    factory: Factory, strategy: str, requested: list[str], package: str, expected: bool
 ) -> None:
-    installed = make_wheel("probe", "1").as_distribution("probe")
-    factory._installed_dists[canonicalize_name("probe")] = installed
-    make_wheel("probe", "2").save_to_dir(tmp_path)
-    finder.search_scope = SearchScope([str(tmp_path)], [], False)
     collected = factory.collect_root_requirements(
         [install_req_from_line(item, user_supplied=True) for item in requested]
     )
-    host = PipHost(
+    catalogue = PipCatalogue(
         factory, collected, ignore_dependencies=False, upgrade_strategy=strategy
     )
-    requirement = list(factory.make_requirements_from_spec(package, None))[0]
-    choices = host.find_matches(package, {package: [requirement]}, {})
-    assert str(next(iter(choices)).version) == ("2" if expected else "1")
+
+    assert catalogue.eligible_for_upgrade(package) is expected
 
 
 @pytest.mark.parametrize("ignore_dependencies", [False, True])
@@ -89,14 +75,14 @@ def test_no_deps_preserves_requires_python(
         name=canonicalize_name("probe"),
         version=Version("1"),
     )
-    host = PipHost(
+    catalogue = PipCatalogue(
         factory,
         factory.collect_root_requirements([]),
         ignore_dependencies=ignore_dependencies,
         upgrade_strategy="to-satisfy-only",
     )
 
-    names = {requirement.name for requirement in host.get_dependencies(candidate)}
+    names = {requirement.name for requirement in catalogue.get_dependencies(candidate)}
 
     assert "<Python from Requires-Python>" in names
     assert ("child" in names) is not ignore_dependencies

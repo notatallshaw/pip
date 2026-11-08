@@ -21,7 +21,7 @@ def test_catalogue_resolves_native_extras_and_python_requirements(
         ),
     )
     app.save_to(script.scratch_path / "app-1.0-py3-none-any.whl")
-    script.pip(
+    result = script.pip(
         "install",
         "--ignore-installed",
         "--no-index",
@@ -29,6 +29,7 @@ def test_catalogue_resolves_native_extras_and_python_requirements(
         script.scratch_path,
         requirement,
     )
+    assert "Nab catalogue success" in result.stdout
     script.assert_installed(app="1.0", dep="1.0" if "[" in requirement else "2.0")
 
 
@@ -38,7 +39,7 @@ def test_catalogue_preserves_base_constraints_with_extras(
     create_basic_wheel_for_package(script, "dep", "1.0")
     create_basic_wheel_for_package(script, "dep", "2.0")
     script.scratch_path.joinpath("constraints.txt").write_text("dep<2\n")
-    script.pip(
+    result = script.pip(
         "install",
         "--ignore-installed",
         "--no-index",
@@ -49,12 +50,13 @@ def test_catalogue_preserves_base_constraints_with_extras(
         "dep[unknown]",
         allow_stderr_warning=True,
     )
+    assert "Nab catalogue success" in result.stdout
     script.assert_installed(dep="1.0")
 
 
 def test_catalogue_resolves_an_exact_prerelease(script: PipTestEnvironment) -> None:
     create_basic_wheel_for_package(script, "dep", "1.0a1")
-    script.pip(
+    result = script.pip(
         "install",
         "--ignore-installed",
         "--no-index",
@@ -62,6 +64,7 @@ def test_catalogue_resolves_an_exact_prerelease(script: PipTestEnvironment) -> N
         script.scratch_path,
         "dep==1.0a1",
     )
+    assert "Nab catalogue success" in result.stdout
     script.assert_installed(dep="1.0a1")
 
 
@@ -72,7 +75,7 @@ def test_catalogue_does_not_downgrade_a_root_to_avoid_prereleases(
     create_basic_wheel_for_package(script, "dep", "1.0")
     create_basic_wheel_for_package(script, "app", "2.0", depends=["dep==1.0a1"])
     create_basic_wheel_for_package(script, "app", "1.0", depends=["dep==1.0"])
-    script.pip(
+    result = script.pip(
         "install",
         "--ignore-installed",
         "--no-index",
@@ -80,6 +83,7 @@ def test_catalogue_does_not_downgrade_a_root_to_avoid_prereleases(
         script.scratch_path,
         "app",
     )
+    assert "Nab catalogue success" in result.stdout
     script.assert_installed(app="2.0", dep="1.0a1")
 
 
@@ -89,7 +93,7 @@ def test_catalogue_respects_command_line_prerelease_policy(
 ) -> None:
     create_basic_wheel_for_package(script, "dep", "1.0")
     create_basic_wheel_for_package(script, "dep", "2.0b1")
-    script.pip(
+    result = script.pip(
         "install",
         "--ignore-installed",
         "--no-index",
@@ -98,6 +102,7 @@ def test_catalogue_respects_command_line_prerelease_policy(
         *flags,
         "dep",
     )
+    assert "Nab catalogue success" in result.stdout
     script.assert_installed(dep=expected)
 
 
@@ -108,7 +113,7 @@ def test_catalogue_keeps_prereleases_below_a_final_release(
     create_basic_wheel_for_package(script, "dep", "1.0")
     create_basic_wheel_for_package(script, "app", "2.0", depends=["dep<1.0"])
     create_basic_wheel_for_package(script, "app", "1.0", depends=["dep==1.0"])
-    script.pip(
+    result = script.pip(
         "install",
         "--ignore-installed",
         "--no-index",
@@ -116,4 +121,5 @@ def test_catalogue_keeps_prereleases_below_a_final_release(
         script.scratch_path,
         "app",
     )
+    assert "Nab catalogue success" in result.stdout
     script.assert_installed(app="2.0", dep="0.9b1")

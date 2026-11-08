@@ -46,9 +46,11 @@ def test_unpinned_yank_does_not_force_a_restart(script: PipTestEnvironment) -> N
             ("app", "1.0", []),
         ],
     )
-    script.pip(
+    result = script.pip(
         "install", "--ignore-installed", "--no-index", "--find-links", listing, "app"
     )
+    assert "Nab catalogue success" in result.stdout
+    assert "Nab source-domain restart" not in result.stdout
     script.assert_installed(app="1.0")
     script.assert_not_installed("dep")
 
@@ -65,7 +67,7 @@ def test_transitive_pin_keeps_the_parent_without_a_restart(
             ("app", "1.0", ["dep==1.0"]),
         ],
     )
-    script.pip(
+    result = script.pip(
         "install",
         "--ignore-installed",
         "--no-index",
@@ -74,6 +76,7 @@ def test_transitive_pin_keeps_the_parent_without_a_restart(
         "app",
         allow_stderr_warning=True,
     )
+    assert "Nab source-domain restart" not in result.stdout
     script.assert_installed(app="2.0", dep="2.0")
 
 
@@ -83,7 +86,7 @@ def test_constraint_pin_keeps_the_yanked_release_available(
     listing = yanked_listing(script, [("dep", "1.0", []), ("dep", "2.0", [])])
     constraint = script.scratch_path / "constraints.txt"
     constraint.write_text("dep==2.0\n")
-    script.pip(
+    result = script.pip(
         "install",
         "--ignore-installed",
         "--no-index",
@@ -94,6 +97,7 @@ def test_constraint_pin_keeps_the_yanked_release_available(
         "dep",
         allow_stderr_warning=True,
     )
+    assert "Nab catalogue success" in result.stdout
     script.assert_installed(dep="2.0")
 
 
@@ -104,7 +108,7 @@ def test_hidden_yanked_pin_is_found_without_a_restart(
         script,
         [("dep", "1.0", []), ("dep", "2.0", []), ("bridge", "1.0", ["dep==2.0"])],
     )
-    script.pip(
+    result = script.pip(
         "install",
         "--ignore-installed",
         "--no-index",
@@ -114,6 +118,8 @@ def test_hidden_yanked_pin_is_found_without_a_restart(
         "bridge",
         allow_stderr_warning=True,
     )
+    assert "Nab catalogue success" in result.stdout
+    assert "Nab source-domain restart" not in result.stdout
     script.assert_installed(dep="2.0", bridge="1.0")
 
 
@@ -129,9 +135,10 @@ def test_rejected_parent_does_not_leave_yanked_eligibility(
             ("app", "1.0", ["dep==1.0"]),
         ],
     )
-    script.pip(
+    result = script.pip(
         "install", "--ignore-installed", "--no-index", "--find-links", listing, "app"
     )
+    assert "Nab source-domain restart" not in result.stdout
     script.assert_installed(app="1.0", dep="1.0")
 
 
@@ -150,9 +157,10 @@ def test_rejected_pin_cannot_admit_a_yanked_release_for_another_parent(
     result = script.pip(
         "install", "--no-index", "--find-links", listing, "app", expect_error=True
     )
+    assert "Nab source-domain restart" not in result.stdout
     assert result.returncode == 1
-    assert "missing==1" in result.stdout + result.stderr
-    assert "dep>=2" in result.stdout + result.stderr
+    assert "missing==1" in result.stderr
+    assert "No matching distribution found" in result.stderr
     assert "Traceback" not in result.stderr
     script.assert_not_installed("app", "dep")
 
@@ -181,6 +189,7 @@ def test_only_exact_pins_admit_yanks_without_a_restart(
         allow_stderr_warning=True,
     )
 
+    assert "Nab source-domain restart" not in result.stdout
     if allowed:
         script.assert_installed(dep="2.0")
         assert "Reason for being yanked: withdrawn" in result.stderr
@@ -195,7 +204,7 @@ def test_hidden_pin_is_independent_of_input_order(
     listing = yanked_listing(
         script, [("dep", "2.0", []), ("bridge", "1.0", ["dep==2.0"])]
     )
-    script.pip(
+    result = script.pip(
         "install",
         "--no-index",
         "--find-links",
@@ -204,6 +213,8 @@ def test_hidden_pin_is_independent_of_input_order(
         allow_stderr_warning=True,
     )
 
+    assert "Nab catalogue success" in result.stdout
+    assert "Nab source-domain restart" not in result.stdout
     script.assert_installed(dep="2.0", bridge="1.0")
 
 
@@ -216,10 +227,11 @@ def test_inactive_dependency_pin_cannot_grant_permission(
     listing = yanked_listing(
         script, [("dep", "2.0", []), ("app", "1.0", ["dep>=2", dependency])]
     )
-    script.pip(
+    result = script.pip(
         "install", "--no-index", "--find-links", listing, "app", expect_error=True
     )
 
+    assert "Nab source-domain restart" not in result.stdout
     script.assert_not_installed("app", "dep")
 
 
@@ -287,6 +299,8 @@ def test_transitive_pin_admits_an_unversioned_extra(
         script, *roots, find_links=listing, options=("--report", str(report))
     )
 
+    assert "Nab source-domain restart" not in result.stdout
+    assert "Nab catalogue success" in result.stdout
     selected = next(
         item
         for item in json.loads(report.read_text())["install"]
@@ -326,8 +340,12 @@ def test_rejected_parent_metadata_cannot_expand_the_live_proof(
             stream.write(f'\n<a href="{wheel.name}">{wheel.name}</a>')
     script.pip_expect_warning = True
 
-    tracked_install(script, app_requirement, "parent", "tools==2", find_links=listing)
+    result = tracked_install(
+        script, app_requirement, "parent", "tools==2", find_links=listing
+    )
 
+    assert "Nab source-domain restart" not in result.stdout
+    assert "Nab catalogue success" in result.stdout
     script.assert_installed(app="2", parent="1", dep="1.0", tools="2")
     script.assert_not_installed("ghost")
     script.pip("check")
@@ -395,6 +413,7 @@ def test_live_file_preference_uses_known_sources(
         options=("--report", str(report)),
     )
 
+    assert "Nab source-domain restart" not in result.stdout
     assert (
         sum(line.startswith("SESSION_BEGIN ") for line in result.stdout.splitlines())
         == 1
@@ -438,6 +457,8 @@ def test_live_file_can_downgrade_an_independently_requested_package(
     listing = mixed_files_listing(script)
     result = script.pip("install", "--no-index", "--find-links", listing, *roots)
 
+    assert "Nab catalogue success" in result.stdout
+    assert "Nab source-domain restart" not in result.stdout
     script.assert_installed(dep="1.0", tools="1")
     assert "yanked version" not in result.stderr
 
@@ -456,6 +477,8 @@ def test_yank_can_resolve_after_live_dependencies_fail(
         allow_stderr_warning=True,
     )
 
+    assert "Nab catalogue success" in result.stdout
+    assert "Nab source-domain restart" not in result.stdout
     script.assert_installed(dep="1.0", tools="2")
     assert "yanked version" in result.stderr
 
@@ -468,6 +491,7 @@ def test_yanked_candidate_cannot_supply_its_own_permission(
         "install", "--no-index", "--find-links", listing, "dep>=2", expect_error=True
     )
 
+    assert "Nab source-domain restart" not in result.stdout
     assert "Processing" not in result.stdout
     script.assert_not_installed("dep")
 
@@ -476,7 +500,7 @@ def test_exact_pin_on_an_extra_uses_the_same_withdrawn_base(
     script: PipTestEnvironment,
 ) -> None:
     listing = yanked_listing(script, [("dep", "2.0", [])])
-    script.pip(
+    result = script.pip(
         "install",
         "--no-index",
         "--find-links",
@@ -485,6 +509,8 @@ def test_exact_pin_on_an_extra_uses_the_same_withdrawn_base(
         allow_stderr_warning=True,
     )
 
+    assert "Nab catalogue success" in result.stdout
+    assert "Nab source-domain restart" not in result.stdout
     script.assert_installed(dep="2.0")
 
 
@@ -495,7 +521,7 @@ def test_yanking_still_checks_requires_python(script: PipTestEnvironment) -> Non
     ).save_to(wheel)
     listing = script.scratch_path / "links.html"
     listing.write_text(f'<a href="{wheel.name}" data-yanked="withdrawn">wheel</a>')
-    script.pip(
+    result = script.pip(
         "install",
         "--no-index",
         "--find-links",
@@ -504,6 +530,8 @@ def test_yanking_still_checks_requires_python(script: PipTestEnvironment) -> Non
         allow_stderr_warning=True,
     )
 
+    assert "Nab catalogue success" in result.stdout
+    assert "Nab source-domain restart" not in result.stdout
     script.assert_installed(dep="2.0")
 
 
@@ -513,10 +541,12 @@ def test_constraint_on_an_unrequested_package_does_not_grant_permission(
     listing = yanked_listing(script, [("dep", "2.0", []), ("app", "1", [])])
     constraint = script.scratch_path / "constraints.txt"
     constraint.write_text("dep==2.0\n")
-    script.pip(
+    result = script.pip(
         "install", "--no-index", "--find-links", listing, "-c", constraint, "app"
     )
 
+    assert "Nab catalogue success" in result.stdout
+    assert "Nab source-domain restart" not in result.stdout
     script.assert_installed(app="1")
     script.assert_not_installed("dep")
 
@@ -535,6 +565,8 @@ def test_extra_can_use_a_yank_after_live_metadata_was_rejected(
         allow_stderr_warning=True,
     )
 
+    assert "Nab catalogue success" in result.stdout
+    assert "Nab source-domain restart" not in result.stdout
     script.assert_installed(dep="1.0", tools="2")
     assert "yanked version" in result.stderr
 
@@ -550,8 +582,10 @@ def test_a_yanked_final_does_not_suppress_live_prerelease_fallback(
     if final_dependencies is not None:
         packages.append(("dep", "1.0", final_dependencies))
     listing = yanked_listing(script, packages)
-    script.pip("install", "--no-index", "--find-links", listing, "dep")
+    result = script.pip("install", "--no-index", "--find-links", listing, "dep")
 
+    assert "Nab catalogue success" in result.stdout
+    assert "Nab source-domain restart" not in result.stdout
     script.assert_installed(dep="1.0a1")
 
 
@@ -559,7 +593,7 @@ def test_release_policy_can_exclude_live_prereleases(
     script: PipTestEnvironment,
 ) -> None:
     listing = yanked_listing(script, [("dep", "2.0", []), ("dep", "1.0a1", [])])
-    script.pip(
+    result = script.pip(
         "install",
         "--no-index",
         "--find-links",
@@ -569,6 +603,7 @@ def test_release_policy_can_exclude_live_prereleases(
         expect_error=True,
     )
 
+    assert "Nab source-domain restart" not in result.stdout
     script.assert_not_installed("dep")
 
 
@@ -582,7 +617,7 @@ def test_yanking_preserves_a_satisfied_installed_prerelease(
         [("dep", "1.0", []), ("app", "2.0", ["dep>=1"])],
         withdrawn={("app", "2.0")},
     )
-    script.pip(
+    result = script.pip(
         "install",
         "--no-index",
         "--find-links",
@@ -591,4 +626,6 @@ def test_yanking_preserves_a_satisfied_installed_prerelease(
         allow_stderr_warning=True,
     )
 
+    assert "Nab catalogue success" in result.stdout
+    assert "Nab source-domain restart" not in result.stdout
     script.assert_installed(app="2.0", dep="1.1a1")

@@ -20,6 +20,7 @@ def test_invalid_installed_metadata_stops_resolution(
     )
 
     assert "invalid-installed-package" in result.stderr
+    assert "Nab source-domain restart" not in result.stdout
 
 
 def install_initial(
@@ -46,8 +47,12 @@ def test_catalogue_keeps_installed_versions(
     if on_index:
         create_basic_wheel_for_package(script, "sample", version)
 
-    script.pip("install", "--no-index", "--find-links", script.scratch_path, "sample")
+    result = script.pip(
+        "install", "--no-index", "--find-links", script.scratch_path, "sample"
+    )
 
+    assert "Nab catalogue success" in result.stdout
+    assert "Nab source-domain restart" not in result.stdout
     script.assert_installed(sample=version, child="1")
 
 
@@ -68,7 +73,7 @@ def test_catalogue_installed_selection_policy(
     create_basic_wheel_for_package(script, "sample", "2")
 
     report = script.scratch_path / "report.json"
-    script.pip(
+    result = script.pip(
         "install",
         "--no-index",
         "--find-links",
@@ -79,6 +84,7 @@ def test_catalogue_installed_selection_policy(
         "sample",
     )
 
+    assert "Nab catalogue success" in result.stdout
     if "--ignore-installed" in options:
         assert (
             json.loads(report.read_text())["install"][0]["metadata"]["version"]
@@ -99,7 +105,7 @@ def test_catalogue_upgrades_dependencies_by_policy(
     create_basic_wheel_for_package(script, "sample", "2")
     create_basic_wheel_for_package(script, "app", "1", depends=["sample>=1"])
 
-    script.pip(
+    result = script.pip(
         "install",
         "--no-index",
         "--find-links",
@@ -110,6 +116,7 @@ def test_catalogue_upgrades_dependencies_by_policy(
         "app",
     )
 
+    assert "Nab catalogue success" in result.stdout
     script.assert_installed(app="1", sample=expected)
 
 
@@ -120,7 +127,7 @@ def test_catalogue_can_replace_an_installed_dependency_conflict(
     create_basic_wheel_for_package(script, "sample", "2", depends=["child==1"])
     create_basic_wheel_for_package(script, "child", "1")
 
-    script.pip(
+    result = script.pip(
         "install",
         "--no-index",
         "--find-links",
@@ -129,6 +136,7 @@ def test_catalogue_can_replace_an_installed_dependency_conflict(
         "child==1",
     )
 
+    assert "Nab catalogue success" in result.stdout
     script.assert_installed(sample="2", child="1")
 
 
@@ -140,7 +148,7 @@ def test_catalogue_widening_preserves_installed_only_version(
     create_basic_wheel_for_package(script, "sample", "3", depends=["child==9"])
     create_basic_wheel_for_package(script, "child", "1")
 
-    script.pip(
+    result = script.pip(
         "install",
         "--upgrade",
         "--no-index",
@@ -150,6 +158,8 @@ def test_catalogue_widening_preserves_installed_only_version(
         "child==1",
     )
 
+    assert "Nab catalogue success" in result.stdout
+    assert "Nab source-domain restart" not in result.stdout
     script.assert_installed(sample="2", child="1")
 
 
@@ -161,7 +171,7 @@ def test_catalogue_constraints_can_replace_an_installation(
     constraint = tmp_path / "constraint.txt"
     constraint.write_text("sample>=2\n")
 
-    script.pip(
+    result = script.pip(
         "install",
         "--no-index",
         "--find-links",
@@ -171,6 +181,7 @@ def test_catalogue_constraints_can_replace_an_installation(
         "sample",
     )
 
+    assert "Nab catalogue success" in result.stdout
     script.assert_installed(sample="2")
 
 
@@ -195,8 +206,11 @@ def test_satisfied_installation_does_not_load_the_index(
         constraint = script.scratch_path / "constraints.txt"
         constraint.write_text("unused==1\n")
         options = ["--constraint", str(constraint)]
-    script.run("python", str(probe), "install", "--no-index", *options, requirement)
+    result = script.run(
+        "python", str(probe), "install", "--no-index", *options, requirement
+    )
 
+    assert "Nab catalogue success" in result.stdout
     script.assert_installed(sample="1")
 
 
@@ -220,7 +234,7 @@ def test_catalogue_installed_extras_share_the_base_candidate(
         create_basic_wheel_for_package(script, "bridge", "1", depends=["sample>=1"])
         requirements.append("bridge")
 
-    script.pip(
+    result = script.pip(
         "install",
         "--no-index",
         "--find-links",
@@ -229,6 +243,7 @@ def test_catalogue_installed_extras_share_the_base_candidate(
         *requirements,
     )
 
+    assert "Nab catalogue success" in result.stdout
     expected = "2" if upgrade else "1"
     script.assert_installed(sample=expected, child=expected)
 
@@ -238,8 +253,9 @@ def test_catalogue_can_ignore_installed_dependency_metadata(
 ) -> None:
     install_initial(script, "1", ["missing==1"])
 
-    script.pip("install", "--no-index", "--no-deps", "sample")
+    result = script.pip("install", "--no-index", "--no-deps", "sample")
 
+    assert "Nab catalogue success" in result.stdout
     script.assert_installed(sample="1")
     script.assert_not_installed("missing")
 
@@ -252,7 +268,7 @@ def test_deferred_yanked_pin_is_checked_before_replacing_an_installation(
     listing = script.scratch_path / "links.html"
     listing.write_text(f'<a href="{wheel.name}" data-yanked="withdrawn">wheel</a>')
 
-    script.pip(
+    result = script.pip(
         "install",
         "--no-index",
         "--find-links",
@@ -261,6 +277,7 @@ def test_deferred_yanked_pin_is_checked_before_replacing_an_installation(
         allow_stderr_warning=True,
     )
 
+    assert "Nab catalogue success" in result.stdout
     script.assert_installed(sample="2")
 
 
@@ -274,10 +291,11 @@ def test_installed_self_replacement_uses_selected_metadata(
     for version in ("1", "2"):
         create_basic_wheel_for_package(script, "olddep", version)
 
-    script.pip(
+    result = script.pip(
         "install", "--no-index", "--find-links", script.scratch_path, "sample", "other"
     )
 
+    assert "Nab catalogue success" in result.stdout
     script.assert_installed(sample="2", other="2", olddep="2")
     script.pip("check")
 
@@ -287,6 +305,7 @@ def test_satisfied_installed_self_requirement_stays_in_the_catalogue(
 ) -> None:
     install_initial(script, "1", ["sample>=1"])
 
-    script.pip("install", "--no-index", "sample")
+    result = script.pip("install", "--no-index", "sample")
 
+    assert "Nab catalogue success" in result.stdout
     script.assert_installed(sample="1")

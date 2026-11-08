@@ -115,6 +115,7 @@ def test_source_discovery_preserves_url_provenance(
         assert result.returncode == 1
         assert "ResolutionImpossible" in result.stderr
         assert "Traceback" not in result.stderr
+        assert result.stdout.count("Nab source-domain restart:") == 1
         reads = [
             json.loads(line.partition(" ")[2])
             for line in result.stdout.splitlines()
@@ -139,6 +140,7 @@ def test_source_discovery_preserves_url_provenance(
     if root_extra:
         assert report["app"]["requested_extras"] == ["feature"]
     assert result.stdout.splitlines().count("PREPARE app-2.0-py2.py3-none-any.whl") == 1
+    assert result.stdout.count("Nab source-domain restart:") == 1
 
     expected_files = {
         "app": script.scratch_path / "app-2.0-py2.py3-none-any.whl",

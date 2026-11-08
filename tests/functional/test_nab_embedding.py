@@ -8,7 +8,7 @@ from tests.functional.test_nab_catalogue_yanked import yanked_listing
 from tests.lib import PipTestEnvironment, create_basic_wheel_for_package
 from tests.lib.wheel import make_wheel
 
-_CALLBACK_PROBE = """\
+_SHARED_PREFERENCE_PROBE = """\
 import importlib
 from pathlib import Path
 import runpy
@@ -25,28 +25,34 @@ if debundled:
     initializer = initializer.replace("DEBUNDLED = False", "DEBUNDLED = True")
     exec(compile(initializer, vendor.__file__, "exec"), vendor.__dict__)
 
-shared = importlib.import_module("pip._vendor.nab_provider.callbacks")
+shared = importlib.import_module("pip._vendor.nab_provider.preference")
 errors = importlib.import_module("pip._vendor.nab_resolver.errors")
+assert shared.ResolutionError is errors.ResolutionError
 if debundled:
-    assert shared is importlib.import_module("nab_provider.callbacks")
+    canonical = importlib.import_module("nab_provider.preference")
+    assert shared is canonical
     assert errors is importlib.import_module("nab_resolver.errors")
+    assert Path(shared.__file__).parent.name == "nab_provider"
     assert "external" in Path(shared.__file__).parts
 
-queries = []
-choose = shared.CallbackProvider.choose_version
-def record_choice(self, *args, **kwargs):
-    queries.append(True)
-    return choose(self, *args, **kwargs)
-shared.CallbackProvider.choose_version = record_choice
+shared_provider = importlib.import_module(
+    "pip._vendor.nab_provider.preference_provider"
+)
+assert shared_provider.ResolutionError is errors.ResolutionError
+selections = []
+select = shared_provider.PreferenceProvider.select
+def select_and_record(self):
+    selections.append(True)
+    return select(self)
+shared_provider.PreferenceProvider.select = select_and_record
 try:
     runpy.run_module("pip", run_name="__main__", alter_sys=True)
 finally:
-    assert queries
-
+    assert selections
 """
 
 
-_PACKAGING_NAMESPACE_PROBE = """\
+_PACKAGING_RANGES_PROBE = """\
 import runpy
 import sys
 from pathlib import Path
@@ -64,13 +70,16 @@ try:
 except SystemExit as result:
     if result.code in (None, 0):
         # Preserve pip's normal import order before checking the resulting types.
-        from pip._vendor.packaging import specifiers, version
+        from pip._vendor.packaging import ranges, specifiers, version
+
         if external:
-            import packaging.specifiers
-            import packaging.version
-            assert specifiers is packaging.specifiers
-            assert version is packaging.version
-        assert specifiers.SpecifierSet(">=1").contains(version.Version("2"))
+            import packaging.ranges
+            assert ranges is packaging.ranges
+
+        allowed = specifiers.SpecifierSet(">=1").to_range()
+        assert isinstance(allowed, ranges.VersionRange)
+        selected = allowed & ranges.VersionRange.singleton(version.Version("2"))
+        assert version.Version("2") in selected
     raise
 """
 
@@ -120,10 +129,10 @@ def test_try_another_file_when_preferred_wheel_has_inconsistent_metadata(
 
 
 @pytest.mark.parametrize("external", [False, True])
-def test_packaging_shares_the_dependency_namespace(
+def test_packaging_ranges_share_the_dependency_namespace(
     script: PipTestEnvironment, external: bool
 ) -> None:
-    """Resolve with matching bundled or external dependency types."""
+    """Resolve with matching bundled or external range-producing dependencies."""
     source = Path(__file__).parents[2] / "src/pip/_vendor"
     external_packages = script.scratch_path / "external"
     external_packages.mkdir()
@@ -141,7 +150,7 @@ def test_packaging_shares_the_dependency_namespace(
     create_basic_wheel_for_package(script, "dep", "2")
     script.environ["PYTHONPATH"] = str(external_packages)
     probe = script.scratch_path / "packaging_ranges.py"
-    probe.write_text(_PACKAGING_NAMESPACE_PROBE)
+    probe.write_text(_PACKAGING_RANGES_PROBE)
     report = script.scratch_path / "selection.json"
 
     script.run(
@@ -167,10 +176,10 @@ def test_packaging_shares_the_dependency_namespace(
 
 
 @pytest.mark.parametrize("debundled", [False, True])
-def test_callback_provider_resolves_with_bundled_or_external_modules(
+def test_shared_preference_resolves_with_bundled_or_external_modules(
     script: PipTestEnvironment, debundled: bool
 ) -> None:
-    """Use the callback provider with one solver exception namespace."""
+    """Use one shared preference implementation and one solver exception namespace."""
     source = Path(__file__).parents[2] / "src/pip/_vendor"
     external = script.scratch_path / "external"
     external.mkdir()
@@ -183,17 +192,17 @@ def test_callback_provider_resolves_with_bundled_or_external_modules(
             )
 
         # Restore the canonical imports provided by the external distribution.
-        for module in ("callbacks.py",):
-            preference = external / "nab_provider" / module
-            preference.write_text(
-                preference.read_text().replace(
-                    "pip._vendor.nab_resolver", "nab_resolver"
+        for package in ("nab_resolver", "nab_provider"):
+            for module in (external / package).rglob("*.py"):
+                module.write_text(
+                    module.read_text()
+                    .replace("pip._vendor.nab_resolver", "nab_resolver")
+                    .replace("pip._vendor.nab_provider", "nab_provider")
                 )
-            )
 
     script.environ["PYTHONPATH"] = str(external)
     probe = script.scratch_path / "shared_preference.py"
-    probe.write_text(_CALLBACK_PROBE)
+    probe.write_text(_SHARED_PREFERENCE_PROBE)
     listing = yanked_listing(
         script,
         [("app", "1.0", ["dep==2.0"]), ("dep", "1.0", []), ("dep", "2.0", [])],

@@ -18,7 +18,7 @@ from pip._internal.exceptions import (
     MetadataInvalid,
 )
 from pip._internal.metadata import BaseDistribution
-from pip._internal.models.link import Link
+from pip._internal.models.link import Link, links_equivalent
 from pip._internal.models.wheel import Wheel
 from pip._internal.req.constructors import (
     install_req_from_editable,
@@ -28,7 +28,7 @@ from pip._internal.req.req_install import InstallRequirement
 from pip._internal.utils.direct_url_helpers import direct_url_from_link
 from pip._internal.utils.misc import normalize_version_info
 
-from .base import Candidate, Requirement, format_name, source_links_equivalent
+from .base import Candidate, Requirement, format_name
 
 if TYPE_CHECKING:
     from .factory import Factory
@@ -64,7 +64,9 @@ def make_install_req_from_link(
     *,
     source_link: Link,
 ) -> InstallRequirement:
+    """Create a requirement with its original source and selected fetch link."""
     assert not template.editable, "template is editable"
+
     if version is not None and template.req and template.hash_options:
         # When hashes are provided via constraints for an unpinned requirement,
         # the resulting install requirement must appear pinned so that the
@@ -74,6 +76,7 @@ def make_install_req_from_link(
         line = str(template.req)
     else:
         line = link.url
+
     ireq = install_req_from_line(
         line,
         user_supplied=template.user_supplied,
@@ -84,6 +87,7 @@ def make_install_req_from_link(
         hash_options=template.hash_options,
         config_settings=template.config_settings,
     )
+
     ireq.original_link = template.original_link
     ireq.link = link
     ireq.extras = template.extras
@@ -174,21 +178,12 @@ class _InstallRequirementBackedCandidate(Candidate):
         if self._hash is not None:
             return self._hash
 
-        self._hash = hash(
-            (self.__class__, self.name, str(self.version), self._ireq.is_direct)
-        )
+        self._hash = hash((self.__class__, self._link))
         return self._hash
 
     def __eq__(self, other: Any) -> bool:
         if isinstance(other, self.__class__):
-            return (
-                self.name == other.name
-                and str(self.version) == str(other.version)
-                and self._ireq.is_direct == other._ireq.is_direct
-                and self.source_link is not None
-                and other.source_link is not None
-                and source_links_equivalent(self.source_link, other.source_link)
-            )
+            return links_equivalent(self._link, other._link)
         return False
 
     @property
@@ -239,9 +234,6 @@ class _InstallRequirementBackedCandidate(Candidate):
                 str(self._version),
                 str(dist.version),
             )
-        # check dependencies are valid
-        # TODO performance: this means we iterate the dependencies at least twice,
-        # we may want to cache parsed Requires-Dist
         try:
             list(dist.iter_dependencies(list(dist.iter_provided_extras())))
         except InvalidRequirement as e:
@@ -299,11 +291,13 @@ class LinkCandidate(_InstallRequirementBackedCandidate):
         name: NormalizedName | None = None,
         version: Version | None = None,
     ) -> None:
+        # Preserve the source before selecting a cached wheel.
         source_link = link
         cache_entry = factory.get_wheel_cache_entry(source_link, name)
         if cache_entry is not None:
             logger.debug("Using cached wheel link: %s", cache_entry.link)
             link = cache_entry.link
+
         ireq = make_install_req_from_link(
             link,
             template,
@@ -317,10 +311,8 @@ class LinkCandidate(_InstallRequirementBackedCandidate):
             assert name == wheel_name, f"{name!r} != {wheel_name!r} for wheel"
             # Version may not be present for PEP 508 direct URLs
             if version is not None:
-                wheel_version = Version(wheel.version)
-                assert (
-                    version == wheel_version
-                ), f"{version!r} != {wheel_version!r} for wheel {name}"
+                actual = Version(wheel.version)
+                assert version == actual, f"{version!r} != {actual!r} for wheel {name}"
 
         if cache_entry is not None:
             assert ireq.link.is_wheel
@@ -374,7 +366,7 @@ class EditableCandidate(_InstallRequirementBackedCandidate):
 
 class AlreadyInstalledCandidate(Candidate):
     is_installed = True
-    source_link = None
+    source_link: None = None
 
     def __init__(
         self,
@@ -434,7 +426,12 @@ class AlreadyInstalledCandidate(Candidate):
             return
 
         try:
-            for r in self.dist.iter_dependencies():
+            # Discover self-replacements before unrelated dependencies can reject them.
+            dependencies = sorted(
+                self.dist.iter_dependencies(),
+                key=lambda r: canonicalize_name(r.name) != self.project_name,
+            )
+            for r in dependencies:
                 yield from self._factory.make_requirements_from_spec(
                     str(r), self._ireq, parent=self
                 )

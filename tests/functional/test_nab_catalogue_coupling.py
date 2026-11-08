@@ -31,6 +31,7 @@ def test_extras_skip_metadata_for_versions_excluded_by_the_base(
     )
 
     script.assert_installed(dep="1.0")
+    assert "Nab catalogue success" in result.stdout
     assert wheels[-1].name not in result.stdout
 
 
@@ -57,3 +58,4 @@ def test_extras_coupling_reopens_versions_after_a_base_backtrack(
 
     script.assert_installed(chooser="1.0", dep="2.0", leaf="1.0")
     assert rejected.name in result.stdout
+    assert "Nab catalogue success" in result.stdout

@@ -56,8 +56,10 @@ def test_constrained_root_expands_its_mandatory_dependency_urls(
         options=("-c", str(constraints)),
     )
 
+    assert result.stdout.count("Nab source-domain restart:") == 2
     for artifact in (app, dep, leaf):
         assert preparation_count(result.stdout, artifact) == 1
+    assert "Nab catalogue success" in result.stdout
     script.assert_installed(app="1", dep="1", leaf="1")
     script.pip("check")
 
@@ -94,6 +96,7 @@ def test_ineligible_constrained_root_dependencies_are_not_prepared(
         expect_error=inactive == "version",
     )
 
+    assert "Nab source-domain restart" not in result.stdout
     assert preparation_count(result.stdout, dep) == 0
     script.assert_not_installed("dep")
     if inactive == "version":
@@ -130,8 +133,10 @@ def test_fixed_source_closure_follows_a_named_constrained_dependency(
 
     result = tracked_install(script, app, options=("-c", str(constraints)))
 
+    assert result.stdout.count("Nab source-domain restart:") == 1
     for artifact in (app, dep, leaf):
         assert preparation_count(result.stdout, artifact) == 1
+    assert "Nab catalogue success" in result.stdout
     script.assert_installed(app="1", dep="1", leaf="1")
     script.pip("check")
 
@@ -164,6 +169,7 @@ def test_mandatory_closure_checks_parent_hashes_against_the_fixed_archive(
         script, "app", "dep", options=("-c", str(constraints)), expect_error=not valid
     )
 
+    assert "Nab source-domain restart" not in result.stdout
     if valid:
         script.assert_installed(app="1", dep="1")
         script.pip("check")
@@ -200,6 +206,7 @@ def test_mandatory_url_closure_keeps_root_source_constraints(
         script, app, "dep", options=("-c", str(constraints)), expect_error=True
     )
 
+    assert "Nab source-domain restart" not in result.stdout
     assert preparation_count(result.stdout, other) == 0
     script.assert_not_installed("app", "dep")
 
@@ -236,13 +243,14 @@ def test_dependency_url_fixed_by_a_constraint_uses_the_catalogue(
     constraints.write_text(f"dep @ {url}\n")
     report = script.scratch_path / "report.json"
 
-    tracked_install(
+    result = tracked_install(
         script,
         "app",
         options=("-c", str(constraints), "--report", str(report)),
         ignore_installed=False,
     )
 
+    assert "Nab source-domain restart" not in result.stdout
     script.assert_installed(app="1", dep="1")
     if with_extra:
         script.assert_installed(child="1")
@@ -286,8 +294,9 @@ def test_inactive_constrained_source_is_not_prepared(
     if inactive == "no_deps":
         options += ("--no-deps",)
 
-    tracked_install(script, "app", options=options)
+    result = tracked_install(script, "app", options=options)
 
+    assert "Nab source-domain restart" not in result.stdout
     script.assert_installed(app="1")
     script.assert_not_installed("dep")
 
@@ -319,12 +328,13 @@ def test_conflicting_parent_url_cannot_replace_the_constrained_source(
     constraints.write_text(f"dep @ {permitted.as_uri()}\n")
     report = script.scratch_path / "report.json"
 
-    tracked_install(
+    result = tracked_install(
         script,
         "app",
         options=("-c", str(constraints), "--report", str(report)),
     )
 
+    assert "Nab source-domain restart" not in result.stdout
     script.assert_installed(app="1", dep="1")
     script.pip("check")
     items = {
@@ -376,6 +386,7 @@ def test_url_constraint_hashes_are_checked_before_installation(
         expect_error=not correct_hash,
     )
 
+    assert "Nab source-domain restart" not in result.stdout
     if correct_hash:
         script.assert_installed(dep="1")
         script.pip("check")
@@ -454,7 +465,7 @@ def test_constraint_hash_checks_the_source_of_a_cached_built_wheel(
     constraints = script.scratch_path / "constraints.txt"
     constraints.write_text(f"dep @ {supplied.as_uri()} --hash=sha256:{digest}\n")
 
-    tracked_install(
+    result = tracked_install(
         script,
         supplied.as_uri(),
         options=(
@@ -466,6 +477,7 @@ def test_constraint_hash_checks_the_source_of_a_cached_built_wheel(
         ),
     )
 
+    assert "Nab source-domain restart" not in result.stdout
     script.assert_installed(dep="1")
     script.pip("check")
 
@@ -487,8 +499,9 @@ def test_unconstrained_url_does_not_discard_a_working_newer_parent(
         ),
     ).save_to_dir(script.scratch_path)
 
-    tracked_install(script, "app")
+    result = tracked_install(script, "app")
 
+    assert result.stdout.count("Nab source-domain restart:") == 1
     script.assert_installed(app="2", dep="3")
     script.pip("check")
 

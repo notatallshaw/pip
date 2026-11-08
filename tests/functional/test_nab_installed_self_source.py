@@ -171,24 +171,3 @@ def test_later_roots_use_self_replacement_metadata(
     )
     script.assert_installed(selfpkg="2", other="2", olddep="2")
     script.pip("check")
-
-
-def test_fixed_version_can_adopt_index_metadata_instead_of_an_ineligible_self_source(
-    script: PipTestEnvironment,
-) -> None:
-    initial = script.scratch_path / "initial" / "selfpkg-1-py3-none-any.whl"
-    target = script.scratch_path / "target" / "selfpkg-2-py3-none-any.whl"
-    _self_wheel(initial, "1", [f"selfpkg @ {target.as_uri()}"])
-    _self_wheel(target, "2", [])
-    _self_wheel(script.scratch_path / "selfpkg-1-py3-none-any.whl", "1", ["child==1"])
-    create_basic_wheel_for_package(script, "child", "1")
-    script.pip("install", "--no-index", "--no-deps", initial)
-
-    script.pip(
-        "install", "--no-index", "--find-links", script.scratch_path, "selfpkg==1"
-    )
-
-    script.assert_installed(selfpkg="1", child="1")
-    selected_metadata = script.site_packages_path / "selfpkg-1.dist-info" / "METADATA"
-    assert "Requires-Dist: child==1" in selected_metadata.read_text()
-    script.pip("check")

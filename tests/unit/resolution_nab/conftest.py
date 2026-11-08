@@ -15,7 +15,6 @@ from pip._internal.operations.build.build_tracker import get_build_tracker
 from pip._internal.operations.prepare import RequirementPreparer
 from pip._internal.req.constructors import install_req_from_line
 from pip._internal.resolution.nab.factory import Factory
-from pip._internal.resolution.nab.resolver import Resolver
 from pip._internal.utils.temp_dir import TempDirectory, global_tempdir_manager
 
 from tests.lib import TestData
@@ -67,24 +66,3 @@ def factory(finder: PackageFinder, preparer: RequirementPreparer) -> Factory:
         ignore_requires_python=False,
         py_version_info=None,
     )
-
-
-@pytest.fixture
-def resolver(
-    factory: Factory, finder: PackageFinder, preparer: RequirementPreparer
-) -> Resolver:
-    resolver = Resolver(
-        preparer=preparer,
-        finder=finder,
-        wheel_cache=None,
-        make_install_req=install_req_from_line,
-        use_user_site=False,
-        ignore_dependencies=False,
-        only_dependencies=False,
-        ignore_installed=False,
-        ignore_requires_python=False,
-        force_reinstall=False,
-        upgrade_strategy="to-satisfy-only",
-    )
-    resolver.factory = factory
-    return resolver

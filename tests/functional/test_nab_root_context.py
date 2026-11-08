@@ -23,6 +23,7 @@ def test_pinned_extra_root_keeps_requirement_file_chain(
         requirements,
     )
 
+    assert "Nab catalogue success" in result.stdout
     assert f"(from app[feature]==1->-r {requirements} (line 1))" in result.stdout
     assert "app[feature]==1->app[feature]==1" not in result.stdout
 
@@ -71,6 +72,8 @@ def test_root_extras_keep_requested_metadata_after_transitive_preparation(
     )
 
     script.assert_installed(app="2.0", bridge="1.0")
+    route = "Nab source-domain restart" if late_url else "Nab catalogue success"
+    assert route in result.stdout
     report = json.loads(report_path.read_text())
     app = next(item for item in report["install"] if item["metadata"]["name"] == "app")
     assert app["requested"] is True
@@ -90,7 +93,7 @@ def test_transitive_extra_preparation_keeps_the_base_root_requested(
     create_basic_wheel_for_package(script, "child", "1")
     report_path = script.scratch_path / "report.json"
 
-    script.pip(
+    result = script.pip(
         "install",
         "--no-index",
         "--find-links",
@@ -102,6 +105,7 @@ def test_transitive_extra_preparation_keeps_the_base_root_requested(
         "bridge",
     )
 
+    assert "Nab catalogue success" in result.stdout
     script.assert_installed(app="2.0", bridge="1", child="1")
     report = json.loads(report_path.read_text())
     app = next(item for item in report["install"] if item["metadata"]["name"] == "app")

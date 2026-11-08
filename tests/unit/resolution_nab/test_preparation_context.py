@@ -13,8 +13,8 @@ from pip._internal.models.link import Link
 from pip._internal.req.constructors import install_req_from_line
 from pip._internal.req.req_install import InstallRequirement
 from pip._internal.resolution.nab.candidates import LinkCandidate
+from pip._internal.resolution.nab.catalogue import PipCatalogue
 from pip._internal.resolution.nab.factory import Factory
-from pip._internal.resolution.nab.host import PipHost
 
 from tests.lib.wheel import make_wheel
 
@@ -54,7 +54,7 @@ def test_direct_metadata_does_not_reuse_a_configured_index_dependency_list(
         name=canonicalize_name("probe"),
     )
     collected = factory.collect_root_requirements([])
-    host = PipHost(
+    catalogue = PipCatalogue(
         factory,
         collected,
         ignore_dependencies=False,
@@ -62,8 +62,8 @@ def test_direct_metadata_does_not_reuse_a_configured_index_dependency_list(
     )
     observed = []
     for candidate in (ordinary, direct):
-        observed.append(
-            {requirement.name for requirement in host.get_dependencies(candidate)}
-        )
+        data = catalogue.read_candidate(catalogue.source_candidate("probe", candidate))
+        assert data is not None
+        observed.append(set(data.dependencies))
 
     assert observed == [{"alpha"}, {"beta"}]

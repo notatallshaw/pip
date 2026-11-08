@@ -33,10 +33,11 @@ def test_installed_self_requirement_uses_only_selected_metadata(
     if transitive:
         create_basic_wheel_for_package(script, "parent", "1", depends=["app"])
 
-    tracked_install(
+    result = tracked_install(
         script, "parent" if transitive else "app", "other", ignore_installed=False
     )
 
+    assert "Nab source-domain restart" not in result.stdout
     if self_satisfied:
         script.assert_installed(app="1", other="1", olddep="1")
     else:

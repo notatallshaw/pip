@@ -26,8 +26,12 @@ def test_known_dependency_url_uses_fixed_input_source(
         ),
     ).save_to_dir(script.scratch_path)
 
-    script.pip("install", "--no-index", "--find-links", script.scratch_path, "app", dep)
+    result = script.pip(
+        "install", "--no-index", "--find-links", script.scratch_path, "app", dep
+    )
 
+    assert "Nab catalogue success" in result.stdout
+    assert "Nab source-domain restart" not in result.stdout
     script.assert_installed(app="1", dep="1")
 
 
@@ -43,7 +47,7 @@ def test_source_constraint_is_prepared_only_when_required(
     if not active:
         app.unlink()
 
-    script.pip(
+    result = script.pip(
         "install",
         "--no-index",
         "--find-links",
@@ -53,6 +57,7 @@ def test_source_constraint_is_prepared_only_when_required(
         "app" if active else "other",
     )
 
+    assert "Nab catalogue success" in result.stdout
     script.assert_installed(**({"app": "1"} if active else {"other": "1"}))
 
 
@@ -75,7 +80,9 @@ def test_fixed_hash_policy_is_verified_on_fast_path(
         expect_error=not valid,
     )
 
+    assert "Nab source-domain restart" not in result.stdout
     if valid:
+        assert "Nab catalogue success" in result.stdout
         script.assert_installed(app="1")
     else:
         assert "DO NOT MATCH THE HASHES" in result.stderr
@@ -94,6 +101,7 @@ def test_conflicting_input_sources_fail_without_native_solve(
     result = script.pip("install", "--no-index", first, second, expect_error=True)
 
     assert "ResolutionImpossible" in result.stderr
+    assert "Nab source-domain restart" not in result.stdout
 
 
 def test_contradictory_root_ranges_fail_without_native_solve(
@@ -102,6 +110,7 @@ def test_contradictory_root_ranges_fail_without_native_solve(
     result = script.pip("install", "--no-index", "app<1", "app>=2", expect_error=True)
 
     assert "ResolutionImpossible" in result.stderr
+    assert "Nab source-domain restart" not in result.stdout
 
 
 def test_complete_dependency_domain_certifies_failure(
@@ -118,6 +127,7 @@ def test_complete_dependency_domain_certifies_failure(
         expect_error=True,
     )
 
+    assert "Nab source-domain restart" not in result.stdout
     assert "No matching distribution found for missing==1" in result.stderr
 
 
@@ -144,7 +154,8 @@ def test_fixed_url_conflict_reports_both_requirements(
     assert "ResolutionImpossible" in result.stderr
     assert "app 1 depends on dep" in result.stdout
     assert str(direct) in result.stdout
-    assert other.as_uri() in result.stdout
+    assert str(other) in result.stdout
+    assert "Nab source-domain restart" not in result.stdout
 
 
 @pytest.mark.parametrize(
@@ -164,7 +175,7 @@ def test_metadata_rejection_scope_preserves_artifact_alternatives(
         },
     ).save_to(rejected)
 
-    script.pip(
+    result = script.pip(
         "install",
         "--no-index",
         "--no-build-isolation",
@@ -174,6 +185,7 @@ def test_metadata_rejection_scope_preserves_artifact_alternatives(
         allow_stderr_warning=True,
     )
 
+    assert "Nab catalogue success" in result.stdout
     script.assert_installed(pkg=expected)
 
 
@@ -231,6 +243,8 @@ def test_invalid_index_metadata_stays_fast_when_inputs_exclude_installation(
         allow_stderr_warning=True,
     )
 
+    assert "Nab catalogue success" in result.stdout
+    assert "Nab source-domain restart" not in result.stdout
     assert (
         result.stderr.count("Ignoring version 3 of app since it has invalid metadata")
         == 1
@@ -253,6 +267,8 @@ def test_invalid_index_metadata_does_not_make_installed_upgrades_fail(
         allow_stderr_warning=True,
     )
 
+    assert "Nab catalogue success" in result.stdout
+    assert "Nab source-domain restart" not in result.stdout
     assert "Ignoring version 3 of app since it has invalid metadata" in result.stderr
     script.assert_installed(app="2")
 
@@ -262,7 +278,7 @@ def test_dependency_exclusion_rejects_invalid_metadata_without_fallback(
 ) -> None:
     listing = installed_metadata_listing(script, yanked=False)
     create_basic_wheel_for_package(script, "bridge", "1", depends=["app>=2,<4"])
-    script.pip(
+    result = script.pip(
         "install",
         "--no-index",
         "--find-links",
@@ -272,6 +288,8 @@ def test_dependency_exclusion_rejects_invalid_metadata_without_fallback(
         allow_stderr_warning=True,
     )
 
+    assert "Nab catalogue success" in result.stdout
+    assert "Nab source-domain restart" not in result.stdout
     script.assert_installed(app="2", bridge="1")
 
 
@@ -289,6 +307,7 @@ def test_excluded_installation_does_not_repeat_metadata_rejections_on_failure(
         expect_error=True,
     )
 
+    assert "Nab source-domain restart" not in result.stdout
     for version in ("2", "3"):
         assert (
             result.stderr.count(
@@ -326,6 +345,7 @@ def test_excluded_installation_does_not_search_unread_url_metadata(
         expect_error=True,
     )
 
+    assert "Nab source-domain restart" not in result.stdout
     assert "No matching distribution found for dep>=3" in result.stderr
     script.assert_installed(dep="1")
     script.assert_not_installed("bridge")
@@ -358,10 +378,12 @@ def test_rejected_source_constraint_does_not_restart_or_use_the_index(
         expect_error=required,
     )
 
+    assert "Nab source-domain restart" not in result.stdout
     script.assert_not_installed("dep")
     if required:
         assert "ResolutionImpossible" in result.stderr
     else:
+        assert "Nab catalogue success" in result.stdout
         script.assert_installed(app="1")
 
 
@@ -392,6 +414,7 @@ def test_invalid_constrained_source_metadata_errors_without_a_restart(
         expect_error=True,
     )
 
+    assert "Nab source-domain restart" not in result.stdout
     assert "has invalid metadata" in result.stderr
     assert (
         result.stdout.replace("\\", "/").count(f"Processing ./direct/{rejected.name}")
@@ -419,6 +442,7 @@ def test_invalid_metadata_in_mandatory_url_closure_errors_without_a_restart(
 
     result = script.pip("install", "--no-index", app, expect_error=True)
 
+    assert "Nab source-domain restart" not in result.stdout
     assert "has invalid metadata" in result.stderr
     assert result.stdout.replace("\\", "/").count(f"Processing ./{dep.name}") == 1
     script.assert_not_installed("app", "dep")
@@ -460,6 +484,7 @@ def test_contextual_installed_iteration_skips_invalid_index_metadata(
         allow_stderr_warning=True,
     )
 
+    assert "Nab source-domain restart" in result.stdout
     assert "Ignoring version 3 of app since it has invalid metadata" in result.stderr
     script.assert_installed(app="2", other="2", bridge="1", dep="1")
 
@@ -479,7 +504,7 @@ def test_unsatisfied_installation_requires_a_working_replacement(
         )
         wheel.save_to(index / "dep-2-py3-none-any.whl")
 
-    script.pip(
+    result = script.pip(
         "install",
         "-v",
         "--no-index",
@@ -489,6 +514,7 @@ def test_unsatisfied_installation_requires_a_working_replacement(
         expect_error=True,
     )
 
+    assert "Nab source-domain restart" not in result.stdout
     script.assert_installed(dep="1")
 
 
@@ -533,6 +559,7 @@ def test_index_metadata_replacement_updates_the_installed_package(
         options=("--report", str(report)),
     )
 
+    assert "Nab source-domain restart" not in result.stdout
     selected = {
         item["metadata"]["name"]: item
         for item in json.loads(report.read_text())["install"]
@@ -591,6 +618,7 @@ def test_no_deps_can_certify_failure_without_reading_possible_url_dependencies(
         expect_error=True,
     )
 
+    assert "Nab source-domain restart" not in result.stdout
     assert "No matching distribution found for dep>=3" in result.stderr
     script.assert_not_installed("dep", "bridge")
 
@@ -635,6 +663,7 @@ def test_impossible_mandatory_source_does_not_read_an_unrelated_url_parent(
         expect_error=True,
     )
 
+    assert "Nab source-domain restart" not in result.stdout
     assert "bridge-1-py3-none-any.whl" not in result.stdout
     assert "ResolutionImpossible" in result.stderr
     script.assert_not_installed("dep", "bridge")

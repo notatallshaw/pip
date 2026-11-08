@@ -8,8 +8,8 @@ from pip._internal.exceptions import InstallationError
 from pip._internal.index.package_finder import PackageFinder
 from pip._internal.models.search_scope import SearchScope
 from pip._internal.req.constructors import install_req_from_line
+from pip._internal.resolution.nab.catalogue import PipCatalogue
 from pip._internal.resolution.nab.factory import Factory
-from pip._internal.resolution.nab.resolver import Resolver
 
 from tests.lib.wheel import make_wheel
 
@@ -74,7 +74,6 @@ from tests.lib.wheel import make_wheel
 )
 def test_local_wheel_session_contracts(
     factory: Factory,
-    resolver: Resolver,
     finder: PackageFinder,
     tmp_path: Path,
     scenario_name: str,
@@ -99,24 +98,26 @@ def test_local_wheel_session_contracts(
     inputs = [install_req_from_line(item) for item in roots]
     inputs.extend(install_req_from_line(item, constraint=True) for item in constraints)
     collected = factory.collect_root_requirements(inputs)
+    catalogue = PipCatalogue(
+        factory,
+        collected,
+        ignore_dependencies=False,
+        upgrade_strategy="to-satisfy-only",
+    )
+
     if expected is None:
         with pytest.raises(InstallationError):
-            resolver._resolve(collected)
+            catalogue.solve()
         return
 
     # Repeated solves must preserve the selected files and dependency graph.
     for _ in range(2):
-        solution = resolver._resolve(collected)
-        selected = solution.mapping
+        solution = catalogue.solve()
+        selected = catalogue.selected(solution)
         assert {
             name: str(candidate.version) for name, candidate in selected.items()
         } == expected
-        assert {
-            (parent, child)
-            for parent, children in solution.graph.items()
-            if parent is not None
-            for child in children
-        } == edges
+        assert set(solution.edges) == edges
         for package, candidate in selected.items():
             assert candidate.source_link is not None
             assert (

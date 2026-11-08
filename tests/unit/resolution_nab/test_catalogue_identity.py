@@ -1,68 +1,115 @@
-"""Retain concrete files, version labels and acquisition modes."""
+"""Retain the concrete file and acquisition mode used by pip."""
 
-from pathlib import Path
+import os
+import subprocess
+import sys
 
-from pip._internal.req.constructors import install_req_from_line
+from pip._vendor.packaging.version import Version
+
+from pip._internal.models.candidate import InstallationCandidate
+from pip._internal.models.link import Link
 from pip._internal.resolution.nab.candidates import as_base_candidate
+from pip._internal.resolution.nab.catalogue import Candidate, PipCatalogue
 from pip._internal.resolution.nab.factory import Factory
-from pip._internal.resolution.nab.host import PipHost
-
-from tests.lib.wheel import make_wheel
 
 
-def test_equal_versions_keep_distinct_files_and_original_labels(
-    factory: Factory, tmp_path: Path
-) -> None:
-    choices = []
-    for directory, version in (("first", "1"), ("second", "1"), ("third", "1.0")):
-        folder = tmp_path / directory
-        folder.mkdir()
-        wheel = Path(make_wheel("probe", version).save_to_dir(folder))
-        (requirement,) = factory.make_requirements_from_spec(wheel.as_uri(), None)
-        candidate, _ = requirement.get_candidate_lookup()
-        assert candidate is not None
-        choices.append(candidate)
+def test_catalogue_identity_rehashes_after_cross_seed_pickle() -> None:
+    setup = """import pickle, sys
+from pip._vendor.packaging.version import Version
+from pip._internal.models.candidate import InstallationCandidate
+from pip._internal.models.link import Link
+from pip._internal.resolution.nab.catalogue import Candidate
+artifact = InstallationCandidate('probe', '1.0', Link('https://index.invalid/probe-1.0-py3-none-any.whl'))
+candidate = Candidate('probe', Version('1.0'), withdrawn=False, artifact=artifact)
+"""
+    payload = subprocess.check_output(
+        [
+            sys.executable,
+            "-c",
+            setup + "sys.stdout.buffer.write(pickle.dumps({candidate: 'metadata'}))",
+        ],
+        env={**os.environ, "PYTHONHASHSEED": "0"},
+    )
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            setup
+            + "assert pickle.loads(sys.stdin.buffer.read())[candidate] == 'metadata'",
+        ],
+        input=payload,
+        env={**os.environ, "PYTHONHASHSEED": "1"},
+        check=True,
+    )
+
+
+def test_equal_versions_keep_distinct_files_and_original_labels() -> None:
+    choices = [
+        Candidate(
+            "probe",
+            Version(version),
+            withdrawn=False,
+            artifact=InstallationCandidate("probe", version, Link(url)),
+        )
+        for version, url in (
+            ("1", "https://index.invalid/probe-1-py3-none-any.whl"),
+            ("1", "https://index.invalid/probe-1.tar.gz"),
+            ("1.0", "https://index.invalid/probe-1.0-py3-none-any.whl"),
+        )
+    ]
+
     assert len(set(choices)) == 3
-    assert [str(choice.version) for choice in choices] == ["1", "1", "1.0"]
+    assert [choice.label for choice in choices] == ["1", "1", "1.0"]
     for choice in choices:
-        assert as_base_candidate(choice) is choice
+        assert PipCatalogue.base_candidate(choice) == choice
+        assert PipCatalogue.base_candidate(choice).artifact is choice.artifact
 
 
 def test_prepared_source_keys_keep_direct_and_index_provenance(
     factory: Factory,
 ) -> None:
-    collected = factory.collect_root_requirements(
-        [install_req_from_line("simplewheel")]
-    )
-    host = PipHost(
-        factory,
-        collected,
-        ignore_dependencies=False,
-        upgrade_strategy="to-satisfy-only",
-    )
-    ordinary = next(
-        iter(
-            host.find_matches(
-                "simplewheel", {"simplewheel": collected.requirements}, {}
-            )
-        )
-    )
+    artifact = factory.index_candidates("simplewheel")[0]
+    ordinary = factory.prepare_index_candidate("simplewheel", artifact)
+    assert ordinary is not None
     assert ordinary.source_link is not None
-    (requirement,) = factory.make_requirements_from_spec(
-        f"simplewheel @ {ordinary.source_link.url}", None
+    (explicit,) = factory.make_requirements_from_spec(
+        f"simplewheel @ {ordinary.source_link.url}", comes_from=None
     )
-    direct, _ = requirement.get_candidate_lookup()
+    direct, _ = explicit.get_candidate_lookup()
     assert direct is not None
-    indexed_requirement = ordinary.get_install_requirement()
-    direct_requirement = direct.get_install_requirement()
-    assert indexed_requirement is not None
-    assert direct_requirement is not None
-    assert not indexed_requirement.is_direct
-    assert direct_requirement.is_direct
-    assert len({ordinary, direct}) == 2
+
+    assert factory.candidate_source_key(ordinary) == (
+        ordinary.source_link,
+        False,
+        False,
+    )
+    assert factory.candidate_source_key(direct) == (ordinary.source_link, False, True)
 
     base = as_base_candidate(direct)
     assert base is not None
-    extras = factory._make_extras_candidate(base, frozenset({"feature"}))
-    assert extras.base is base
-    assert extras.source_link == direct.source_link
+    extras = factory.make_extras_candidate(base, frozenset({"feature"}))
+    assert factory.candidate_source_key(extras) == factory.candidate_source_key(direct)
+
+
+def test_source_modes_remain_distinct_in_candidate_sets() -> None:
+    link = Link("file:///source/probe-1-py3-none-any.whl")
+    modes = [(False, False), (True, False), (False, True)]
+    choices = [
+        Candidate(
+            "probe", Version("1"), withdrawn=False, source_key=(link, editable, direct)
+        )
+        for editable, direct in modes
+    ]
+    equivalent = [
+        Candidate(
+            "probe",
+            Version("1"),
+            withdrawn=False,
+            source_key=(Link(link.url), editable, direct),
+        )
+        for editable, direct in modes
+    ]
+
+    assert choices == equivalent
+    assert len(set(choices)) == 3
+    assert set(choices) == set(equivalent)

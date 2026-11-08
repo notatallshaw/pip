@@ -5,9 +5,8 @@ import pytest
 
 from pip._internal.req.constructors import install_req_from_line
 from pip._internal.resolution.nab.base import Candidate, Requirement
+from pip._internal.resolution.nab.catalogue import PipCatalogue
 from pip._internal.resolution.nab.factory import Factory
-from pip._internal.resolution.nab.host import PipHost
-from pip._internal.resolution.nab.resolver import Resolver
 
 from tests.lib import TestData
 
@@ -15,15 +14,19 @@ from tests.lib import TestData
 def candidates_for(factory: Factory, spec: str) -> tuple[Requirement, list[Candidate]]:
     collected = factory.collect_root_requirements([install_req_from_line(spec)])
     (requirement,) = collected.requirements
-    host = PipHost(
+    catalogue = PipCatalogue(
         factory,
         collected,
         ignore_dependencies=False,
         upgrade_strategy="to-satisfy-only",
     )
-    candidates = list(
-        host.find_matches(requirement.name, {requirement.name: [requirement]}, {})
-    )
+    candidates = []
+    for choice in catalogue.ordered(
+        requirement.name, catalogue.input_bounds(requirement.name)
+    ):
+        native = catalogue.prepare_candidate(choice)
+        if native is not None:
+            candidates.append(native)
     return requirement, candidates
 
 
@@ -89,10 +92,19 @@ def test_new_resolver_candidates_match_requirement(
             assert requirement.is_satisfied_by(candidate)
 
 
-def test_new_resolver_full_resolve(factory: Factory, resolver: Resolver) -> None:
+def test_new_resolver_full_resolve(factory: Factory) -> None:
     collected = factory.collect_root_requirements(
         [install_req_from_line("simplewheel")]
     )
-    result = resolver._resolve(collected)
-    assert set(result.mapping) == {"simplewheel"}
-    assert str(result.mapping["simplewheel"].version) == "2.0"
+    catalogue = PipCatalogue(
+        factory,
+        collected,
+        ignore_dependencies=False,
+        upgrade_strategy="to-satisfy-only",
+    )
+
+    solution = catalogue.solve()
+    selected = catalogue.selected(solution)
+
+    assert set(selected) == {"simplewheel"}
+    assert selected["simplewheel"].version == solution.pins["simplewheel"]

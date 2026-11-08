@@ -15,13 +15,11 @@ import json
 import runpy
 from pip._internal.resolution.nab.candidates import LinkCandidate
 from pip._internal.resolution.nab.factory import Factory
-from pip._vendor.nab_resolver.resolver import Resolver
-from pip._vendor.nab_provider.callbacks import CallbackProvider
+from pip._vendor.nab_provider.prepared_resolution import PreparedResolution
 
 original_prepare = LinkCandidate._prepare
 original_requirements = Factory.make_requirements_from_spec
-original_solve = Resolver.solve
-original_choose = CallbackProvider.choose_version
+original_solve = PreparedResolution.solve
 
 def prepare(candidate):
     print("PREPARE " + candidate.source_link.filename, flush=True)
@@ -33,25 +31,16 @@ def requirements(factory, specifier, comes_from, requested_extras=(), **options)
         factory, specifier, comes_from, requested_extras, **options
     )
 
-def solve(resolver, *args, **kwargs):
-    print("SESSION_BEGIN " + str(resolver.max_iterations), flush=True)
+def solve(session):
+    print("SESSION_BEGIN " + str(session.remaining_rounds), flush=True)
     try:
-        return original_solve(resolver, *args, **kwargs)
+        return original_solve(session)
     finally:
-        print(
-            "SESSION_END " + str(resolver.max_iterations - resolver.stats.rounds),
-            flush=True,
-        )
-
-def choose(provider, package, allowed):
-    chosen = original_choose(provider, package, allowed)
-    print("QUERY_RESULT " + json.dumps([package, chosen is not None]), flush=True)
-    return chosen
+        print("SESSION_END " + str(session.remaining_rounds), flush=True)
 
 LinkCandidate._prepare = prepare
 Factory.make_requirements_from_spec = requirements
-Resolver.solve = solve
-CallbackProvider.choose_version = choose
+PreparedResolution.solve = solve
 runpy.run_module("pip", run_name="__main__", alter_sys=True)
 """
 
@@ -113,6 +102,7 @@ def test_fallback_reuses_prepared_wheels_and_accepts_url_dependencies(
     result = tracked_install(script, "app")
 
     script.assert_installed(app="1.0", dep="3.0")
+    assert "Nab source-domain restart" in result.stdout
     assert preparation_count(result.stdout, newer) == 1
     assert preparation_count(result.stdout, older) == 1
 
@@ -124,6 +114,7 @@ def test_unsatisfiable_catalogue_does_not_retry(
     create_basic_wheel_for_package(script, "dep", "1.0")
     result = tracked_install(script, "app", expect_error=True)
 
+    assert "Nab source-domain restart" not in result.stdout
     assert "No matching distribution found for dep>=2" in result.stdout + result.stderr
     assert preparation_count(result.stdout, app) == 1
 
@@ -167,6 +158,7 @@ def test_unread_url_does_not_retry_after_static_failure(
     )
 
     script.assert_not_installed("dep", "bridge")
+    assert "Nab source-domain restart" not in result.stdout
     assert "PREPARE bridge-1.0-" not in result.stdout
 
 
@@ -184,6 +176,7 @@ def test_catalogue_rejects_an_artifact_without_repreparing_it(
     )
 
     script.assert_installed(pkg="1.0")
+    assert "Nab catalogue success" in result.stdout
     assert preparation_count(result.stdout, rejected) == 1
 
 
@@ -194,7 +187,9 @@ def test_explicit_root_url_discovery_reuses_prepared_metadata(
     result = tracked_install(script, older)
 
     script.assert_installed(app="1.0", dep="3.0")
+    assert "Nab catalogue success" in result.stdout
     assert preparation_count(result.stdout, older) == 1
+    assert result.stdout.count("Nab source-domain restart:") == 1
     script.pip("check")
 
 
@@ -202,6 +197,8 @@ def test_empty_environment_uses_catalogue_without_ignore_installed(
     script: PipTestEnvironment,
 ) -> None:
     create_basic_wheel_for_package(script, "pkg", "1.0")
-    tracked_install(script, "pkg", ignore_installed=False)
+    result = tracked_install(script, "pkg", ignore_installed=False)
 
     script.assert_installed(pkg="1.0")
+    assert "Nab catalogue success" in result.stdout
+    assert "Nab source-domain restart" not in result.stdout

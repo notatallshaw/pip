@@ -42,7 +42,7 @@ def test_explicit_root_uses_catalogue(
     report = script.scratch_path / "report.json"
 
     with context:
-        script.pip(
+        result = script.pip(
             "install",
             "--no-index",
             "--no-build-isolation",
@@ -53,6 +53,8 @@ def test_explicit_root_uses_catalogue(
             *requirements,
         )
 
+    assert "Nab catalogue success" in result.stdout
+    assert "Nab source-domain restart" not in result.stdout
     script.assert_installed(app=version, child="1")
     app = next(
         item
@@ -76,10 +78,11 @@ def test_explicit_root_supplies_transitive_extras(script: PipTestEnvironment) ->
     create_basic_wheel_for_package(script, "bridge", "1", depends=["app[feature]"])
     create_basic_wheel_for_package(script, "child", "1")
 
-    script.pip(
+    result = script.pip(
         "install", "--no-index", "--find-links", script.scratch_path, wheel, "bridge"
     )
 
+    assert "Nab catalogue success" in result.stdout
     script.assert_installed(app="1", bridge="1", child="1")
 
 
@@ -91,7 +94,7 @@ def test_explicit_root_takes_precedence_over_installed_metadata(
     wheel = create_basic_wheel_for_package(script, "app", "1", depends=["child==1"])
     create_basic_wheel_for_package(script, "child", "1")
 
-    script.pip(
+    result = script.pip(
         "install",
         "--no-index",
         "--force-reinstall",
@@ -100,6 +103,7 @@ def test_explicit_root_takes_precedence_over_installed_metadata(
         wheel,
     )
 
+    assert "Nab catalogue success" in result.stdout
     script.assert_installed(app="1", child="1")
     script.assert_not_installed("missing")
 
@@ -131,4 +135,5 @@ def test_explicit_root_obeys_named_requirement(
         assert "ResolutionImpossible" in result.stderr
         script.assert_not_installed("app", "child")
     else:
+        assert "Nab catalogue success" in result.stdout
         script.assert_installed(app="1", child="1")

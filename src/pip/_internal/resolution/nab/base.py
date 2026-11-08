@@ -1,25 +1,24 @@
 from __future__ import annotations
 
-import typing
 from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import cache
-from typing import TYPE_CHECKING
+from typing import NamedTuple, Optional
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from pip._vendor.nab_resolver.values import SlottedValue
 from pip._vendor.packaging.specifiers import SpecifierSet
-from pip._vendor.packaging.utils import NormalizedName, canonicalize_name
+from pip._vendor.packaging.utils import NormalizedName
 from pip._vendor.packaging.version import Version
 
 from pip._internal.models.link import Link, LinkHash, links_equivalent
 from pip._internal.req.req_install import InstallRequirement
 from pip._internal.utils.hashes import FAVORITE_HASH, Hashes
 
-if TYPE_CHECKING:
-    from typing_extensions import override
-else:
-    override = getattr(typing, "override", lambda method: method)
+CandidateLookup = tuple[Optional["Candidate"], InstallRequirement | None]
+
+
+class SourceDomainChanged(Exception):
+    """A newly observed source invalidates the current query."""
 
 
 def format_name(project: NormalizedName, extras: frozenset[NormalizedName]) -> str:
@@ -140,129 +139,34 @@ class Constraint:
         return s
 
 
-class Requirement(SlottedValue):
-    """An original declaration, an exact candidate, or an interpreter bound."""
+class Requirement:
+    @property
+    def project_name(self) -> NormalizedName:
+        """The "project name" of a requirement.
 
-    __match_args__ = ("name", "candidate", "specifier")
-    __slots__ = (
-        "name",
-        "project_name",
-        "candidate",
-        "ireq",
-        "specifier",
-        "is_python",
-        "_display",
-        "_identity",
-    )
+        This is different from ``name`` if this requirement contains extras,
+        in which case ``name`` would contain the ``[...]`` part, while this
+        refers to the name of the project.
+        """
+        raise NotImplementedError("Subclass should override")
 
-    def __init__(
-        self,
-        name: str,
-        project_name: NormalizedName,
-        *,
-        candidate: Candidate | None = None,
-        ireq: InstallRequirement | None = None,
-        specifier: SpecifierSet | None = None,
-        is_python: bool = False,
-        display: str,
-        identity: tuple[object, ...],
-    ) -> None:
-        self.name = name
-        self.project_name = project_name
-        self.candidate = candidate
-        self.ireq = ireq
-        self.specifier = specifier
-        self.is_python = is_python
-        self._display = display
-        self._identity = identity
+    @property
+    def name(self) -> str:
+        """The name identifying this requirement in the resolver.
 
-    @override
-    def identity(self) -> tuple[object, ...]:
-        return self._identity
-
-    @override
-    def __str__(self) -> str:
-        return self._display
-
-    @classmethod
-    def from_install_req(cls, ireq: InstallRequirement) -> Requirement:
-        assert ireq.req is not None and ireq.link is None
-        project = canonicalize_name(ireq.req.name)
-        name = format_name(
-            project, frozenset(canonicalize_name(extra) for extra in ireq.extras)
-        )
-        return cls(
-            name,
-            project,
-            ireq=ireq,
-            specifier=ireq.specifier,
-            display=str(ireq.req),
-            identity=("specifier", name, str(ireq)),
-        )
-
-    @classmethod
-    def from_candidate(cls, candidate: Candidate) -> Requirement:
-        return cls(
-            candidate.name,
-            candidate.project_name,
-            candidate=candidate,
-            display=candidate.format_for_error(),
-            identity=("candidate", candidate),
-        )
-
-    @classmethod
-    def for_python(cls, specifier: SpecifierSet, candidate: Candidate) -> Requirement:
-        return cls(
-            candidate.name,
-            candidate.project_name,
-            candidate=candidate,
-            specifier=specifier,
-            is_python=True,
-            display=f"Python {specifier}",
-            identity=("python", str(specifier), candidate),
-        )
-
-    @classmethod
-    def unavailable(
-        cls,
-        name: NormalizedName,
-        *,
-        source_requirement: InstallRequirement | None = None,
-    ) -> Requirement:
-        display = (
-            str(source_requirement.req)
-            if source_requirement is not None
-            else f"{name} (unavailable)"
-        )
-        return cls(name, name, display=display, identity=("unavailable", name, display))
-
-    def get_candidate_lookup(
-        self,
-    ) -> tuple[Candidate | None, InstallRequirement | None]:
-        if self.candidate is not None:
-            if self.specifier is not None and not self.specifier.contains(
-                self.candidate.version, prereleases=True
-            ):
-                return None, None
-            return self.candidate, None
-        return None, self.ireq
+        This is different from ``project_name`` if this requirement contains
+        extras, where ``project_name`` would not contain the ``[...]`` part.
+        """
+        raise NotImplementedError("Subclass should override")
 
     def is_satisfied_by(self, candidate: Candidate) -> bool:
-        if candidate.name != self.name:
-            return False
-        if self.specifier is not None:
-            return self.specifier.contains(candidate.version, prereleases=True)
-        return self.candidate is not None and candidate == self.candidate
+        return False
+
+    def get_candidate_lookup(self) -> CandidateLookup:
+        raise NotImplementedError("Subclass should override")
 
     def format_for_error(self) -> str:
-        if self.ireq is None:
-            return self._display
-        parts = self._display.split(",")
-        return (
-            ", ".join(parts[:-1]) + " and " + parts[-1]
-            if len(parts) > 1
-            else self._display
-        )
+        raise NotImplementedError("Subclass should override")
 
 
 def _match_link(link: Link, candidate: Candidate) -> bool:
@@ -315,3 +219,10 @@ class Candidate:
 
     def format_for_error(self) -> str:
         raise NotImplementedError("Subclass should override")
+
+
+class RequirementCause(NamedTuple):
+    """A native requirement and the distribution that declared it."""
+
+    requirement: Requirement
+    parent: Candidate | None

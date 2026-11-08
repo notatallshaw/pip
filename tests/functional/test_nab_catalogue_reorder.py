@@ -5,13 +5,13 @@ from tests.lib.wheel import make_wheel
 
 CATALOGUE_PROBE = """\
 import runpy
-from pip._vendor.nab_resolver.resolver import Resolver
+from pip._vendor.nab_provider.prepared_resolution import PreparedResolution
 
-original = Resolver.solve
-def solve(resolver, *args, **kwargs):
+original = PreparedResolution.solve
+def solve(session):
     print("CATALOGUE_SOLVE", flush=True)
-    return original(resolver, *args, **kwargs)
-Resolver.solve = solve
+    return original(session)
+PreparedResolution.solve = solve
 runpy.run_module("pip", run_name="__main__", alter_sys=True)
 """
 
@@ -63,6 +63,7 @@ def test_requested_roots_resolve_without_restarting_the_catalogue(
 
     script.assert_installed(app="16", parent="24", hub="1", blocker="1")
     assert result.stdout.splitlines().count("CATALOGUE_SOLVE") == 1
+    assert "Nab catalogue success" in result.stdout
     assert sum(wheel.name in result.stdout for wheel in apps) == 1
     assert sum(wheel.name in result.stdout for wheel in parents) <= 24
     assert (
@@ -82,6 +83,7 @@ def test_root_priority_preserves_backtracking_when_the_first_root_is_blocking(
 
     script.assert_installed(app="16", parent="24", hub="1", blocker="1")
     assert result.stdout.splitlines().count("CATALOGUE_SOLVE") == 1
+    assert "Nab catalogue success" in result.stdout
     assert sum(wheel.name in result.stdout for wheel in apps) > 1
     assert sum(wheel.name in result.stdout for wheel in parents) <= 24
     assert (
@@ -116,7 +118,8 @@ def test_root_priority_keeps_contextual_fallback_for_a_later_url(
     script.assert_installed(
         app="16", parent="24", hub="1", blocker="1", leaf="1", **{"url-parent": "32"}
     )
-    assert result.stdout.splitlines().count("CATALOGUE_SOLVE") == 1
+    assert result.stdout.splitlines().count("CATALOGUE_SOLVE") == 2
+    assert "Nab source-domain restart" in result.stdout
 
 
 def test_requested_wide_root_precedes_the_narrow_root_and_its_dependencies(
@@ -127,4 +130,5 @@ def test_requested_wide_root_precedes_the_narrow_root_and_its_dependencies(
 
     script.assert_installed(parent="24", hub="1", blocker="1")
     assert result.stdout.splitlines().count("CATALOGUE_SOLVE") == 1
+    assert "Nab catalogue success" in result.stdout
     assert sum(wheel.name in result.stdout for wheel in parents) == 1

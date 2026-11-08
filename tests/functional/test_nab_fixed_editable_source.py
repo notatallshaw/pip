@@ -69,8 +69,9 @@ def test_matching_dependency_url_uses_the_fixed_source_mode(
     make_wheel("app", "1", metadata=metadata).save_to_dir(script.scratch_path)
     roots = ("-e", source.as_uri(), "app") if editable else (source.as_uri(), "app")
 
-    tracked_install(script, *roots, options=("--no-build-isolation",))
+    result = tracked_install(script, *roots, options=("--no-build-isolation",))
 
+    assert "Nab source-domain restart" not in result.stdout
     script.assert_installed(app="1", dep="1")
     script.pip("check")
     origin = script.site_packages_path / "dep-1.dist-info" / "direct_url.json"

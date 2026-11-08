@@ -24,8 +24,11 @@ def test_prerelease_after_matching_final_resolution_failure(
     options = {"default": (), "final": ("--only-final=dep",), "pre": ("--pre",)}
     failed = not working_final and policy != "pre"
 
-    tracked_install(script, "dep>1", options=options[policy], expect_error=failed)
+    result = tracked_install(
+        script, "dep>1", options=options[policy], expect_error=failed
+    )
 
+    assert "Nab source-domain restart" not in result.stdout
     if failed:
         script.assert_not_installed("dep")
     else:
@@ -46,8 +49,10 @@ def test_default_admission_keeps_the_final_with_an_older_parent(
     create_basic_wheel_for_package(script, "app", "1", depends=["shared==2"])
     create_basic_wheel_for_package(script, "app", "2", depends=["shared==1"])
 
-    tracked_install(script, "app", "dep>1")
+    result = tracked_install(script, "app", "dep>1")
 
+    assert "Nab source-domain restart" not in result.stdout
+    assert "Nab catalogue success" in result.stdout
     script.assert_installed(app="1", dep="2", shared="2")
     script.pip("check")
 
@@ -77,8 +82,9 @@ def test_original_constraint_can_admit_a_prerelease(
     constraint = script.scratch_path / "constraint.txt"
     constraint.write_text("dep!=2\n")
 
-    tracked_install(script, "dep>1", options=("-c", str(constraint)))
+    result = tracked_install(script, "dep>1", options=("-c", str(constraint)))
 
+    assert "Nab source-domain restart" not in result.stdout
     script.assert_installed(dep="2rc1")
     script.pip("check")
 
@@ -101,8 +107,10 @@ def test_later_parent_can_admit_a_selected_prerelease(
         script, "app", "2", depends=["bridge"] if indirect else [declaration]
     )
 
-    tracked_install(script, "dep>1", "app")
+    result = tracked_install(script, "dep>1", "app")
 
+    assert "Nab source-domain restart" not in result.stdout
+    assert "Nab catalogue success" in result.stdout
     script.assert_installed(app="2", dep="2rc1")
     script.pip("check")
 
@@ -120,7 +128,9 @@ def test_backtracking_a_parent_can_admit_the_same_prerelease(
     create_basic_wheel_for_package(script, "app", "2", depends=["dep>1"])
     create_basic_wheel_for_package(script, "app", "1", depends=[declaration])
 
-    tracked_install(script, "app", "dep>1")
+    result = tracked_install(script, "app", "dep>1")
 
+    assert "Nab source-domain restart" not in result.stdout
+    assert "Nab catalogue success" in result.stdout
     script.assert_installed(app="1", dep="2rc1")
     script.pip("check")

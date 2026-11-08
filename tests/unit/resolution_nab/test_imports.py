@@ -21,12 +21,6 @@ class DenyResolvelib(importlib.abc.MetaPathFinder):
             "pip._vendor.nab_provider.provider", "pip._vendor.nab_provider.target",
             "pip._vendor.nab_provider.marker_holds",
             "pip._vendor.nab_provider.resolver_inputs",
-            "pip._vendor.nab_provider.preference",
-            "pip._vendor.nab_provider.preference_provider",
-            "pip._vendor.nab_provider.prepared_resolution",
-            "pip._vendor.nab_provider.value",
-            "pip._vendor.nab_provider.version_candidates",
-            "pip._vendor.packaging.ranges",
         )
         if any(
             fullname == prefix or fullname.startswith(prefix + ".")

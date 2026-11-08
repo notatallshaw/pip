@@ -64,10 +64,15 @@ def test_late_exact_version_text_uses_the_matching_artifact(
         create_unfixed_url_dependency(script)
         roots.append("bridge")
 
-    script.pip(
+    result = script.pip(
         "install", "-v", "--no-index", "--find-links", script.scratch_path, *roots
     )
 
+    if contextual:
+        assert "Nab source-domain restart" in result.stdout
+    else:
+        assert "Nab catalogue success" in result.stdout
+        assert "Nab source-domain restart" not in result.stdout
     script.assert_installed(app="1")
     if required:
         script.assert_installed(other="2", dep="1.0")
@@ -95,6 +100,8 @@ def test_invalid_metadata_rejects_equivalent_version_text_in_the_same_group(
         allow_stderr_warning=True,
     )
 
+    assert "Nab catalogue success" in result.stdout
+    assert "Nab source-domain restart" not in result.stdout
     assert "Ignoring version 2 of dep since it has invalid metadata" in result.stderr
     script.assert_installed(dep="1")
 
@@ -123,7 +130,7 @@ def test_installed_version_text_does_not_satisfy_another_exact_text(
         create_unfixed_url_dependency(script)
         roots.append("bridge")
 
-    script.pip(
+    result = script.pip(
         "install",
         "-v",
         "--no-index",
@@ -132,6 +139,11 @@ def test_installed_version_text_does_not_satisfy_another_exact_text(
         *roots,
     )
 
+    if contextual:
+        assert "Nab source-domain restart" in result.stdout
+    else:
+        assert "Nab catalogue success" in result.stdout
+        assert "Nab source-domain restart" not in result.stdout
     script.assert_installed(dep="1.0")
     script.pip("check")
 
@@ -148,7 +160,7 @@ def test_version_text_aliases_preserve_original_prerelease_admission(
         ).save_to(script.scratch_path / f"dep-{version}-{build}-py3-none-any.whl")
     create_basic_wheel_for_package(script, "dep", "2rc1")
 
-    script.pip(
+    result = script.pip(
         "install",
         "-v",
         "--no-index",
@@ -161,8 +173,11 @@ def test_version_text_aliases_preserve_original_prerelease_admission(
     )
 
     if allow_prerelease:
+        assert "Nab catalogue success" in result.stdout
+        assert "Nab source-domain restart" not in result.stdout
         script.assert_installed(dep="2rc1")
     else:
+        assert "Nab source-domain restart" not in result.stdout
         script.assert_not_installed("dep")
 
 

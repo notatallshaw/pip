@@ -251,8 +251,16 @@ def test_named_parent_uses_exact_url_child_without_index_query(
     assert any(request["PATH_INFO"] == "/simple/uri-parent/" for request in requests)
     assert not any(request["PATH_INFO"] == "/simple/uri-child/" for request in requests)
     lines = result.stdout.splitlines()
-    assert preparation_count(result.stdout, older) <= 1
+    restarts = [
+        position
+        for position, line in enumerate(lines)
+        if line.startswith("Nab source-domain restart:")
+    ]
+    assert len(restarts) == (2 if reconsider else 1)
+    assert preparation_count(result.stdout, older) == 1
     if reconsider:
+        older_read = lines.index("PREPARE " + older.name)
+        assert restarts[0] < older_read < restarts[1]
         assert auxiliary is not None
         assert any(
             auxiliary.as_uri() in line

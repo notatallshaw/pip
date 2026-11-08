@@ -4,18 +4,19 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import gc
 import logging
 import os
+import sys
 from collections import defaultdict
+from collections.abc import Iterator
 from typing import NamedTuple
 
-from pip._vendor.nab_provider.callbacks import CallbackProvider
+from pip._vendor.nab_provider.preference import IncompletePreferenceError
 from pip._vendor.nab_resolver.errors import (
     ResolutionError,
-    ResolutionTerminatedError,
 )
-from pip._vendor.nab_resolver.predicate_ranges import PredicateRange
-from pip._vendor.nab_resolver.resolver import Resolver as NabResolver
+from pip._vendor.nab_resolver.resolver import DEFAULT_MAX_ITERATIONS
 from pip._vendor.packaging.utils import canonicalize_name
 from pip._vendor.packaging.version import Version
 
@@ -30,15 +31,34 @@ from pip._internal.resolution.base import BaseResolver, InstallRequirementProvid
 from pip._internal.resolution.nab.base import (
     Candidate,
     Requirement,
+    SourceDomainChanged,
 )
+from pip._internal.resolution.nab.catalogue import PipCatalogue
 from pip._internal.resolution.nab.factory import CollectedRootRequirements, Factory
-from pip._internal.resolution.nab.host import PipHost
-from pip._internal.resolution.nab.reporter import PipDebuggingReporter
+from pip._internal.resolution.nab.reporter import (
+    PipDebuggingReporter,
+    PipProgressReporter,
+)
 from pip._internal.utils.packaging import get_requirement
 
 logger = logging.getLogger(__name__)
+_IS_CPYTHON = sys.implementation.name == "cpython"
 
 DependencyGraph = dict[str | None, set[str | None]]
+
+
+@contextlib.contextmanager
+def _collector_paused() -> Iterator[None]:
+    """Restore a collector that this context temporarily disabled."""
+    # CPython still releases acyclic objects through reference counting.
+    enabled = _IS_CPYTHON and gc.isenabled()
+    if enabled:
+        gc.disable()
+    try:
+        yield
+    finally:
+        if enabled:
+            gc.enable()
 
 
 class Result(NamedTuple):
@@ -47,6 +67,7 @@ class Result(NamedTuple):
     mapping: dict[str, Candidate]
     graph: DependencyGraph
     requirements: dict[str, list[Requirement]] | None = None
+    index_reinstalls: frozenset[str] = frozenset()
 
 
 class Resolver(BaseResolver):
@@ -73,7 +94,8 @@ class Resolver(BaseResolver):
         assert upgrade_strategy in self._allowed_strategies
         assert not (ignore_dependencies and only_dependencies)
 
-        self.factory = Factory(
+        self._make_factory = functools.partial(
+            Factory,
             finder=finder,
             preparer=preparer,
             make_install_req=make_install_req,
@@ -84,54 +106,68 @@ class Resolver(BaseResolver):
             ignore_requires_python=ignore_requires_python,
             py_version_info=py_version_info,
         )
+        self.factory = self._make_factory()
         self.ignore_dependencies = ignore_dependencies
         self.only_dependencies = only_dependencies
         self.upgrade_strategy = upgrade_strategy
         self._result: Result | None = None
 
     def _resolve(self, collected: CollectedRootRequirements) -> Result:
-        host = PipHost(
-            self.factory,
-            collected,
-            ignore_dependencies=self.ignore_dependencies,
-            upgrade_strategy=self.upgrade_strategy,
-        )
-        provider = CallbackProvider(host, collected.requirements)
+        factory = self.factory
         reporter = (
             PipDebuggingReporter() if "PIP_RESOLVER_DEBUG" in os.environ else None
         )
-        if reporter is not None:
-            reporter.starting()
-        resolver = NabResolver(
-            provider,
-            observer=reporter,
-            range_type=PredicateRange,
-            max_iterations=200000,
-            availability_generation=provider.availability_generation,
-        )
-        try:
-            solution = resolver.solve(provider.root_requirements())
-        except ResolutionTerminatedError as error:
-            raise InstallationError(str(error)) from error
-        except ResolutionError as error:
-            if error.incompatibility is None:
-                raise InstallationError(str(error)) from error
-            causes = provider.failure_causes(error.incompatibility)
-            if not causes:
-                raise InstallationError(str(error)) from error
-            raise self.factory.get_installation_error(
-                causes, collected.constraints
-            ) from error
+        progress = PipProgressReporter()
+        remaining = DEFAULT_MAX_ITERATIONS
+        try_live = True
+        with _collector_paused(), factory.catalogue_context():
+            while True:
+                epoch = factory.source_epoch
+                catalogue = PipCatalogue(
+                    factory,
+                    collected,
+                    ignore_dependencies=self.ignore_dependencies,
+                    upgrade_strategy=self.upgrade_strategy,
+                )
+                try:
+                    solution = catalogue.solve(
+                        reporter,
+                        max_rounds=remaining,
+                        on_candidate_considered=progress.candidate_considered,
+                        try_live=try_live,
+                    )
+                except SourceDomainChanged as error:
+                    if factory.source_epoch == epoch:
+                        raise InstallationError(str(error)) from error
+                    remaining = catalogue.remaining_rounds
+                    # Newly observed source choices need the full admission path.
+                    try_live = False
+                    logger.info("Nab source-domain restart: %s", error)
+                    continue
+                except IncompletePreferenceError as error:
+                    raise InstallationError(
+                        f"No matching installation found: {error}"
+                    ) from error
+                except ResolutionError as error:
+                    raise InstallationError(str(error)) from error
+                break
 
+        logger.info("Nab catalogue success")
         graph: DependencyGraph = {None: set(solution.roots)}
         graph.update((package, set()) for package in solution.pins)
         for parent, child in solution.edges:
             graph[parent].add(child)
+
         requirements: dict[str, list[Requirement]] = defaultdict(list)
-        for cause in provider.causes():
-            if cause.parent is None or cause.parent in solution.pins.values():
-                requirements[cause.requirement.project_name].append(cause.requirement)
-        return Result(dict(solution.pins), graph, requirements)
+        for declarations in catalogue.selected_requirements(solution).values():
+            for requirement in declarations:
+                requirements[requirement.project_name].append(requirement)
+        return Result(
+            dict(catalogue.selected(solution)),
+            graph,
+            requirements,
+            catalogue.selected_index_reinstalls(),
+        )
 
     def installed_version_satisfies(
         self, package: str, version: Version, collected: CollectedRootRequirements
@@ -175,13 +211,12 @@ class Resolver(BaseResolver):
                         )
                 continue
 
-            ireq.user_supplied = candidate.project_name in collected.user_requested
             installed_dist = self.factory.get_dist_to_uninstall(candidate)
             if installed_dist is None:
                 ireq.should_reinstall = False
             elif self.factory.force_reinstall:
                 ireq.should_reinstall = True
-            elif self.factory.replaces_installed_metadata(candidate):
+            elif candidate.project_name in result.index_reinstalls:
                 ireq.should_reinstall = True
             elif installed_dist.version != candidate.version or (
                 str(installed_dist.version) != str(candidate.version)
