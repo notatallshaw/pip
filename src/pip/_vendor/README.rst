@@ -99,9 +99,9 @@ Modifications
   rather than ``appdirs``.
 * ``packaging`` has been modified to import its dependencies from
   ``pip._vendor``.
-* ``nab-resolver`` carries the generic solver, predicate ranges, proof and
-  deferred-query APIs from the same source snapshot as the provider subset.
-  Its patch is based on release 0.0.26; see ``nab_resolver/PROVENANCE.md``.
+* ``nab-resolver`` carries the resolver and deferred-query APIs from the same
+  source snapshot as the provider subset. Its patch is based on release 0.0.26;
+  see ``nab_resolver/PROVENANCE.md``.
 * ``nab-provider`` retains native requirement callbacks and lazy candidate-group
   iteration, with its compatibility helper and a minimal initializer.
   Its patch is based on release 0.0.26; see ``nab_provider/PROVENANCE.md``.

@@ -5,7 +5,7 @@ new file mode 100644
 @@ -0,0 +1,7 @@
 +# Resolver source snapshot
 +
-+The base distribution is nab-resolver 0.0.26. The patch selects source from `nab-resolver/src/nab_resolver` at signed Nab commit `9810c84c2d9485bbdb220972764894978031b54b` (tree `853724456ed5afe7d6ad1fe257ce2b0627925b19`), based on main `53112670b7ec73f98bd986bd290406b954792627`. Pip's vendoring tool redirects imports to `pip._vendor`.
++The base distribution is nab-resolver 0.0.26. The patch selects source from `nab-resolver/src/nab_resolver` at signed Nab commit `f5550702cb034e8908ce45d463d1ab6006bb2d34` (tree `408328524c3e75b0120d8df8d7ddbe5b60992a24`), based on main `3a92b9ad22a15d12f563608864d004145984b312`. Pip's vendoring tool redirects imports to `pip._vendor`.
 +
 +The subset includes predicate ranges, deferred availability, decision reconsideration, shared values, proof traversal and selection traversal. It omits `diagnostics.py`, `testing.py` and `version_spans.py`, and uses a minimal initializer. Pip supplies its own error rendering; the omitted modules remain in Nab.
 +
@@ -90,12 +90,11 @@ diff --git a/src/pip/_vendor/nab_resolver/decide.py b/src/pip/_vendor/nab_resolv
          return None
  
      # Readiness can depend on decisions changed by propagation or backtracking.
-@@ -84,21 +96,32 @@
+@@ -84,21 +96,31 @@
              tiebreak_cache[package] = tiebreak
          return (ready_penalty, priority, tiebreak)
  
-+    if excluded is not None:
-+        resolver.solution.take_changed_packages()
++    if bool(excluded):
 +        return min(undecided, key=sort_key)
 +
 +    changed = resolver.solution.take_changed_packages()
@@ -126,7 +125,7 @@ diff --git a/src/pip/_vendor/nab_resolver/decide.py b/src/pip/_vendor/nab_resolv
      """
      current_range = resolver.solution.get(package) or resolver.range_type.full()
      constraint = resolver.constraints.get(package)
-@@ -106,15 +129,23 @@
+@@ -106,15 +128,23 @@
          current_range = current_range & constraint
  
      provider = resolver.provider
@@ -153,7 +152,7 @@ diff --git a/src/pip/_vendor/nab_resolver/decide.py b/src/pip/_vendor/nab_resolv
  
  
  def _normalize_terms(
-@@ -142,6 +173,8 @@
+@@ -142,6 +172,8 @@
      the default ``NO_VERSIONS`` clause this turn.
      """
      clauses = list(resolver.provider.consume_pending_clauses())
@@ -162,7 +161,7 @@ diff --git a/src/pip/_vendor/nab_resolver/decide.py b/src/pip/_vendor/nab_resolv
      for incompatibility in clauses:
          _normalize_terms(resolver, incompatibility)
          add_incompatibility(resolver, incompatibility)
-@@ -191,15 +224,22 @@
+@@ -191,15 +223,22 @@
  
  
  def record_no_versions(
@@ -187,7 +186,7 @@ diff --git a/src/pip/_vendor/nab_resolver/decide.py b/src/pip/_vendor/nab_resolv
          return
  
      current_range = resolver.solution.get(package) or resolver.term_top
-@@ -224,3 +264,32 @@
+@@ -224,3 +263,32 @@
              constraint_range=constraint_range,
          ),
      )
@@ -264,6 +263,78 @@ new file mode 100644
 +        self.generation = generation
 +        self.derivations = derivations
 +        self.decisions = decisions
+diff --git a/src/pip/_vendor/nab_resolver/partial_solution.py b/src/pip/_vendor/nab_resolver/partial_solution.py
+--- a/src/pip/_vendor/nab_resolver/partial_solution.py
++++ b/src/pip/_vendor/nab_resolver/partial_solution.py
+@@ -22,7 +22,7 @@
+ 
+ import operator
+ from collections import defaultdict
+-from collections.abc import Mapping
++from collections.abc import ItemsView, Mapping
+ from typing import TYPE_CHECKING, Any, Final, Generic, TypeVar, cast, overload
+ from weakref import ref
+ 
+@@ -73,7 +73,7 @@
+     __slots__ = ("__weakref__", "_live", "_shadow")
+ 
+     def __init__(self, live: dict[PackageType, _ValueType]) -> None:
+-        self._live = live
++        self._live: dict[PackageType, _ValueType] = live
+         # A value or _ABSENT. Any rather than that union, which no checker
+         # narrows the sentinel back out of.
+         self._shadow: dict[PackageType, Any] = {}
+@@ -89,7 +89,7 @@
+         Backtracking rewrites most of the map at once, where one copy beats
+         recording each package on its way out.
+         """
+-        frozen = dict(self._live)
++        frozen = self._live.copy()
+         for package, value in self._shadow.items():
+             if value is _ABSENT:
+                 frozen.pop(package, None)
+@@ -150,6 +150,20 @@
+         for package in self._live:
+             if shadow.get(package, _UNSET) is not _ABSENT:
+                 yield package
++
++    def iter_items(self) -> Iterator[tuple[PackageType, _ValueType]]:
++        """Yield frozen entries in the snapshot's original key order."""
++        shadow = self._shadow
++        for package, live in self._live.items():
++            frozen = shadow.get(package, _UNSET)
++            if frozen is _UNSET:
++                yield package, live
++            elif frozen is not _ABSENT:
++                yield package, self[package]
++
++    @override
++    def items(self) -> ItemsView[PackageType, _ValueType]:
++        return _SnapshotItems(self)
+ 
+     @override
+     def __len__(self) -> int:
+@@ -164,6 +178,20 @@
+             if shadow.get(package, _UNSET) is not _ABSENT:
+                 return True
+         return False
++
++
++class _SnapshotItems(ItemsView[PackageType, _ValueType]):
++    """Iterate frozen entries without a second mapping lookup per key."""
++
++    __slots__ = ("snapshot",)
++
++    def __init__(self, snapshot: _Snapshot[PackageType, _ValueType]) -> None:
++        super().__init__(snapshot)
++        self.snapshot = snapshot
++
++    @override
++    def __iter__(self) -> Iterator[tuple[PackageType, _ValueType]]:
++        return self.snapshot.iter_items()
+ 
+ 
+ def _take_snapshot(
 diff --git a/src/pip/_vendor/nab_resolver/predicate_ranges.py b/src/pip/_vendor/nab_resolver/predicate_ranges.py
 new file mode 100644
 --- /dev/null
@@ -1003,7 +1074,7 @@ diff --git a/src/pip/_vendor/nab_resolver/resolver.py b/src/pip/_vendor/nab_reso
  
      Supplies ``begin_decision_scan``, ``is_ready``,
      ``receive_partial_solution_hint``, ``consume_pending_clauses``,
-@@ -383,7 +385,9 @@
+@@ -383,9 +385,12 @@
          """Return no clauses: ``choose_version`` queues none."""
          return []
  
@@ -1012,9 +1083,13 @@ diff --git a/src/pip/_vendor/nab_resolver/resolver.py b/src/pip/_vendor/nab_reso
 +        self,
 +    ) -> Sequence[PackageType | DecisionRetreat[PackageType]]:
          """Return no targets: there is no force-backtrack signal to give."""
-         return []
+-        return []
++        targets: list[PackageType | DecisionRetreat[PackageType]] = []
++        return targets
  
-@@ -656,6 +660,8 @@
+     def narrow_for_display(
+         self, package: PackageType, constraint: RangeProtocol[VersionType]
+@@ -656,6 +661,8 @@
          range_type: type[RangeProtocol[Any]] = Range,
          root_version: Any = 1,
          format_range: Callable[[Any], str] = str,
@@ -1023,7 +1098,7 @@ diff --git a/src/pip/_vendor/nab_resolver/resolver.py b/src/pip/_vendor/nab_reso
      ) -> None:
          """Create a resolver with the given provider and optional observer.
  
-@@ -666,6 +672,18 @@
+@@ -666,6 +673,18 @@
          :class:`packaging.ranges.VersionRange` requires a parseable
          version string or :class:`~packaging.version.Version` here.
  
@@ -1042,7 +1117,7 @@ diff --git a/src/pip/_vendor/nab_resolver/resolver.py b/src/pip/_vendor/nab_reso
          ``format_range`` renders a constraint in a failure report.  It travels
          with ``range_type``: the default ``str`` reads well for
          :class:`~nab_resolver.ranges.Range`, while a range type whose ``str``
-@@ -673,6 +691,11 @@
+@@ -673,6 +692,11 @@
          """
          self.provider = provider
          self.preferred_trial_consumed = False
@@ -1054,7 +1129,7 @@ diff --git a/src/pip/_vendor/nab_resolver/resolver.py b/src/pip/_vendor/nab_reso
  
          # Recording the provider rather than a flag keeps the answer tied to
          # the object it was asked about, so a provider swapped into
-@@ -815,7 +838,8 @@
+@@ -815,7 +839,8 @@
          ``~range_type.empty()``, which may be strictly narrower; see
          :class:`~nab_resolver.types.RangeProtocol`.
  
@@ -1064,7 +1139,7 @@ diff --git a/src/pip/_vendor/nab_resolver/resolver.py b/src/pip/_vendor/nab_reso
          """
          if self.preferred_trial_consumed:
              message = (
-@@ -851,13 +875,32 @@
+@@ -851,13 +876,32 @@
                  continue
  
              # Phase 3: Decision making.
@@ -1101,7 +1176,7 @@ diff --git a/src/pip/_vendor/nab_resolver/resolver.py b/src/pip/_vendor/nab_reso
  
          exceeded_message = f"Resolution exceeded {self.max_iterations} iterations"
          raise ResolutionLimitError(exceeded_message)
-@@ -1014,7 +1057,7 @@
+@@ -1014,7 +1058,7 @@
                  ],
                  cause=IncompatibilityCause.DEPENDENCY,
              )
@@ -1110,7 +1185,7 @@ diff --git a/src/pip/_vendor/nab_resolver/resolver.py b/src/pip/_vendor/nab_reso
              narrowed = self.solution.derive(
                  dependency, dependency_range, positive=True, cause=clause
              )
-@@ -1060,6 +1103,8 @@
+@@ -1060,6 +1104,8 @@
          restarts_remaining: int,
      ) -> tuple[Any, int, int]:
          """Run conflict resolution, targeted backtrack, and restart phases."""
@@ -1119,7 +1194,7 @@ diff --git a/src/pip/_vendor/nab_resolver/resolver.py b/src/pip/_vendor/nab_reso
          self.stats.conflicts += 1
          self.observer.on_conflict(conflicting_incompatibility)
          learned = conflict.conflict_resolution(self, conflicting_incompatibility)
-@@ -1077,9 +1122,51 @@
+@@ -1077,9 +1123,51 @@
              changed_package = ROOT
          return changed_package, restart_threshold, restarts_remaining
  
@@ -1173,7 +1248,7 @@ diff --git a/src/pip/_vendor/nab_resolver/resolver.py b/src/pip/_vendor/nab_reso
          had_pending = decide.absorb_pending_clauses(self)
  
          # Provider-driven force back-track. When the provider returns
-@@ -1087,8 +1174,7 @@
+@@ -1087,8 +1175,7 @@
          # blockers before the candidate is decided.
          force_targets = list(self.provider.consume_force_backtrack_targets())
          if force_targets:
@@ -1183,7 +1258,7 @@ diff --git a/src/pip/_vendor/nab_resolver/resolver.py b/src/pip/_vendor/nab_reso
              if triggering is not None:
                  return triggering
  
-@@ -1185,6 +1271,8 @@
+@@ -1185,6 +1272,8 @@
          constraints: Mapping[PackageType, RangeProtocol[VersionType]] | None,
      ) -> None:
          """Reset solver state for a new resolution."""
