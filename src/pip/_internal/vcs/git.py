@@ -11,6 +11,7 @@ from typing import Any
 from pip._internal.exceptions import BadCommand, InstallationError
 from pip._internal.utils.misc import HiddenText, display_path, hide_url, strtobool
 from pip._internal.utils.subprocess import make_command
+from pip._internal.utils.temp_dir import TempDirectory, TempDirectoryKind
 from pip._internal.vcs.versioncontrol import (
     AuthInfo,
     RemoteNotFoundError,
@@ -73,6 +74,10 @@ class Git(VersionControl):
     # https://github.com/pypa/pip/issues/1130
     unset_environ = ("GIT_DIR", "GIT_WORK_TREE")
     default_arg_rev = "HEAD"
+
+    def __init__(self, *, reference: str | None = None) -> None:
+        """Borrow immutable objects from the command's reference repository."""
+        self._reference = reference
 
     @staticmethod
     def get_base_rev_args(rev: str) -> list[str]:
@@ -280,6 +285,13 @@ class Git(VersionControl):
             flags = ()
         else:
             flags = ("--verbose", "--progress")
+        if self._reference is not None:
+            flags += ("--reference-if-able", self._reference)
+        deferred_checkout = rev_options.rev is not None and looks_like_hash(
+            rev_options.rev
+        )
+        if deferred_checkout:
+            flags += ("--no-checkout",)
         if self.get_git_version() >= (2, 17) and not strtobool(
             os.environ.get("PIP_NO_PARTIAL_CLONE_FOR_BROKEN_GIT_SERVER", "no")
         ):
@@ -313,6 +325,8 @@ class Git(VersionControl):
                         rev_options.to_args(),
                     )
                     self.run_command(cmd_args, cwd=dest)
+                elif deferred_checkout:
+                    self.run_command(["checkout", "-q", "--force"], cwd=dest)
             elif self.get_current_branch(dest) != branch_name:
                 # Then a specific branch was requested, and that branch
                 # is not yet checked out.
@@ -569,6 +583,45 @@ class Git(VersionControl):
     def should_add_vcs_url_prefix(repo_url: str) -> bool:
         """In either https or ssh form, requirements must be prefixed with git+."""
         return True
+
+
+class GitObjectCache:
+    """Retain immutable objects for this command's independent source checkouts."""
+
+    def __init__(self) -> None:
+        self._sources: dict[str, str] = {}
+        self._pools: dict[str, str] = {}
+
+    def reference_for(self, repository: str) -> str | None:
+        """Copy objects once when a repository is requested a second time."""
+        pool = self._pools.get(repository)
+        if pool is not None:
+            return pool
+        source = self._sources.get(repository)
+        if source is None or not pathlib.Path(source, ".git").is_dir():
+            return None
+
+        # Borrowers and their pool share the build directory cleanup policy.
+        directory = TempDirectory(
+            kind=TempDirectoryKind.REQ_BUILD, globally_managed=True
+        )
+        Git.run_command(
+            [
+                "clone",
+                "--bare",
+                "--local",
+                "--no-hardlinks",
+                "--quiet",
+                source,
+                directory.path,
+            ]
+        )
+        self._pools[repository] = directory.path
+        return directory.path
+
+    def remember(self, repository: str, location: str) -> None:
+        """Keep the first checkout as an optional seed for later requests."""
+        self._sources.setdefault(repository, location)
 
 
 vcs.register(Git)

@@ -60,6 +60,7 @@ from pip._internal.utils.packaging import get_requirement
 from pip._internal.utils.temp_dir import TempDirectory
 from pip._internal.utils.unpacking import unpack_file
 from pip._internal.vcs import vcs
+from pip._internal.vcs.git import Git, GitObjectCache
 
 if TYPE_CHECKING:
     from pip._internal.cli.progress_bars import BarType
@@ -97,10 +98,22 @@ def _check_linked_requirement_metadata(
     check_pypi_direct_references(distribution, source_link)
 
 
-def unpack_vcs_link(link: Link, location: str, verbosity: int) -> None:
+def unpack_vcs_link(
+    link: Link,
+    location: str,
+    verbosity: int,
+    *,
+    git_references: GitObjectCache | None = None,
+) -> None:
     vcs_backend = vcs.get_backend_for_scheme(link.scheme)
     assert vcs_backend is not None
+    repository = None
+    if isinstance(vcs_backend, Git) and git_references is not None:
+        repository, _, _ = vcs_backend.get_url_rev_and_auth(link.url)
+        vcs_backend = Git(reference=git_references.reference_for(repository))
     vcs_backend.unpack(location, url=hide_url(link.url), verbosity=verbosity)
+    if repository is not None and git_references is not None:
+        git_references.remember(repository, location)
 
 
 @dataclass
@@ -173,6 +186,7 @@ def unpack_url(
     verbosity: int,
     download_dir: str | None = None,
     hashes: Hashes | None = None,
+    git_references: GitObjectCache | None = None,
 ) -> File | None:
     """Unpack link into location, downloading if required.
 
@@ -183,7 +197,9 @@ def unpack_url(
     """
     # non-editable vcs urls
     if link.is_vcs:
-        unpack_vcs_link(link, location, verbosity=verbosity)
+        unpack_vcs_link(
+            link, location, verbosity=verbosity, git_references=git_references
+        )
         return None
 
     assert not link.is_existing_dir()
@@ -384,6 +400,7 @@ class RequirementPreparer:
 
         # Memoized downloaded files, as mapping of url: path.
         self._downloaded: dict[str, str] = {}
+        self._git_references = GitObjectCache()
 
         # Previous "header" printed for a link-based InstallRequirement
         self._previous_requirement_header = ("", "")
@@ -726,6 +743,7 @@ class RequirementPreparer:
                     self.verbosity,
                     self.download_dir,
                     hashes,
+                    git_references=self._git_references,
                 )
             except NetworkConnectionError as exc:
                 raise InstallationError(
@@ -810,8 +828,7 @@ class RequirementPreparer:
 
         if link.is_existing_dir():
             logger.debug(
-                "Not copying link to destination directory "
-                "since it is a directory: %s",
+                "Not copying link to destination directory since it is a directory: %s",
                 link,
             )
             return
