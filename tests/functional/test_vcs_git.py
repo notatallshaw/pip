@@ -11,9 +11,16 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from pip._internal.utils.misc import HiddenText
+from pip._internal.models.link import Link
+from pip._internal.operations.prepare import unpack_vcs_link
+from pip._internal.utils.misc import HiddenText, rmtree
+from pip._internal.utils.temp_dir import (
+    TempDirectoryKind,
+    global_tempdir_manager,
+    tempdir_registry,
+)
 from pip._internal.vcs import vcs
-from pip._internal.vcs.git import Git, RemoteNotFoundError
+from pip._internal.vcs.git import Git, GitObjectCache, RemoteNotFoundError
 
 from tests.lib import PipTestEnvironment, create_test_package, git_commit
 
@@ -473,3 +480,108 @@ def test_git_has_commit(script: PipTestEnvironment) -> None:
 
     assert Git.has_commit(repo_dir, sha)
     assert not Git.has_commit(repo_dir, "0" * 40)
+
+
+@pytest.mark.parametrize("current", [False, True])
+def test_pinned_clone_materializes_only_the_requested_tree(
+    script: PipTestEnvironment, tmp_path: pathlib.Path, current: bool
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    script.run("git", "init", "-b", "main", cwd=source)
+    file = source / "package.txt"
+    file.write_text("old")
+    script.run("git", "add", file.name, cwd=source)
+    script.run("git", "commit", "-m", "Add initial package", cwd=source)
+    older = get_head_sha(script, str(source))
+    file.write_text("new")
+    script.run("git", "commit", "-am", "Update package", cwd=source)
+    head = get_head_sha(script, str(source))
+    revision = head if current else older
+    destination = tmp_path / "checkout"
+
+    Git().fetch_new(
+        str(destination),
+        HiddenText(source.as_uri(), redacted="source"),
+        Git.make_rev_options(revision),
+        verbosity=0,
+    )
+
+    assert (destination / file.name).read_text() == ("new" if current else "old")
+    assert get_head_sha(script, str(destination)) == revision
+    assert Git.get_current_branch(str(destination)) == ("main" if current else None)
+    assert not script.run("git", "status", "--porcelain", cwd=destination).stdout
+
+
+def test_reused_git_objects_keep_worktrees_and_revisions_independent(
+    script: PipTestEnvironment, tmp_path: pathlib.Path
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    script.run("git", "init", "-b", "main", cwd=source)
+    script.run("git", "config", "uploadpack.allowFilter", "true", cwd=source)
+    file = source / "package.txt"
+    file.write_text("old")
+    script.run("git", "add", file.name, cwd=source)
+    script.run("git", "commit", "-m", "Add initial package", cwd=source)
+    older = get_head_sha(script, str(source))
+    references = GitObjectCache()
+    first, second = tmp_path / "first", tmp_path / "second"
+    unpack_vcs_link(
+        Link(f"git+{source.as_uri()}@{older}#subdirectory=one"),
+        str(first),
+        0,
+        git_references=references,
+    )
+    (first / file.name).write_text("local change")
+
+    file.write_text("new")
+    script.run("git", "commit", "-am", "Update package", cwd=source)
+    current = get_head_sha(script, str(source))
+    unpack_vcs_link(
+        Link(f"git+{source.as_uri()}@{current}#subdirectory=two"),
+        str(second),
+        0,
+        git_references=references,
+    )
+
+    assert (first / file.name).read_text() == "local change"
+    assert (second / file.name).read_text() == "new"
+    assert get_head_sha(script, str(first)) == older
+    assert get_head_sha(script, str(second)) == current
+    rmtree(str(first))
+    rmtree(str(source))
+    (second / file.name).write_text("modified again")
+    script.run("git", "checkout", "--", file.name, cwd=second)
+    assert (second / file.name).read_text() == "new"
+
+
+@pytest.mark.parametrize("keep", [False, True])
+def test_git_object_pool_follows_source_cleanup_policy(
+    script: PipTestEnvironment, tmp_path: pathlib.Path, keep: bool
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    script.run("git", "init", "-b", "main", cwd=source)
+    (source / "package.txt").write_text("original")
+    script.run("git", "add", "package.txt", cwd=source)
+    script.run("git", "commit", "-m", "Add package", cwd=source)
+    revision = get_head_sha(script, str(source))
+    link = Link(f"git+{source.as_uri()}@{revision}")
+    references = GitObjectCache()
+
+    with tempdir_registry() as registry, global_tempdir_manager():
+        registry.set_delete(TempDirectoryKind.REQ_BUILD, not keep)
+        first, second = tmp_path / "first", tmp_path / "second"
+        unpack_vcs_link(link, str(first), 0, git_references=references)
+        unpack_vcs_link(link, str(second), 0, git_references=references)
+        borrowed = second / ".git" / "objects" / "info" / "alternates"
+        objects = pathlib.Path(borrowed.read_text().strip())
+        assert objects.is_dir()
+        rmtree(str(first))
+        rmtree(str(source))
+        (second / "package.txt").write_text("changed")
+        script.run("git", "checkout", "--", "package.txt", cwd=second)
+        assert (second / "package.txt").read_text() == "original"
+
+    assert objects.is_dir() == keep
