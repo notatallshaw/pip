@@ -1,191 +1,66 @@
-"""Keep Pip's candidate choices and prepared facts available to Nab's search.
+"""Remember Pip's candidate choices and metadata while Nab searches.
 
-A resolution can revisit the same files and dependency bounds many times.
-Pip already caches prepared distributions. The catalogue also retains the
-choices, their order and their dependency declarations, so Nab can reuse them
-while backtracking or checking a different set of allowed candidates. Such
-preference queries can ask whether a solution can avoid a yanked release.
+Backtracking can ask about the same files and dependencies repeatedly. This
+catalogue keeps those facts available without preparing every candidate::
 
-Data flow::
+    Pip finder / preparer <--> Catalogue <--> Nab search
+       files and metadata     known facts    IDs and constraints
 
-    Pip finder / preparer <--> PipCatalogue <--> Nab prepared provider
-      files, distributions     choices, facts     IDs, ranges, proofs
-                                                        |
-                                                    Nab solver
+Pip finds and prepares files, evaluates markers and enforces its source rules.
+Nab assigns candidate IDs and searches for a valid selection.
 
-The finder applies Pip's index and file rules. The preparer reads metadata or
-runs build hooks. This module keeps the resulting native objects and checks
-Pip's requirement, upgrade and source rules against a complete selection.
-Nab owns integer encoding, preference queries and the solver. The catalogue
-grows as packages are reached; listing choices does not prepare every file.
+What is kept
+------------
+* Inputs: original requirements, constraints, requested order, version bounds,
+  permitted sources and hashes, dependency/upgrade settings, and access to
+  Pip's configured Python, platform, build and installation policy.
+* Identity: package and extras, version value and text, yanked status, the
+  particular file or source, editable/direct-URL flags, native preparation
+  handles and the cached comparison key.
+* Choices: candidates for each package, finder file order, same-release file
+  groups and cached ordering for an allowed version range.
+* Metadata: prepared native candidates, applicable requirement objects,
+  dependency ranges, original exact pins and bindings to specific base,
+  self, interpreter or source candidates.
+* Preparation: known native candidates, installed availability and preparation
+  callables, and requirement templates carrying provenance, extras, build
+  options and hashes.
+* Status: unread metadata, final rejections, unavailable reads, missing
+  listings, invalid-version groups and explanations. Unavailable information
+  must not be treated as proof that no solution exists.
+* Result: the exact selected candidates, requirements needed for installation
+  and diagnostics, derived dependency edges/reinstalls, and remaining rounds.
 
-Catalogue inventory
--------------------
-The following list covers the state retained by this module and the shared
-``PreparedVersionCatalogue`` base. Some entries are references to Pip objects,
-so their information stays with the object that owns it.
+Reuse and lifetime
+------------------
+One catalogue lasts for one attempt with a fixed set of known sources.
+Backtracking and preference queries share its facts. Nab shares candidate IDs
+within the session and caches encoded dependencies within each query. A
+preference result applies to the choices it checked. The factory keeps native
+caches and source-discovery records.
 
-1. Inputs and fixed policy
+A newly discovered source starts a fresh catalogue with the remaining budget.
+Knowing a URL exists does not authorize its use: it still needs a matching
+input constraint, a dependency reached from the inputs, or a permitted
+installed replacement.
 
-   * ``collected`` retains the original root requirements, constraints and
-     user-requested package order. Constraint objects include version bounds,
-     permitted links and hash options; the original objects remain available
-     for native checks and error messages.
-   * ``roots`` holds version ranges for root identifiers, including extras;
-     ``constraints`` holds base-package constraint ranges. ``range_type``
-     selects Pip's VersionRange algebra.
-   * ``ignore_dependencies`` and ``upgrade_strategy`` control dependency reads
-     and installed-version preference.
-   * ``factory`` supplies the configured finder, preparer, wheel cache,
-     installed environment and target Python. It applies force-reinstall,
-     user-site, installed-distribution and Requires-Python policy. Pip's objects
-     also handle supported file formats and wheel tags, release policy and
-     build options.
+Simple examples
+---------------
+* A 2 depends on B>=1,<3. After reading A's metadata, a backtrack over C can
+  reuse A's facts and, within the same query, its encoded B constraint.
+* A 2 has a wheel and an sdist. They are separate candidates. Finder order
+  decides which usable file wins; matching versions do not imply matching
+  metadata.
+* A[ssl]==2 must use the same base artifact as A 2. A base constraint A<2
+  rejects that choice before its extra dependencies are read.
+* C reveals a new B URL. The factory records it and restarts the catalogue;
+  the source still needs authorization from the selected requirements.
 
-2. Exact candidate identities
-
-   * Each ``Candidate`` records its package identifier, parsed ``version``,
-     version text in ``label`` and yanked status in ``withdrawn``. ``base`` is
-     derived from the identifier by removing extras.
-   * ``artifact`` identifies a particular finder file. ``source_key`` is the
-     original source link, editable flag and ``is_direct`` flag (whether the
-     requirement was a direct URL). ``origin`` retains a native candidate for
-     preparing a known source.
-   * ``_identity`` caches the fields used for equality and hashing; ``origin``
-     is a preparation handle and does not participate in that comparison.
-   * Index files, installed distributions, declared or discovered URL sources,
-     and synthetic choices such as Requires-Python all need representation.
-     Equal version numbers alone do not establish equal file or source identity.
-
-3. Available choices and ordering
-
-   * ``candidates`` caches the candidate tuple for each package identifier.
-     ``read_choices()`` uses fixed input or synthetic choices directly.
-     Otherwise, it combines the installed choice, finder files and sources
-     already observed by the factory.
-   * ``file_groups`` retains finder order within a package, version label and
-     yanked status. A successful earlier file excludes later files in its group.
-   * ``_ordered`` caches an ordered result for a package and allowed version
-     range, together with the candidate tuple it came from. Replacing that
-     tuple invalidates the entry; an explicit subset bypasses this cache.
-     Callers receive a fresh list. Prerelease and upgrade rules still apply.
-
-4. Prepared metadata and exact dependency bindings
-
-   * ``facts`` maps candidates to ``CandidateData`` or a final rejection.
-     Each successful entry retains the prepared ``native`` candidate, its
-     ``requirements``, merged dependency version ranges in ``dependencies``,
-     and original exact-pin declarations in ``pins``.
-   * Native candidates evaluate markers for their requested extras and Python
-     context. The resulting requirement objects retain checks and provenance
-     for source and hash validation, prerelease admission and conflict reporting.
-     They include Requires-Python and synthetic extras-to-base requirements.
-     ``original_requirements`` omits the synthetic base equality when following
-     the declarations that can authorize a source.
-   * ``exact_dependencies()`` derives concrete bindings from those requirements:
-     self-references, the exact base artifact of an extras candidate, synthetic
-     candidates and explicit source candidates. A version range cannot replace
-     these bindings.
-
-5. Native preparation lookup
-
-   * ``native_candidates`` maps names and versions to native candidates already
-     found in exact requirements, including synthetic interpreter choices.
-   * ``installations`` caches an installed version and its preparation callable,
-     or the absence of an installed choice, for each identifier.
-   * ``templates`` retains InstallRequirement objects used to prepare candidates
-     with their original provenance and options. Preparation also carries the
-     constraint's hash options and the identifier's requested extras.
-
-6. Rejections and incomplete reads
-
-   * An absent ``facts`` entry means no final preparation outcome is recorded.
-     ``CandidateData`` means preparation succeeded; ``None`` means the candidate
-     is rejected under this catalogue's metadata or file policy.
-   * ``invalid_versions`` records metadata-invalid base/version/yanked groups;
-     ``rejections`` keeps their diagnostic explanations.
-   * ``unavailable`` and ``missing_listings`` record unresolved reads, with
-     ``unavailable_reason`` explaining incompleteness. These shared catalogue
-     fields distinguish unavailable information from a proven rejection.
-
-7. Selected result and remaining work budget
-
-   * ``selection`` retains the exact chosen candidates. Cached facts supply
-     their native installation objects and original requirements. Dependency
-     edges and same-version index reinstalls are derived from that selection.
-   * ``remaining_rounds`` is read from the prepared session on success or failure,
-     so a source-discovery restart keeps the spent work.
-
-State outside the catalogue
----------------------------
-One catalogue belongs to one source-discovery attempt. Backtracking and
-preference queries reuse its facts; the source-discovery example below shows
-when the resolver must replace it.
-
-The factory retains native candidate/build caches, hash-check results, observed
-sources, input source keys, installed self-replacement sources and
-``source_epoch``. A known URL needs a reason to be selected: an input constraint,
-a requirement reached from the inputs through selected dependencies, or an
-installed replacement allowed by the original requirements.
-
-Nab's prepared provider owns the candidate-to-integer tables shared by its
-scoped queries. Each query has its own restrictions, encoded dependencies,
-matching counts, partial-selection view, queued clauses and permission support.
-The preference search keeps proof outcomes and the shared work budget; the
-solver keeps its search state. New queries rebuild their context-dependent
-information while sharing catalogue facts and candidate IDs.
-
-Examples
---------
-Suppose the available B choices are non-yanked versions 1, 2 and 3::
-
-    Choice       Example ID   Known dependencies
-    -----------  ----------   ------------------
-    A 2, wheel   7            B>=1,<3
-    B 1, wheel   11           not prepared yet
-    B 2, wheel   12           not prepared yet
-    B 3, wheel   13           not prepared yet
-
-Nab encodes A's dependency as the allowed B IDs {11, 12}. If it backtracks over
-an unrelated C choice, the same query can reuse that encoding and A's metadata.
-The IDs are internal identifiers, not version numbers or persisted cache keys.
-
-Two files can advertise A 2: a preferred wheel and an sdist. They remain distinct
-candidates. The sdist can be considered only if no earlier file succeeds.
-After a successful wheel preparation, the catalogue excludes the later file.
-
-For A[ssl]==2, the extras candidate binds to the same base artifact of A 2.
-A root constraint A<2 must reject that choice before its extra dependencies
-are read. An exact pin to a yanked version can require a separate permission
-proof; the yanked flag alone is not permission to use the candidate.
-
-Suppose C's metadata introduces B @ https://example.org/b-1-py3-none-any.whl.
-The factory records the newly observed source and advances ``source_epoch``.
-The resolver creates a fresh catalogue with that choice, using the remaining
-budget. The source can be selected only through a declaration that authorizes it.
-
-Search and other costs
-----------------------
-Reuse needs inexpensive operations: cached identity keys and ordering, batched
-integer ranges and dependency encodings cached within each query. The prepared
-session tries these search paths in order:
-
-1. Preferred input or installed choices.
-2. Non-yanked choices, if Pip enabled the trial for this source attempt.
-3. Full preference proofs, if the earlier paths found no plan accepted by Pip.
-
-The non-yanked trial checks its whole-plan policy once per complete selection.
-After source discovery, Pip disables that trial for the restarted attempt.
-Metadata still follows base constraints before extras. All queries and source
-restarts share the existing round budget.
-
-The solver uses its decision heap when exclusions do not require a scan and
-avoids repeated snapshot lookups. Priority distinguishes zero, one or multiple
-matching choices, so counting stops at two.
-
-URL normalization, Git object reuse and a scoped CPython cyclic-GC pause reduce
-other Pip costs. These changes act together; retaining more state also costs
-memory. A catalogue alone does not establish an end-to-end speedup.
+The prepared session tries preferred input/installed choices, then a non-yanked
+trial when enabled, then full preference proofs as needed. Pip disables the
+non-yanked trial after source discovery. All queries and restarts share the
+existing round budget. The catalogue enables reuse; efficient encoding and
+search are still needed to make that reuse fast, and retained facts cost memory.
 """
 
 from __future__ import annotations
