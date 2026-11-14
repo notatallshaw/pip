@@ -48,7 +48,7 @@ from pip._internal.utils.direct_url_helpers import (
     direct_url_for_editable,
     direct_url_from_link,
 )
-from pip._internal.utils.hashes import Hashes, MissingHashes
+from pip._internal.utils.hashes import HashChecks, Hashes, MissingHashes
 from pip._internal.utils.logging import indent_log
 from pip._internal.utils.misc import (
     display_path,
@@ -63,6 +63,7 @@ from pip._internal.vcs import vcs
 
 if TYPE_CHECKING:
     from pip._internal.cli.progress_bars import BarType
+    from pip._internal.utils.hashes import HashChecker
 
 logger = getLogger(__name__)
 
@@ -105,8 +106,11 @@ def unpack_vcs_link(link: Link, location: str, verbosity: int) -> None:
 
 @dataclass
 class File:
+    """A fetched file and the digests computed while validating its bytes."""
+
     path: str
     content_type: str | None = None
+    computed_hashes: dict[str, str] | None = None
 
     def __post_init__(self) -> None:
         if self.content_type is None:
@@ -122,48 +126,36 @@ def get_http_url(
     link: Link,
     download: Downloader,
     download_dir: str | None = None,
-    hashes: Hashes | None = None,
+    hashes: HashChecker | None = None,
 ) -> File:
-    temp_dir = TempDirectory(kind="unpack", globally_managed=True)
-    # If a download dir is specified, is the file already downloaded there?
-    already_downloaded_path = None
     if download_dir:
-        already_downloaded_path = _check_download_dir(link, download_dir, hashes)
+        downloaded_file = _check_download_dir(link, download_dir, hashes)
+        if downloaded_file is not None:
+            return downloaded_file
 
-    if already_downloaded_path:
-        from_path = already_downloaded_path
-        content_type = None
-    else:
-        # let's download to a tmp dir
-        from_path, content_type = download(link, temp_dir.path)
-        if hashes:
-            hashes.check_against_path(from_path)
-
-    return File(from_path, content_type)
+    temp_dir = TempDirectory(kind="unpack", globally_managed=True)
+    from_path, content_type = download(link, temp_dir.path)
+    computed_hashes = hashes.check_against_path(from_path) if hashes else None
+    return File(from_path, content_type, computed_hashes=computed_hashes)
 
 
 def get_file_url(
-    link: Link, download_dir: str | None = None, hashes: Hashes | None = None
+    link: Link, download_dir: str | None = None, hashes: HashChecker | None = None
 ) -> File:
     """Get file and optionally check its hash."""
-    # If a download dir is specified, is the file already there and valid?
-    already_downloaded_path = None
     if download_dir:
-        already_downloaded_path = _check_download_dir(link, download_dir, hashes)
+        downloaded_file = _check_download_dir(link, download_dir, hashes)
+        if downloaded_file is not None:
+            return downloaded_file
 
-    if already_downloaded_path:
-        from_path = already_downloaded_path
-    else:
-        from_path = link.file_path
-
+    from_path = link.file_path
     # If --require-hashes is off, `hashes` is either empty, the
     # link's embedded hash, or MissingHashes; it is required to
     # match. If --require-hashes is on, we are satisfied by any
     # hash in `hashes` matching: a URL-based or an option-based
     # one; no internet-sourced hash will be in `hashes`.
-    if hashes:
-        hashes.check_against_path(from_path)
-    return File(from_path, None)
+    computed_hashes = hashes.check_against_path(from_path) if hashes else None
+    return File(from_path, computed_hashes=computed_hashes)
 
 
 def unpack_url(
@@ -172,12 +164,12 @@ def unpack_url(
     download: Downloader,
     verbosity: int,
     download_dir: str | None = None,
-    hashes: Hashes | None = None,
+    hashes: HashChecker | None = None,
 ) -> File | None:
     """Unpack link into location, downloading if required.
 
-    :param hashes: A Hashes object, one of whose embedded hashes must match,
-        or HashMismatch will be raised. If the Hashes is empty, no matches are
+    :param hashes: The archive hash checks that must pass,
+        or HashMismatch will be raised. If no checks are supplied, none are
         required, and unhashable types of requirements (like VCS ones, which
         would ordinarily raise HashUnsupported) are allowed.
     """
@@ -212,12 +204,10 @@ def unpack_url(
 def _check_download_dir(
     link: Link,
     download_dir: str,
-    hashes: Hashes | None,
+    hashes: HashChecker | None,
     warn_on_hash_mismatch: bool = True,
-) -> str | None:
-    """Check download_dir for previously downloaded file with correct hash
-    If a correct file is found return its path else None
-    """
+) -> File | None:
+    """Find an existing download and retain any computed archive digests."""
     download_path = join_within_directory(download_dir, link.filename)
 
     if not os.path.exists(download_path):
@@ -225,9 +215,10 @@ def _check_download_dir(
 
     # If already downloaded, does its hash match?
     logger.info("File was already downloaded %s", download_path)
+    computed_hashes = None
     if hashes:
         try:
-            hashes.check_against_path(download_path)
+            computed_hashes = hashes.check_against_path(download_path)
         except HashMismatch:
             if warn_on_hash_mismatch:
                 logger.warning(
@@ -236,7 +227,7 @@ def _check_download_dir(
                 )
             os.unlink(download_path)
             return None
-    return download_path
+    return File(download_path, computed_hashes=computed_hashes)
 
 
 def _canonical_requires(
@@ -442,7 +433,19 @@ class RequirementPreparer:
         )
         req.ensure_pristine_source_checkout()
 
-    def _get_linked_req_hashes(self, req: InstallRequirement) -> Hashes:
+    def _get_linked_req_hashes(self, req: InstallRequirement) -> HashChecker:
+        hashes = self._get_requirement_hashes(req)
+        if not req.index_hashes:
+            return hashes
+
+        assert req.source_link is not None
+        advertised = req.source_link.as_hashes()
+        # Only hashes that matched the advertisement can authorize this archive.
+        checks = [hashes]
+        checks.extend(check & advertised for check in req.index_hashes)
+        return HashChecks(checks)
+
+    def _get_requirement_hashes(self, req: InstallRequirement) -> Hashes:
         # By the time this is called, the requirement's link should have
         # been checked so we can tell what kind of requirements req is
         # and raise some more informative errors than otherwise.
@@ -450,7 +453,9 @@ class RequirementPreparer:
         # rather than HashMissing.)
         if not self.require_hashes:
             # An index-provided hash must not override one supplied by the user.
-            return req.hashes(trust_internet=not req.has_hash_options)
+            return req.hashes(
+                trust_internet=not req.has_hash_options and not req.index_hashes
+            )
 
         # We could check these first 2 conditions inside unpack_url
         # and save repetition of conditions, but then we would
@@ -614,10 +619,10 @@ class RequirementPreparer:
         with indent_log():
             # Check if the relevant file is already available
             # in the download directory
-            file_path = None
+            downloaded_file = None
             if self.download_dir is not None and req.link.is_wheel:
                 hashes = self._get_linked_req_hashes(req)
-                file_path = _check_download_dir(
+                downloaded_file = _check_download_dir(
                     req.link,
                     self.download_dir,
                     hashes,
@@ -630,9 +635,9 @@ class RequirementPreparer:
                     warn_on_hash_mismatch=not req.is_wheel_from_cache,
                 )
 
-            if file_path is not None:
+            if downloaded_file is not None:
                 # The file is already available, so mark it as downloaded
-                self._downloaded[req.link.url] = file_path
+                self._downloaded[req.link.url] = downloaded_file.path
             else:
                 # The file is not available, attempt to fetch only metadata
                 metadata_dist = self._fetch_metadata_only(req)
@@ -659,9 +664,11 @@ class RequirementPreparer:
             # Determine if any of these requirements were already downloaded.
             if self.download_dir is not None and req.link.is_wheel:
                 hashes = self._get_linked_req_hashes(req)
-                file_path = _check_download_dir(req.link, self.download_dir, hashes)
-                if file_path is not None:
-                    self._downloaded[req.link.url] = file_path
+                downloaded_file = _check_download_dir(
+                    req.link, self.download_dir, hashes
+                )
+                if downloaded_file is not None:
+                    self._downloaded[req.link.url] = downloaded_file.path
                     req.needs_more_preparation = False
 
         # Prepare requirements we found were already downloaded for some
@@ -734,33 +741,30 @@ class RequirementPreparer:
                 )
         else:
             file_path = self._downloaded[link.url]
-            if hashes:
-                hashes.check_against_path(file_path)
-            local_file = File(file_path, content_type=None)
+            computed_hashes = hashes.check_against_path(file_path) if hashes else None
+            local_file = File(file_path, computed_hashes=computed_hashes)
 
-        # If download_info is set, we got it from the wheel cache.
-        if req.download_info is None:
-            # Editables don't go through this function (see
-            # prepare_editable_requirement).
+        computed_hashes = local_file.computed_hashes if local_file else None
+        if req.download_info is None or computed_hashes is not None:
             assert not req.editable
-            req.download_info = direct_url_from_link(link, req.source_dir)
-            # Make sure we have a hash in download_info. If we got it as part of the
-            # URL, it will have been verified and we can rely on it. Otherwise we
-            # compute it from the downloaded file.
-            # FIXME: https://github.com/pypa/pip/issues/11943
-            if (
-                req.download_info.archive_info
-                and not req.download_info.archive_info.hashes
-                and local_file
-            ):
-                hash = hash_file(local_file.path)[0].hexdigest()
-                # We populate archive_info.hashes. For backward compatibility,
-                # the legacy hash field will be generated when converting to JSON.
-                req.download_info = DirectUrl(
-                    url=req.download_info.url,
-                    archive_info=ArchiveInfo(hashes={"sha256": hash}),
-                    subdirectory=req.download_info.subdirectory,
-                )
+            # Only digests computed from these bytes can describe the source.
+            req.download_info = direct_url_from_link(
+                link, req.source_dir, archive_hashes=computed_hashes
+            )
+
+        # Only source bytes can supply missing origin digests.
+        if (
+            req.download_info.archive_info
+            and not req.download_info.archive_info.hashes
+            and local_file
+            and not req.is_wheel_from_cache
+        ):
+            hash = hash_file(local_file.path)[0].hexdigest()
+            req.download_info = DirectUrl(
+                url=req.download_info.url,
+                archive_info=ArchiveInfo(hashes={"sha256": hash}),
+                subdirectory=req.download_info.subdirectory,
+            )
 
         # For use in later processing,
         # preserve the file path on the requirement.
@@ -810,8 +814,7 @@ class RequirementPreparer:
 
         if link.is_existing_dir():
             logger.debug(
-                "Not copying link to destination directory "
-                "since it is a directory: %s",
+                "Not copying link to destination directory since it is a directory: %s",
                 link,
             )
             return

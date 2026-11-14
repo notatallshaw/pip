@@ -28,6 +28,7 @@ from pip._internal.models.wheel import Wheel
 from pip._internal.req.req_file import ParsedRequirement
 from pip._internal.req.req_install import InstallRequirement
 from pip._internal.utils.filetypes import is_archive_file
+from pip._internal.utils.hashes import Hashes
 from pip._internal.utils.misc import is_installable_dir
 from pip._internal.utils.packaging import get_requirement
 from pip._internal.utils.pylock import (
@@ -474,6 +475,8 @@ def install_req_from_parsed_requirement(
             user_supplied=user_supplied,
             config_settings=config_settings,
         )
+    if parsed_req.options and parsed_req.options.get("index_hashes"):
+        req.index_hashes = (Hashes(parsed_req.options["index_hashes"]),)
     return req
 
 
@@ -488,6 +491,7 @@ def install_req_from_link_and_ireq(
         markers=ireq.markers,
         isolated=ireq.isolated,
         hash_options=ireq.hash_options,
+        index_hashes=ireq.index_hashes,
         config_settings=ireq.config_settings,
         user_supplied=ireq.user_supplied,
     )
@@ -509,6 +513,7 @@ def install_req_drop_extras(ireq: InstallRequirement) -> InstallRequirement:
         markers=ireq.markers,
         isolated=ireq.isolated,
         hash_options=ireq.hash_options,
+        index_hashes=ireq.index_hashes,
         constraint=ireq.constraint,
         extras=[],
         config_settings=ireq.config_settings,

@@ -5,6 +5,7 @@ util tests
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import stat
@@ -28,7 +29,7 @@ from pip._internal.utils.glibc import (
     glibc_version_string_confstr,
     glibc_version_string_ctypes,
 )
-from pip._internal.utils.hashes import Hashes, MissingHashes
+from pip._internal.utils.hashes import HashChecks, Hashes, MissingHashes
 from pip._internal.utils.misc import (
     HiddenText,
     build_netloc,
@@ -267,7 +268,9 @@ def test_rmtree_errorhandler_reraises_error(tmpdir: Path) -> None:
             # Tuple[None, None, None]]"; expected "Tuple[Type[BaseException],
             # BaseException, TracebackType]"
             rmtree_errorhandler(
-                mock_func, path, sys.exc_info()  # type: ignore[arg-type]
+                mock_func,
+                path,
+                sys.exc_info(),  # type: ignore[arg-type]
             )
     finally:
         # Restore permissions to let pytest to clean up temp dirs
@@ -401,6 +404,7 @@ class TestHashes:
             ("sha384", 128 * "a", False),
             # Test matching values, including values other than the first.
             ("sha512", 128 * "a", True),
+            ("sha512", 128 * "A", True),
             ("sha512", 128 * "b", True),
             # Test a matching hash_name with a value that doesn't match.
             ("sha512", 128 * "c", False),
@@ -426,8 +430,7 @@ class TestHashes:
         hashes = Hashes(
             {
                 "sha256": [
-                    "2cf24dba5fb0a30e26e83b2ac5b9e29e"
-                    "1b161e5c1fa7425e73043362938b9824"
+                    "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
                 ],
                 "sha224": ["wrongwrong"],
                 "md5": ["5d41402abc4b2a76b9719d911017c592"],
@@ -1024,3 +1027,43 @@ def test_format_size(size: int, expected: str) -> None:
 )
 def test_tabulate(rows: list[tuple[str]], table: list[str], sizes: list[int]) -> None:
     assert tabulate(rows) == (table, sizes)
+
+
+@pytest.mark.parametrize("bad_algorithm", [None, "sha256", "sha512"])
+def test_independent_hash_checks(bad_algorithm: str | None) -> None:
+    data = b"archive contents"
+    checks = []
+    for algorithm in ("sha256", "sha512"):
+        digest = hashlib.new(algorithm, data).hexdigest()
+        if algorithm == bad_algorithm:
+            digest = "0" * len(digest)
+        checks.append(Hashes({algorithm: [digest]}))
+    verifier = HashChecks(checks)
+    chunks = iter([data[:4], data[4:]])
+
+    if bad_algorithm is None:
+        verifier.check_against_chunks(chunks)
+    else:
+        with pytest.raises(HashMismatch):
+            verifier.check_against_chunks(chunks)
+    assert list(chunks) == []
+
+
+def test_independent_hash_checks_cached_source() -> None:
+    checks = HashChecks((Hashes({"sha256": ["aaa"]}), Hashes({"sha512": ["bbb"]})))
+
+    assert checks.has_one_of({"sha256": "aaa", "sha512": "bbb"})
+    assert not checks.has_one_of({"sha256": "aaa"})
+    assert not checks.has_one_of({"sha256": "aaa", "sha512": "ccc"})
+
+
+def test_hash_verification_returns_computed_digests() -> None:
+    data = b"archive contents"
+    expected = {
+        algorithm: hashlib.new(algorithm, data).hexdigest()
+        for algorithm in ("sha256", "sha512")
+    }
+    hashes = Hashes({"sha256": [expected["sha256"]], "sha512": ["0" * 128]})
+
+    assert hashes.check_against_chunks(iter([data[:4], data[4:]])) == expected
+    assert HashChecks([hashes]).check_against_chunks(iter([data])) == expected

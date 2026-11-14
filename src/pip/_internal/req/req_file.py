@@ -69,6 +69,7 @@ SUPPORTED_OPTIONS: list[Callable[..., optparse.Option]] = [
 # options to be passed to requirements
 SUPPORTED_OPTIONS_REQ: list[Callable[..., optparse.Option]] = [
     cmdoptions.hash,
+    cmdoptions.index_hash,
     cmdoptions.config_settings,
 ]
 
@@ -184,6 +185,10 @@ def handle_requirement_line(
     )
 
     assert line.requirement is not None
+    if line.opts.index_hashes and not line.constraint:
+        raise RequirementsFileParseError(
+            "--index-hash is only supported in constraint files"
+        )
 
     # get the options that apply to requirements
     if line.is_editable:

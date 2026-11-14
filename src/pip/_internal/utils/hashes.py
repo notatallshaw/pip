@@ -9,7 +9,26 @@ from pip._internal.utils.misc import read_chunks
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
-    from hashlib import _Hash
+    from typing import Protocol
+
+    class HashDigest(Protocol):
+        """The digest operations required while checking bytes."""
+
+        def update(self, data: bytes, /) -> None: ...
+
+        def hexdigest(self) -> str: ...
+
+    class HashChecker(Protocol):
+        """Digest checks shared by data streams and cached source records."""
+
+        def __bool__(self) -> bool: ...
+
+        def check_against_chunks(self, chunks: Iterable[bytes]) -> dict[str, str]: ...
+
+        def has_one_of(self, hashes: Mapping[str, str]) -> bool: ...
+
+        def check_against_path(self, path: str) -> dict[str, str]: ...
+
 
 # The recommended hash algo of the moment. Change this whenever the state of
 # the art changes; it won't hurt backward compatibility.
@@ -19,6 +38,23 @@ FAVORITE_HASH = "sha256"
 # Names of hashlib algorithms allowed by the --hash option and ``pip hash``
 # Currently, those are the ones at least as collision-resistant as sha256.
 STRONG_HASHES = ["sha256", "sha384", "sha512"]
+
+
+def _hash_chunks(
+    chunks: Iterable[bytes], hash_names: Iterable[str]
+) -> dict[str, HashDigest]:
+    """Compute requested digests in one pass over the byte chunks."""
+    gots: dict[str, HashDigest] = {}
+    for hash_name in hash_names:
+        try:
+            gots[hash_name] = hashlib.new(hash_name)
+        except (ValueError, TypeError):
+            raise InstallationError(f"Unknown hash name: {hash_name}")
+
+    for chunk in chunks:
+        for hash in gots.values():
+            hash.update(chunk)
+    return gots
 
 
 class Hashes:
@@ -64,43 +100,34 @@ class Hashes:
 
     def is_hash_allowed(self, hash_name: str, hex_digest: str) -> bool:
         """Return whether the given hex digest is allowed."""
-        return hex_digest in self._allowed.get(hash_name, [])
+        allowed = self._allowed.get(hash_name)
+        return allowed is not None and hex_digest.lower() in allowed
 
-    def check_against_chunks(self, chunks: Iterable[bytes]) -> None:
+    def check_against_chunks(self, chunks: Iterable[bytes]) -> dict[str, str]:
         """Check good hashes against ones built from iterable of chunks of
         data.
 
-        Raise HashMismatch if none match.
+        Return the computed digests, or raise HashMismatch if none match.
 
         """
-        gots = {}
-        for hash_name in self._allowed.keys():
-            try:
-                gots[hash_name] = hashlib.new(hash_name)
-            except (ValueError, TypeError):
-                raise InstallationError(f"Unknown hash name: {hash_name}")
+        gots = _hash_chunks(chunks, self._allowed)
+        self._check_against_digests(gots)
+        return {name: digest.hexdigest() for name, digest in gots.items()}
 
-        for chunk in chunks:
-            for hash in gots.values():
-                hash.update(chunk)
-
-        for hash_name, got in gots.items():
-            if got.hexdigest() in self._allowed[hash_name]:
+    def _check_against_digests(self, gots: dict[str, HashDigest]) -> None:
+        for hash_name, allowed in self._allowed.items():
+            if gots[hash_name].hexdigest() in allowed:
                 return
-        self._raise(gots)
+        self._raise({name: gots[name] for name in self._allowed})
 
-    def _raise(self, gots: dict[str, _Hash]) -> NoReturn:
+    def _raise(self, gots: dict[str, HashDigest]) -> NoReturn:
         raise HashMismatch(self._allowed, gots)
 
-    def check_against_file(self, file: BinaryIO) -> None:
-        """Check good hashes against a file-like object
-
-        Raise HashMismatch if none match.
-
-        """
+    def check_against_file(self, file: BinaryIO) -> dict[str, str]:
+        """Verify a file's bytes and return their computed digests."""
         return self.check_against_chunks(read_chunks(file))
 
-    def check_against_path(self, path: str) -> None:
+    def check_against_path(self, path: str) -> dict[str, str]:
         with open(path, "rb") as file:
             return self.check_against_file(file)
 
@@ -132,6 +159,31 @@ class Hashes:
         )
 
 
+class HashChecks:
+    """Check independent sets of allowed hashes in one pass over the data."""
+
+    def __init__(self, checks: Iterable[Hashes]) -> None:
+        self._checks = tuple(check for check in checks if check)
+
+    def __bool__(self) -> bool:
+        return bool(self._checks)
+
+    def check_against_chunks(self, chunks: Iterable[bytes]) -> dict[str, str]:
+        """Check every policy and return digests computed from the byte chunks."""
+        names = dict.fromkeys(name for check in self._checks for name in check._allowed)
+        gots = _hash_chunks(chunks, names)
+        for check in self._checks:
+            check._check_against_digests(gots)
+        return {name: digest.hexdigest() for name, digest in gots.items()}
+
+    def check_against_path(self, path: str) -> dict[str, str]:
+        with open(path, "rb") as file:
+            return self.check_against_chunks(read_chunks(file))
+
+    def has_one_of(self, hashes: Mapping[str, str]) -> bool:
+        return all(check.has_one_of(hashes) for check in self._checks)
+
+
 class MissingHashes(Hashes):
     """A workalike for Hashes used when we're missing a hash for a requirement
 
@@ -146,5 +198,5 @@ class MissingHashes(Hashes):
         # empty list, it will never match, so an error will always raise.
         super().__init__(hashes={FAVORITE_HASH: []})
 
-    def _raise(self, gots: dict[str, _Hash]) -> NoReturn:
+    def _raise(self, gots: dict[str, HashDigest]) -> NoReturn:
         raise HashMissing(gots[FAVORITE_HASH].hexdigest())

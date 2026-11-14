@@ -76,6 +76,7 @@ class InstallRequirement:
         *,
         source_link: Link | None = None,
         hash_options: dict[str, list[str]] | None = None,
+        index_hashes: tuple[Hashes, ...] = (),
         config_settings: dict[str, str | list[str]] | None = None,
         constraint: bool = False,
         extras: Collection[str] = (),
@@ -144,6 +145,7 @@ class InstallRequirement:
         self.install_succeeded: bool | None = None
         # Supplied options
         self.hash_options = hash_options if hash_options else {}
+        self.index_hashes = index_hashes
         self.config_settings = config_settings
         # Set to True after successful preparation of this requirement
         self.prepared = False

@@ -188,3 +188,14 @@ def test_from_link_hide_user_password() -> None:
         link_is_in_wheel_cache=True,
     )
     assert direct_url.to_dict_compat()["url"] == "ssh://git@g.c/u/p.git"
+
+
+def test_computed_archive_hashes_override_link_metadata() -> None:
+    link = Link("https://example.com/pkg-1.tar.gz#sha512=unverified")
+    computed = {"sha256": "computed-from-archive"}
+
+    result = direct_url_from_link(link, archive_hashes=computed)
+
+    assert result.archive_info is not None
+    assert result.archive_info.hashes == computed
+    assert result.url == "https://example.com/pkg-1.tar.gz"

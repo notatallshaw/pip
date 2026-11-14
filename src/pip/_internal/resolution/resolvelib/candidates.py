@@ -83,6 +83,7 @@ def make_install_req_from_link(
         hash_options=template.hash_options,
         config_settings=template.config_settings,
     )
+    ireq.index_hashes = template.index_hashes
     ireq.original_link = template.original_link
     ireq.link = link
     ireq.set_source_link(source_link)
@@ -289,6 +290,13 @@ class LinkCandidate(_InstallRequirementBackedCandidate):
     ) -> None:
         source_link = link
         cache_entry = factory.get_wheel_cache_entry(source_link, name)
+        if (
+            template.index_hashes
+            and cache_entry is not None
+            and cache_entry.origin is None
+        ):
+            # A cache key alone does not establish the source's checked hashes.
+            cache_entry = None
         if cache_entry is not None:
             logger.debug("Using cached wheel link: %s", cache_entry.link)
             link = cache_entry.link

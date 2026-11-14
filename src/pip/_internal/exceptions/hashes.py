@@ -8,9 +8,8 @@ from typing import TYPE_CHECKING
 from pip._internal.exceptions._base import InstallationError
 
 if TYPE_CHECKING:
-    from hashlib import _Hash
-
     from pip._internal.req.req_install import InstallRequirement
+    from pip._internal.utils.hashes import HashDigest
 
 
 class HashErrors(InstallationError):
@@ -175,7 +174,9 @@ class HashMismatch(HashError):
         "someone may have tampered with them."
     )
 
-    def __init__(self, allowed: dict[str, list[str]], gots: dict[str, _Hash]) -> None:
+    def __init__(
+        self, allowed: dict[str, list[str]], gots: dict[str, HashDigest]
+    ) -> None:
         """
         :param allowed: A dict of algorithm names pointing to lists of allowed
             hex digests

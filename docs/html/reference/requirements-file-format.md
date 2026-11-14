@@ -112,6 +112,10 @@ The options which can be applied to individual requirements are:
 - {ref}`--config-settings <install_--config-settings>`
 - `--hash` (for {ref}`Hash-checking mode`)
 
+Constraint files additionally support `--index-hash=algorithm:digest` to select
+files with a matching index-advertised hash. This option is only valid on
+constraint lines; see {ref}`Constraints Files`.
+
 ## Referring to other requirements files
 
 If you wish, you can refer to other requirements files, like this:

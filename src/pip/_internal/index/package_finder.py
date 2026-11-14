@@ -658,7 +658,9 @@ class PackageFinder:
         # Cache of the result of finding candidates
         self._all_candidates: dict[str, list[InstallationCandidate]] = {}
         self._best_candidates: dict[
-            tuple[str, specifiers.BaseSpecifier | None, Hashes | None],
+            tuple[
+                str, specifiers.BaseSpecifier | None, Hashes | None, tuple[Hashes, ...]
+            ],
             BestCandidateResult,
         ] = {}
 
@@ -973,6 +975,7 @@ class PackageFinder:
         project_name: str,
         specifier: specifiers.BaseSpecifier | None = None,
         hashes: Hashes | None = None,
+        index_hashes: tuple[Hashes, ...] = (),
     ) -> BestCandidateResult:
         """Find matches for the given project and specifier.
 
@@ -980,22 +983,38 @@ class PackageFinder:
             (e.g. `packaging.specifiers.SpecifierSet`) to filter applicable
             versions.
 
+        :param index_hashes: Independent constraints on hashes advertised by pages.
+
         :return: A `BestCandidateResult` instance.
         """
-        if (project_name, specifier, hashes) in self._best_candidates:
-            return self._best_candidates[project_name, specifier, hashes]
+        cache_key = (project_name, specifier, hashes, index_hashes)
+        if cache_key in self._best_candidates:
+            return self._best_candidates[cache_key]
 
         candidates = self.find_all_candidates(project_name)
+        if index_hashes:
+            # Excluded releases must not affect prerelease selection.
+            # Locked artifacts and direct URLs are not index advertisements.
+            candidates = [
+                candidate
+                for candidate in candidates
+                if not candidate.locked
+                and candidate.link.comes_from is not None
+                and all(
+                    candidate.link.is_hash_allowed(hashes) for hashes in index_hashes
+                )
+            ]
+
         candidate_evaluator = self.make_candidate_evaluator(
             project_name=project_name,
             specifier=specifier,
             hashes=hashes,
         )
-        self._best_candidates[project_name, specifier, hashes] = (
-            candidate_evaluator.compute_best_candidate(candidates)
+        self._best_candidates[cache_key] = candidate_evaluator.compute_best_candidate(
+            candidates
         )
 
-        return self._best_candidates[project_name, specifier, hashes]
+        return self._best_candidates[cache_key]
 
     def find_requirement(
         self, req: InstallRequirement, upgrade: bool

@@ -109,6 +109,7 @@ class Factory:
         self._force_reinstall = force_reinstall
         self._ignore_requires_python = ignore_requires_python
 
+        self._constraints: dict[str, Constraint] = {}
         self._build_failures: Cache[InstallationError] = {}
         self._link_candidate_cache: Cache[LinkCandidate] = {}
         self._editable_candidate_cache: Cache[EditableCandidate] = {}
@@ -195,6 +196,12 @@ class Factory:
         # TODO: Check already installed candidate, and use it if the link and
         # editable flag match.
 
+        if name is not None:
+            constraint = self._constraints.get(name)
+            if constraint is not None and constraint.index_hashes:
+                if template.link is not None or constraint.links:
+                    return None
+
         if link in self._build_failures:
             # We already tried this candidate before, and it does not build.
             # Don't bother trying again.
@@ -271,6 +278,11 @@ class Factory:
             }
         assert template.req  # to prevent mypy from being confused by the copy
         name = canonicalize_name(template.req.name)
+        constraint = self._constraints.get(name)
+        index_hashes = constraint.index_hashes if constraint is not None else ()
+        if index_hashes:
+            template = copy.copy(template)
+            template.index_hashes = index_hashes
 
         extras: frozenset[str] = frozenset()
         for ireq in ireqs:
@@ -283,7 +295,7 @@ class Factory:
             """Get the candidate for the currently-installed version."""
             # If --force-reinstall is set, we want the version from the index
             # instead, so we "pretend" there is nothing installed.
-            if self._force_reinstall:
+            if self._force_reinstall or index_hashes:
                 return None
             try:
                 installed_dist = self._installed_dists[name]
@@ -313,6 +325,7 @@ class Factory:
                 project_name=name,
                 specifier=specifier,
                 hashes=hashes,
+                index_hashes=index_hashes,
             )
             icans = result.applicable_candidates
 
@@ -545,7 +558,8 @@ class Factory:
         self, root_ireqs: list[InstallRequirement]
     ) -> CollectedRootRequirements:
         collected = CollectedRootRequirements([], {}, {})
-        for i, ireq in enumerate(root_ireqs):
+        # Explicit requirements can fetch metadata while they are collected.
+        for ireq in root_ireqs:
             if ireq.constraint:
                 # Ensure we only accept valid constraints
                 problem = check_invalid_constraint_type(ireq)
@@ -559,7 +573,10 @@ class Factory:
                     collected.constraints[name] &= ireq
                 else:
                     collected.constraints[name] = Constraint.from_ireq(ireq)
-            else:
+
+        self._constraints = collected.constraints
+        for i, ireq in enumerate(root_ireqs):
+            if not ireq.constraint:
                 reqs = list(
                     self._make_requirements_from_install_req(
                         ireq,

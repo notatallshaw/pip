@@ -1,3 +1,4 @@
+import hashlib
 import os
 import shutil
 from pathlib import Path
@@ -21,6 +22,8 @@ from pip._internal.network.download import Downloader
 from pip._internal.network.session import PipSession
 from pip._internal.operations.prepare import (
     _check_sidecar_matches_wheel,
+    get_file_url,
+    get_http_url,
     unpack_url,
 )
 from pip._internal.utils.hashes import Hashes
@@ -288,3 +291,29 @@ class TestCheckSidecarMatchesWheel:
         wheel = _make_distribution(_metadata())
         with pytest.raises(MetadataInvalid):
             _check_sidecar_matches_wheel(self._req(), sidecar, wheel)
+
+
+@pytest.mark.parametrize("use_http", [False, True])
+def test_existing_download_retains_computed_hashes(
+    shared_data: TestData, tmp_path: Path, use_http: bool
+) -> None:
+    source = shared_data.packages / "simplewheel-1.0-py2.py3-none-any.whl"
+    data = source.read_bytes()
+    destination = tmp_path / source.name
+    destination.write_bytes(data)
+    expected = {"sha256": hashlib.sha256(data).hexdigest()}
+    hashes = Hashes({"sha256": [expected["sha256"]]})
+
+    if use_http:
+        with PipSession() as session:
+            result = get_http_url(
+                Link(f"https://example.invalid/{source.name}"),
+                Downloader(session, progress_bar="off"),
+                str(tmp_path),
+                hashes,
+            )
+    else:
+        result = get_file_url(Link(source.as_uri()), str(tmp_path), hashes)
+
+    assert result.path == str(destination)
+    assert result.computed_hashes == expected

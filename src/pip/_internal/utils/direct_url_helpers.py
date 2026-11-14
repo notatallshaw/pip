@@ -41,8 +41,13 @@ def direct_url_for_editable(source_dir: str) -> DirectUrl:
 
 
 def direct_url_from_link(
-    link: Link, source_dir: str | None = None, link_is_in_wheel_cache: bool = False
+    link: Link,
+    source_dir: str | None = None,
+    link_is_in_wheel_cache: bool = False,
+    *,
+    archive_hashes: dict[str, str] | None = None,
 ) -> DirectUrl:
+    """Build origin metadata, preferring archive digests computed from its bytes."""
     if link.is_vcs:
         vcs_backend = vcs.get_backend_for_scheme(link.scheme)
         assert vcs_backend
@@ -80,7 +85,9 @@ def direct_url_from_link(
             subdirectory=link.subdirectory_fragment,
         )
     else:
-        if link.hash_name:
+        if archive_hashes is not None:
+            hashes = archive_hashes
+        elif link.hash_name:
             assert link.hash
             hashes = {link.hash_name: link.hash}
         else:

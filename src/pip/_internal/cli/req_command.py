@@ -505,6 +505,12 @@ class RequirementCommand(IndexGroupCommand):
                 )
                 requirements.append(req_to_add)
 
+        if (
+            any(req.index_hashes for req in requirements)
+            and self.determine_resolver_variant(options) == "legacy"
+        ):
+            raise CommandError("--index-hash is not supported by the legacy resolver")
+
         if options.require_hashes and options.no_require_hashes:
             raise CommandError(
                 "--require-hashes and --no-require-hashes are mutually exclusive"

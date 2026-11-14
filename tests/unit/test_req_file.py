@@ -33,6 +33,7 @@ from pip._internal.req.req_file import (
     preprocess,
 )
 from pip._internal.req.req_install import InstallRequirement
+from pip._internal.utils.hashes import Hashes
 
 from tests.lib import TestData, make_test_finder
 
@@ -367,7 +368,7 @@ class TestProcessLine:
         req_file_count = 4
         for i in range(req_file_count):
             req_file = tmpdir / f"{i}.txt"
-            req_file.write_text(f"-r {(i+1) % req_file_count}.txt")
+            req_file.write_text(f"-r {(i + 1) % req_file_count}.txt")
             req_files.append(req_file)
 
         # When the passed requirements file recursively references itself
@@ -1092,3 +1093,18 @@ class TestParseRequirements:
             ),
         ):
             next(parse_reqfile(req_file.resolve(), session=session))
+
+
+def test_index_hash_options_only_apply_to_constraints(
+    line_processor: LineProcessor,
+) -> None:
+    line = "base --index-hash=sha256:aaa --index-hash=sha512:bbb"
+    req = line_processor(line, "constraints.txt", 1, constraint=True)[0]
+
+    assert req.index_hashes == (Hashes({"sha256": ["aaa"], "sha512": ["bbb"]}),)
+    assert not req.has_hash_options
+
+    with pytest.raises(
+        RequirementsFileParseError, match="only supported in constraint files"
+    ):
+        line_processor(line, "requirements.txt", 1)

@@ -1207,14 +1207,14 @@ def _handle_merge_hash(
 ) -> None:
     """Given a value spelled "algo:digest", append the digest to a list
     pointed to in a dict by the algo name."""
-    if not parser.values.hashes:
-        parser.values.hashes = {}
+    assert option.dest is not None
+    hashes = parser.values.ensure_value(option.dest, {})
     try:
         algo, digest = value.split(":", 1)
     except ValueError:
         parser.error(
             f"Arguments to {opt_str} must be a hash name "
-            "followed by a value, like --hash=sha256:"
+            f"followed by a value, like {opt_str}=sha256:"
             "abcde..."
         )
     if algo not in STRONG_HASHES:
@@ -1223,7 +1223,7 @@ def _handle_merge_hash(
                 opt_str, ", ".join(STRONG_HASHES)
             )
         )
-    parser.values.hashes.setdefault(algo, []).append(digest)
+    hashes.setdefault(algo, []).append(digest)
 
 
 hash: Callable[..., Option] = partial(
@@ -1237,6 +1237,17 @@ hash: Callable[..., Option] = partial(
     type="string",
     help="Verify that the package's archive matches this "
     "hash before installing. Example: --hash=sha256:abcdef...",
+)
+
+
+index_hash: Callable[..., Option] = partial(
+    Option,
+    "--index-hash",
+    dest="index_hashes",
+    action="callback",
+    callback=_handle_merge_hash,
+    type="string",
+    help="Constrain a package to files with a matching index-advertised hash.",
 )
 
 

@@ -28,6 +28,7 @@ class Constraint:
     hashes: Hashes
     hash_options: dict[str, list[str]]
     links: frozenset[Link]
+    index_hashes: tuple[Hashes, ...] = ()
 
     @classmethod
     def empty(cls) -> Constraint:
@@ -42,10 +43,16 @@ class Constraint:
             ireq.hashes(trust_internet=False),
             hash_options,
             links,
+            ireq.index_hashes,
         )
 
     def __bool__(self) -> bool:
-        return bool(self.specifier) or bool(self.hashes) or bool(self.links)
+        return (
+            bool(self.specifier)
+            or bool(self.hashes)
+            or bool(self.links)
+            or bool(self.index_hashes)
+        )
 
     def __and__(self, other: InstallRequirement) -> Constraint:
         if not isinstance(other, InstallRequirement):
@@ -64,9 +71,20 @@ class Constraint:
         links = self.links
         if other.link:
             links = links.union([other.link])
-        return Constraint(specifier, hashes, hash_options, links)
+        return Constraint(
+            specifier,
+            hashes,
+            hash_options,
+            links,
+            self.index_hashes + other.index_hashes,
+        )
 
     def is_satisfied_by(self, candidate: Candidate) -> bool:
+        if self.index_hashes:
+            ireq = candidate.get_install_requirement()
+            if ireq is None or ireq.index_hashes != self.index_hashes:
+                return False
+
         # Reject if there are any mismatched URL constraints on this package.
         if self.links and not all(_match_link(link, candidate) for link in self.links):
             return False
@@ -79,6 +97,8 @@ class Constraint:
         s = str(self.specifier)
         if self.links:
             s += f" (from {', '.join(str(link) for link in self.links)})"
+        if self.index_hashes:
+            s += " (with --index-hash)"
         return s
 
 

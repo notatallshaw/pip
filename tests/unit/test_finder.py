@@ -1,6 +1,7 @@
 import datetime
 import logging
 from collections.abc import Iterable
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pytest
@@ -18,9 +19,11 @@ from pip._internal.index.package_finder import (
     Link,
     LinkEvaluator,
     LinkType,
+    PackageFinder,
 )
 from pip._internal.models.target_python import TargetPython
 from pip._internal.req.constructors import install_req_from_line
+from pip._internal.utils.hashes import Hashes
 
 from tests.lib import TestData, make_test_finder
 
@@ -627,3 +630,71 @@ class TestPackageFinderUploadedPriorTo:
 
         link_evaluator = finder.make_link_evaluator("test-package")
         assert link_evaluator._uploaded_prior_to is None
+
+
+def _finder_with_advertised_links(tmp_path: Path, links: list[str]) -> PackageFinder:
+    """Read advertised links from a local page without probing their URLs."""
+    page = tmp_path / "demo" / "index.html"
+    page.parent.mkdir(exist_ok=True)
+    page.write_text("\n".join(f'<a href="{link}">file</a>' for link in links))
+    return make_test_finder(index_urls=[tmp_path.as_uri()])
+
+
+@pytest.mark.parametrize("version", ["1", "1rc1"])
+def test_index_hashes_filter_before_version_selection(
+    version: str, tmp_path: Path
+) -> None:
+    finder = _finder_with_advertised_links(
+        tmp_path,
+        [
+            f"https://example.org/demo-{version}-py3-none-any.whl#sha256=aaa",
+            "https://example.org/demo-2-py3-none-any.whl#sha256=bbb",
+            "https://example.org/demo-3-py3-none-any.whl",
+        ],
+    )
+    allowed = Hashes({"sha256": ["aaa"]})
+    result = finder.find_best_candidate("demo", index_hashes=(allowed,))
+
+    assert result.best_candidate is not None
+    assert str(result.best_candidate.version) == version
+    assert result.applicable_candidates == [result.best_candidate]
+
+    # A constrained lookup must not change the cached unconstrained result.
+    unconstrained = finder.find_best_candidate("demo")
+    assert unconstrained.best_candidate is not None
+    assert str(unconstrained.best_candidate.version) == "3"
+    assert finder.find_best_candidate("demo", index_hashes=(allowed,)) is result
+
+
+@pytest.mark.parametrize("fragment", ["", "#sha256=bbb", "#sha512=aaa"])
+def test_index_hashes_refuse_missing_or_mismatching_hash(
+    fragment: str, tmp_path: Path
+) -> None:
+    finder = _finder_with_advertised_links(
+        tmp_path,
+        [
+            f"https://example.org/demo-1-py3-none-any.whl{fragment}",
+        ],
+    )
+    result = finder.find_best_candidate(
+        "demo",
+        index_hashes=(Hashes({"sha256": ["aaa"]}),),
+    )
+
+    assert result.best_candidate is None
+    assert result.applicable_candidates == []
+
+
+def test_index_hashes_require_every_constraint(tmp_path: Path) -> None:
+    finder = _finder_with_advertised_links(
+        tmp_path,
+        [
+            "https://example.org/demo-1-py3-none-any.whl#sha256=aaa",
+        ],
+    )
+    first = Hashes({"sha256": ["aaa", "bbb"]})
+    second = Hashes({"sha256": ["bbb"]})
+    result = finder.find_best_candidate("demo", index_hashes=(first, second))
+
+    assert result.best_candidate is None
+    assert result.applicable_candidates == []

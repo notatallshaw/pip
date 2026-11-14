@@ -258,6 +258,36 @@ e.g. http://example.com/constraints.txt, so that your organization can store and
 serve them in a centralized place.
 
 
+Index hash constraints
+----------------------
+
+Use ``--index-hash`` on a constraint line to allow only distribution files
+whose hashes match those advertised by an index or a ``--find-links`` page::
+
+    SomeProject --index-hash=sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
+
+Pip excludes files with missing or mismatching advertised hashes without
+downloading them. It verifies the matching hashes against the archive when
+it downloads the file. An index advertisement does not verify the archive's
+contents; for example, a metadata-only dry run can select a file without
+downloading it.
+
+Repeat ``--index-hash`` on a line to allow alternative hashes. Separate
+constraint lines must each have a matching advertised hash. Supported
+algorithms are ``sha256``, ``sha384`` and ``sha512``. HTML indexes normally
+advertise one hash per file; JSON indexes can advertise multiple algorithms.
+
+This option does not enable global :ref:`hash-checking mode`. Other packages
+can remain unhashed, and version pins are optional. Ordinary ``--hash`` checks
+apply independently. Direct URL requirements and URL constraints cannot satisfy
+an index hash constraint. Hashes in direct ``--find-links`` archive URLs or
+lockfiles are not index advertisements. Pip consults the index even when the
+package is already installed, and checks a cached built wheel against its
+recorded source archive hashes. Pip records digests computed from the source
+bytes. Missing source records require preparing the source again. The legacy
+resolver does not support ``--index-hash``.
+
+
 .. _`Build Constraints`:
 
 Build Constraints
