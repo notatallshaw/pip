@@ -129,7 +129,7 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest]
         python:
           - "3.10"
           - "3.11"
@@ -172,15 +172,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install brz subversion
 
-      - name: Install MacOS dependencies
-        if: runner.os == 'macOS'
-        run: |
-          DEPS=breezy
-          if ! which svn; then
-            DEPS="${DEPS} subversion"
-          fi
-          brew install ${DEPS}
-
       - run: python -m pip install .
       - run: python -m pip install nox
 
@@ -196,6 +187,62 @@ jobs:
           tests/functional
           --verbose --numprocesses auto --showlocals
           --durations=15
+
+  tests-macos:
+    name: tests / ${{ matrix.python }} / ${{ matrix.os }} / ${{ matrix.group }}
+    runs-on: ${{ matrix.os }}
+
+    needs: [determine-changes]
+    if: >-
+      needs.determine-changes.outputs.tests == 'true' ||
+      github.event_name != 'pull_request'
+
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [macos-latest]
+        python:
+          - "3.10"
+          - "3.11"
+          - "3.12"
+          - "3.13"
+          - "3.14"
+          - "3.15"
+          - "3.14t"
+        # Split by the same stable node-id hash used for Windows shards.
+        group: [1, 2]
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python }}
+          allow-prereleases: true
+
+      - name: Set PYTHON_GIL
+        if: endsWith(matrix.python, 't')
+        run: |
+          echo "PYTHON_GIL=0" >> "$GITHUB_ENV"
+
+      - name: Install MacOS dependencies
+        run: |
+          DEPS=breezy
+          if ! which svn; then
+            DEPS="${DEPS} subversion"
+          fi
+          brew install ${DEPS}
+
+      - run: python -m pip install .
+      - run: python -m pip install nox
+
+      - name: Run tests (shard ${{ matrix.group }} of 2)
+        run: >-
+          python -m nox -s test-${{ matrix.python }} --
+          tests/unit tests/functional
+          --num-test-groups 2 --test-group ${{ matrix.group }}
+          --verbose --numprocesses auto --showlocals --durations=15
 
   tests-windows:
     name: tests / ${{ matrix.python }} / ${{ matrix.os }} / ${{ matrix.group }}
@@ -314,6 +361,7 @@ jobs:
       - docs
       - packaging
       - tests-unix
+      - tests-macos
       - tests-windows
       - tests-zipapp
       - vendoring
@@ -341,6 +389,7 @@ jobs:
               )
               && '
                 tests-unix,
+                tests-macos,
                 tests-windows,
                 tests-zipapp,
               '
