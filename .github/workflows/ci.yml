@@ -60,6 +60,7 @@ jobs:
             tests:
               # Anything that's touching code-related stuff
               - ".github/workflows/ci.yml"
+              - ".github/workflows/platform-tests.yml"
               - "src/**"
               - "tests/**"
               - "noxfile.py"
@@ -118,9 +119,7 @@ jobs:
       - run: git diff --exit-code
 
   tests:
-    name: tests / ${{ matrix.python.version || matrix.python }} / ${{ matrix.platform.os }} / ${{ matrix.platform.group }}
-    runs-on: ${{ matrix.platform.os }}
-
+    name: tests / ${{ matrix.os }}
     needs: [determine-changes]
     if: >-
       needs.determine-changes.outputs.tests == 'true' ||
@@ -129,118 +128,34 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        platform:
-          - &linux {os: ubuntu-latest, group: 1, groups: 1}
-          - &macos-1 {os: macos-latest, group: 1, groups: 2}
-          - &macos-2 {os: macos-latest, group: 2, groups: 2}
-          - {os: windows-latest, group: 1, groups: 3, dist: worksteal}
-          - {os: windows-latest, group: 2, groups: 3, dist: worksteal}
-          - {os: windows-latest, group: 3, groups: 3, dist: worksteal}
-        python:
-          - "3.10"
-          - "3.14"
-          - "3.15"
-          - "3.14t"
         include:
-          # Intermediate Python versions run only on Linux and macOS.
-          - {platform: *linux, python: "3.11"}
-          - {platform: *linux, python: "3.12"}
-          - {platform: *linux, python: "3.13"}
-          - {platform: *macos-1, python: "3.11"}
-          - {platform: *macos-1, python: "3.12"}
-          - {platform: *macos-1, python: "3.13"}
-          - {platform: *macos-2, python: "3.11"}
-          - {platform: *macos-2, python: "3.12"}
-          - {platform: *macos-2, python: "3.13"}
+          - os: ubuntu-latest
+            python: ["3.10", "3.11", "3.12", "3.13", "3.14", "3.15", "3.14t"]
+            groups: [1]
+          - os: macos-latest
+            python: ["3.10", "3.11", "3.12", "3.13", "3.14", "3.15", "3.14t"]
+            groups: [1, 2]
+          - os: windows-latest
+            python: ["3.10", "3.14", "3.15", "3.14t"]
+            groups: [1, 2, 3]
+            dist: worksteal
           # Oldest patches catch backport regressions. Use their Ubuntu 24.04 builds.
           # See: https://raw.githubusercontent.com/actions/python-versions/main/versions-manifest.json
-          - platform: &linux-oldest {os: ubuntu-24.04, group: 1, groups: 1}
-            python: { key: "3.10", version: "3.10.4" }
-          - platform: *linux-oldest
-            python: { key: "3.11", version: "3.11.0" }
-          - platform: *linux-oldest
-            python: { key: "3.12", version: "3.12.0" }
-          - platform: *linux-oldest
-            python: { key: "3.13", version: "3.13.0" }
-          - platform: *linux-oldest
-            python: { key: "3.14", version: "3.14.0" }
+          - os: ubuntu-24.04
+            python:
+              - {key: "3.10", version: "3.10.4"}
+              - {key: "3.11", version: "3.11.0"}
+              - {key: "3.12", version: "3.12.0"}
+              - {key: "3.13", version: "3.13.0"}
+              - {key: "3.14", version: "3.14.0"}
+            groups: [1]
 
-    steps:
-      # The D: drive is faster than the system C: drive.
-      # https://github.com/actions/runner-images/issues/8755
-      - name: Set TEMP to D:/Temp
-        if: runner.os == 'Windows'
-        run: |
-          mkdir "D:\\Temp"
-          echo "TEMP=D:\\Temp" >> $env:GITHUB_ENV
-
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
-        with:
-          python-version: ${{ matrix.python.version || matrix.python }}
-          allow-prereleases: true
-
-      - name: Set PYTHON_GIL
-        if: endsWith(matrix.python.version || matrix.python, 't')
-        shell: bash
-        run: |
-          echo "PYTHON_GIL=0" >> "$GITHUB_ENV"
-
-      - name: Install Ubuntu dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install brz subversion
-
-      - name: Install MacOS dependencies
-        if: runner.os == 'macOS'
-        run: |
-          DEPS=breezy
-          if ! which svn; then
-            DEPS="${DEPS} subversion"
-          fi
-          brew install ${DEPS}
-
-      - name: Install Subversion
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          for ($i = 1; $i -le 3; $i++) {
-            winget source reset --force
-            winget source update winget
-            winget install --source winget --accept-source-agreements --accept-package-agreements -e --id Slik.Subversion
-            if ($LASTEXITCODE -eq 0) { break }
-            if ($i -eq 3) { exit $LASTEXITCODE }
-            Start-Sleep -Seconds (10 * $i)
-          }
-          echo "C:\Program Files\SlikSvn\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-
-      - run: python -m pip install .
-      - run: python -m pip install nox
-
-      - name: Run unit tests
-        if: runner.os == 'Linux'
-        run: >-
-          python -m nox -s test-${{ matrix.python.key || matrix.python }} --
-          tests/unit
-          --verbose --numprocesses auto --showlocals
-      - name: Run integration tests
-        if: runner.os == 'Linux'
-        run: >-
-          python -m nox -s test-${{ matrix.python.key || matrix.python }} --no-install --
-          tests/functional
-          --verbose --numprocesses auto --showlocals
-          --durations=15
-      - name: Run tests (shard ${{ matrix.platform.group }} of ${{ matrix.platform.groups }})
-        if: runner.os != 'Linux'
-        run: >-
-          python -m nox -s test-${{ matrix.python.key || matrix.python }} --
-          tests/unit tests/functional
-          --num-test-groups ${{ matrix.platform.groups }} --test-group ${{ matrix.platform.group }}
-          --verbose --numprocesses auto --showlocals --durations=15
-          --dist ${{ matrix.platform.dist || 'load' }}
+    uses: $/.github/workflows/platform-tests.yml
+    with:
+      os: ${{ matrix.os }}
+      python-versions: ${{ toJSON(matrix.python) }}
+      groups: ${{ toJSON(matrix.groups) }}
+      dist: ${{ matrix.dist || 'load' }}
 
   tests-zipapp:
     name: tests / zipapp
