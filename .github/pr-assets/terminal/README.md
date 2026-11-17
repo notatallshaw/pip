@@ -1,7 +1,7 @@
 # Terminal output comparison
 
-These GIFs show actual `python -m pip` commands recorded in pseudo-terminals with 80 columns. The paired `.cast` files contain the captured terminal output and timing. The recordings use CPython 3.14 on Linux, the same terminal settings, and matching offline package inputs.
+These images show actual `python -m pip` commands recorded in 80-column pseudo-terminals on Linux with CPython 3.14. Paired captures use matching terminal settings and package inputs. The `.cast` files retain the original output and timing; `manifest.json` identifies the source revisions and previews.
 
-The download commands use a local HTTP server, with and without a Content-Length header. Installation uses local wheels. The recursive build installs local build dependencies and runs PEP 517 hooks. The invalid build-system requirement command exits with status 1; the other commands succeed.
+Downloads use a localhost HTTP server, with and without Content-Length. Installation uses local wheels. The wheel-build example uses a backend that waits before returning its wheel. Recursive builds install local build dependencies through pip's default CLI path. The invalid build-system requirement command exits with status 1; the other commands succeed.
 
-`manifest.json` identifies both source revisions and the recording dimensions. The GIFs play at the captured speed, with a final pause before looping. Help and JSON complete in a single output burst; download, installation and build recordings show their actual updates.
+Animated previews start at the first output event and run at the captured speed, with a final pause before looping. Help, JSON and diagnostics have still PNG previews. The original recordings retain startup timing.

@@ -1,0 +1,9 @@
+{"version": 2, "width": 80, "height": 16, "title": "wheel", "env": {"TERM": "xterm-256color", "SHELL": "/bin/sh"}}
+[0.208468, "o", "Processing ./example_silent\r\n"]
+[0.952489, "o", "  Getting requirements to build wheel ... \u001b[?25ldone\r\n"]
+[1.698017, "o", "\u001b[?25h  Preparing metadata (pyproject.toml) ... \u001b[?25ldone\r\n"]
+[1.700335, "o", "\u001b[?25hBuilding wheels for collected packages: example_silent\r\n"]
+[7.744644, "o", "  Building wheel for example_silent (pyproject.toml) ... \u001b[?25ldone\r\n"]
+[7.745175, "o", "\u001b[?25h  Created wheel for example_silent: filename=example_silent-1.0-py3-none-any.whl size=859 sha256=d8f542ce874d4372318b8dec575677c1e3d09027f84d31337a0ddd2ab2d947c5\r\n"]
+[7.745271, "o", "  Stored in directory: /home/damian/opensource/remote/projects/resolver/work/scratch/owned-runs/pip-pr118-longer-output-pkpkumdf/tmp/pip-ephem-wheel-cache-ljgh5j9t/wheels/02/89/68/285f6b5cf5d90e2cb6d50b101ed2a950bfd3d3c92b261b39eb\r\n"]
+[7.746569, "o", "Successfully built example_silent\r\n"]

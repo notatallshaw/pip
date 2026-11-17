@@ -1,73 +1,14 @@
 [
   {
-    "scenario": "help",
-    "variant": "old",
-    "commit": "4b71f36fb4dfbc87ce65ac4710eeccf81d379f55",
-    "returncode": 0,
-    "rows": 42,
-    "columns": 80,
-    "gif": "help-old.gif",
-    "gif_sha256": "425d515a61466b983c0d3ca6f0cad89d74b56a71f523e6c488e0fdc1fb3d8577"
-  },
-  {
-    "scenario": "help",
-    "variant": "new",
-    "commit": "4f8ca35586ed5db9d36851fca4caa0629a1ecea0",
-    "returncode": 0,
-    "rows": 42,
-    "columns": 80,
-    "gif": "help-new.gif",
-    "gif_sha256": "e93c333b3b2ba1c7c7f6467380a1cc2213c01387e9ff7a39387ab686523710a3"
-  },
-  {
-    "scenario": "diagnostic",
-    "variant": "old",
-    "commit": "4b71f36fb4dfbc87ce65ac4710eeccf81d379f55",
-    "returncode": 1,
-    "rows": 16,
-    "columns": 80,
-    "gif": "diagnostic-old.gif",
-    "gif_sha256": "76b140b391c1c6ccd71eb8b9fe1da05a295b8588d15175b7f8596dc324dc29aa"
-  },
-  {
-    "scenario": "diagnostic",
-    "variant": "new",
-    "commit": "4f8ca35586ed5db9d36851fca4caa0629a1ecea0",
-    "returncode": 1,
-    "rows": 16,
-    "columns": 80,
-    "gif": "diagnostic-new.gif",
-    "gif_sha256": "56cca0823f55709a2951f1445950e3c3fd4196688cceeb0f958344cdc4b2f012"
-  },
-  {
-    "scenario": "json",
-    "variant": "old",
-    "commit": "4b71f36fb4dfbc87ce65ac4710eeccf81d379f55",
-    "returncode": 0,
-    "rows": 42,
-    "columns": 80,
-    "gif": "json-old.gif",
-    "gif_sha256": "b019f1ca4d6d6a7bc3651d802e5fab4c693dab6e41a5c1c251e6732354f72f03"
-  },
-  {
-    "scenario": "json",
-    "variant": "new",
-    "commit": "4f8ca35586ed5db9d36851fca4caa0629a1ecea0",
-    "returncode": 0,
-    "rows": 42,
-    "columns": 80,
-    "gif": "json-new.gif",
-    "gif_sha256": "3644f876c0e65dfe22ff7491a32fe53f7b4d17cf6b6699b564d714b93c94f02a"
-  },
-  {
     "scenario": "download",
     "variant": "old",
     "commit": "4b71f36fb4dfbc87ce65ac4710eeccf81d379f55",
     "returncode": 0,
     "rows": 8,
     "columns": 80,
-    "gif": "download-old.gif",
-    "gif_sha256": "0896054d778fc59b77cdc66aae633ed6ebedab251f99ff5ec4a51b858dc23436"
+    "preview": "download-old.gif",
+    "preview_sha256": "dabb598e576df755d5e9f76dec4b198b1a03653b4958e2ab5a11368cdddaf5c5",
+    "cast_sha256": "ab290ed19c98558ed39a171fbc4235c8e9bd6368ec84739a05e8c8dd94edbb81"
   },
   {
     "scenario": "download",
@@ -76,8 +17,9 @@
     "returncode": 0,
     "rows": 8,
     "columns": 80,
-    "gif": "download-new.gif",
-    "gif_sha256": "754b63aa3803fca24f7f18f8b13dc565462bfa7078af2c32f6bd503ee767e721"
+    "preview": "download-new.gif",
+    "preview_sha256": "0ae330cf5ecc031de32b13f9f32270a34a6bc290aa85b0b060143b532dfa256e",
+    "cast_sha256": "1c809d5aa7faee5f25d24048dcf8a40dc9325ba7c5f7cb0bc7cf79add94b8743"
   },
   {
     "scenario": "streamed",
@@ -86,8 +28,9 @@
     "returncode": 0,
     "rows": 8,
     "columns": 80,
-    "gif": "streamed-old.gif",
-    "gif_sha256": "bc63ca3992e621f98881cd54b5c13a47532e1b6979650cad82ac97729670e0db"
+    "preview": "streamed-old.gif",
+    "preview_sha256": "d264317942fd7b78ffeee025ffbd4c87bfeb32069590f8e788df7a697c1b3830",
+    "cast_sha256": "c38b0f94b5af0726ff6c6d1c5c6973f4e56a7d265a98ccab008895e706b0a0da"
   },
   {
     "scenario": "streamed",
@@ -96,8 +39,9 @@
     "returncode": 0,
     "rows": 8,
     "columns": 80,
-    "gif": "streamed-new.gif",
-    "gif_sha256": "a48ec989b46696360df829194e579a198c5149f728c47b31382234490ddf3444"
+    "preview": "streamed-new.gif",
+    "preview_sha256": "6a2066be0fddb3b9873bd49f6df245b87601e3b4c28a03463eae7d56193a886b",
+    "cast_sha256": "07c0fe33599cc68fe757d08fb90cb95572ea3b443d40259cb67341d8d99a8667"
   },
   {
     "scenario": "install",
@@ -106,8 +50,9 @@
     "returncode": 0,
     "rows": 12,
     "columns": 80,
-    "gif": "install-old.gif",
-    "gif_sha256": "e7a34b6da58280118aa88b944701e8572d7386374cb96600315aa9fa555d4962"
+    "preview": "install-old.gif",
+    "preview_sha256": "5853c2b754d3ce74d73cc6a77f9da8a81d2c6052dcfb70258f6ea36e4932ebbd",
+    "cast_sha256": "9896f9672defe32581a9b57a1d639129d95f55135b10b00d6cc73fd2d563c4bc"
   },
   {
     "scenario": "install",
@@ -116,8 +61,31 @@
     "returncode": 0,
     "rows": 12,
     "columns": 80,
-    "gif": "install-new.gif",
-    "gif_sha256": "36cacc00a45dcf02d727bdf00fddf4f5ba288b9c1d9d1902076712c66b5a7725"
+    "preview": "install-new.gif",
+    "preview_sha256": "6d288d9f6e6708ea7f470dc797656530f4352481ac26d8827edbcc59338c6d87",
+    "cast_sha256": "15be5fee0195666f9d3e9cf6857d921209536e8981e9701533ec7d34ffb72fd3"
+  },
+  {
+    "scenario": "wheel",
+    "variant": "old",
+    "commit": "4b71f36fb4dfbc87ce65ac4710eeccf81d379f55",
+    "returncode": 0,
+    "rows": 16,
+    "columns": 80,
+    "preview": "wheel-old.gif",
+    "preview_sha256": "53a73aa7bae501d86f5e7a5ac3f75649522ac33cc3ff305a232a5815d0bb87f4",
+    "cast_sha256": "f464a028f27ca29f19a66942475822488b9923805ad6564bf84e8598d695edc8"
+  },
+  {
+    "scenario": "wheel",
+    "variant": "new",
+    "commit": "4f8ca35586ed5db9d36851fca4caa0629a1ecea0",
+    "returncode": 0,
+    "rows": 16,
+    "columns": 80,
+    "preview": "wheel-new.gif",
+    "preview_sha256": "db3f08988418c340fbdf1abfbdaa443451841b6217b4bf7f419836148aa392b1",
+    "cast_sha256": "5afc5623f5093def12e60f5ff8186f3df0d90af0ed2cafda1d856c468085a9d0"
   },
   {
     "scenario": "build",
@@ -126,8 +94,9 @@
     "returncode": 0,
     "rows": 24,
     "columns": 80,
-    "gif": "build-old.gif",
-    "gif_sha256": "e356a2ce9798867f4fe0bc0503d9f8b518233b28d9427b34304fee9c6b008c80"
+    "preview": "build-old.gif",
+    "preview_sha256": "d4b1fc7ecf9c2fbac44ab3049a3a83b1f698a5ea4294c0431ea435fbf7a372b2",
+    "cast_sha256": "88d160682bcd19a60281fdc4c1e41d372b57ea241ece1652bdc6a007b5ce61e5"
   },
   {
     "scenario": "build",
@@ -136,7 +105,74 @@
     "returncode": 0,
     "rows": 24,
     "columns": 80,
-    "gif": "build-new.gif",
-    "gif_sha256": "0166f5dcc46e3cb22b18413bdc918dcb0c5e4dc5d4c7854779ccd46c80f1931b"
+    "preview": "build-new.gif",
+    "preview_sha256": "31971589ff84702e808ed1cff148b21f959e9534453cef05cf2688782a3c285f",
+    "cast_sha256": "f9c0a12e45847c1e8fce94ddc899eea4c2f84686e0a6736a4046bef46ede66c1"
+  },
+  {
+    "scenario": "help",
+    "variant": "old",
+    "commit": "4b71f36fb4dfbc87ce65ac4710eeccf81d379f55",
+    "returncode": 0,
+    "rows": 42,
+    "columns": 80,
+    "preview": "help-old.png",
+    "preview_sha256": "c65006c002c3b30ec13b28676231937f25ab09cbf605d3ac128fbcff0960ed00",
+    "cast_sha256": "ec45e09ac352d6eb57f8da92acb95691bc98e623d9d32c38ff77298f4d83da8a"
+  },
+  {
+    "scenario": "help",
+    "variant": "new",
+    "commit": "4f8ca35586ed5db9d36851fca4caa0629a1ecea0",
+    "returncode": 0,
+    "rows": 42,
+    "columns": 80,
+    "preview": "help-new.png",
+    "preview_sha256": "c65006c002c3b30ec13b28676231937f25ab09cbf605d3ac128fbcff0960ed00",
+    "cast_sha256": "ea7864d37b10c281670a710bb855135c0b0d0d0cc27d73eff755df414be2f664"
+  },
+  {
+    "scenario": "json",
+    "variant": "old",
+    "commit": "4b71f36fb4dfbc87ce65ac4710eeccf81d379f55",
+    "returncode": 0,
+    "rows": 42,
+    "columns": 80,
+    "preview": "json-old.png",
+    "preview_sha256": "3c3ef8ce2335b4ddbb66d453b6ed5e8f0857313195bdadf71d3b24e55481e6a6",
+    "cast_sha256": "9e6bdd18e716e29d308c9bfa63f06ccce108ac9bddbf6af65d2d2ae27ab512bd"
+  },
+  {
+    "scenario": "json",
+    "variant": "new",
+    "commit": "4f8ca35586ed5db9d36851fca4caa0629a1ecea0",
+    "returncode": 0,
+    "rows": 42,
+    "columns": 80,
+    "preview": "json-new.png",
+    "preview_sha256": "3c3ef8ce2335b4ddbb66d453b6ed5e8f0857313195bdadf71d3b24e55481e6a6",
+    "cast_sha256": "400f2f4a150abc93c2b80138b4342030b4505b6f07b2fcfb16ee9387c8896a69"
+  },
+  {
+    "scenario": "diagnostic",
+    "variant": "old",
+    "commit": "4b71f36fb4dfbc87ce65ac4710eeccf81d379f55",
+    "returncode": 1,
+    "rows": 16,
+    "columns": 80,
+    "preview": "diagnostic-old.png",
+    "preview_sha256": "57c27075eb4041c272cdca892a4d647d1e2e1a7ade0437b87809bdd552240077",
+    "cast_sha256": "689aa4fb18bcd8c6806da594ed296c3a316b395d83212d1d99b7d486eb709f76"
+  },
+  {
+    "scenario": "diagnostic",
+    "variant": "new",
+    "commit": "4f8ca35586ed5db9d36851fca4caa0629a1ecea0",
+    "returncode": 1,
+    "rows": 16,
+    "columns": 80,
+    "preview": "diagnostic-new.png",
+    "preview_sha256": "d2d28666f42eed864212f19bf6736e7cb4b8c484638b643594b5e09cbe937f2b",
+    "cast_sha256": "5f8a20e5619c74709caa57afcfa32e8ca97209a3bc5207397fe7fe08128aa62a"
   }
 ]
