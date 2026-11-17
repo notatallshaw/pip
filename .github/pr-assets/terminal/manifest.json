@@ -7,19 +7,19 @@
     "rows": 8,
     "columns": 80,
     "preview": "download-old.gif",
-    "preview_sha256": "27cd8faf80697875dd36cc91b6ccbf96872030f42c12024f1e3637f954084df6",
-    "cast_sha256": "5fd7556fddf7aaea221d824fbae54ac6a1e23e7d6de7aabf0fb3e3d19788981a"
+    "preview_sha256": "dabb598e576df755d5e9f76dec4b198b1a03653b4958e2ab5a11368cdddaf5c5",
+    "cast_sha256": "7c7d16b3ffdcf3ebb2dd83a5e9615777eef746868f1f2ef17be364d60f538811"
   },
   {
     "scenario": "download",
     "variant": "new",
-    "commit": "20217373538e8a29b208f49b2f546b253d33deb8",
+    "commit": "253efd5e1fc32884dddae8b082e03bc48720b1c3",
     "returncode": 0,
     "rows": 8,
     "columns": 80,
     "preview": "download-new.gif",
-    "preview_sha256": "7d4b6af7bb30967ddb8bed8e59bcd20cfd4dd06ec5487819812a8b1a6a1dcd99",
-    "cast_sha256": "3a5508c4b0125afbecd95b807bfb197b735970ec4ee2a437edc2f6128ecc8262"
+    "preview_sha256": "0ae330cf5ecc031de32b13f9f32270a34a6bc290aa85b0b060143b532dfa256e",
+    "cast_sha256": "9b32fae0de645242f3ed37cd6e98fb428e3e986831b43b1ef86466bc74b01504"
   },
   {
     "scenario": "streamed",
@@ -29,19 +29,19 @@
     "rows": 8,
     "columns": 80,
     "preview": "streamed-old.gif",
-    "preview_sha256": "048312a8308a3ce6e6510a8b0a0cb97c5d4ba8f5d95425cecefd73a7c02246b0",
-    "cast_sha256": "44ca3bd45995fb34f72683afca82cf9037afc2834bd443353a28c358df10cc74"
+    "preview_sha256": "b636f78066f43250e635e823e3d8373f2e4c1fc5bba3908028cda01ffa07edd6",
+    "cast_sha256": "efe2e314ba343f65089cf91524571fd490d8c953001e7209eb5efe9fcd421a34"
   },
   {
     "scenario": "streamed",
     "variant": "new",
-    "commit": "20217373538e8a29b208f49b2f546b253d33deb8",
+    "commit": "253efd5e1fc32884dddae8b082e03bc48720b1c3",
     "returncode": 0,
     "rows": 8,
     "columns": 80,
     "preview": "streamed-new.gif",
-    "preview_sha256": "e46da0a8bc4513bfbffe9abc4a1608526e7246119f4f6bb9a3d2b0ba75450a57",
-    "cast_sha256": "2ab686ab03a5ea31a7e5ecccef8ecb0d5cdf1193e10d380178f3d1883ee54a8e"
+    "preview_sha256": "6a2066be0fddb3b9873bd49f6df245b87601e3b4c28a03463eae7d56193a886b",
+    "cast_sha256": "857b0629a186ee74e7573df65012491c8868931898e75d6b7baa7471ac082f8e"
   },
   {
     "scenario": "install",
@@ -51,19 +51,19 @@
     "rows": 12,
     "columns": 80,
     "preview": "install-old.gif",
-    "preview_sha256": "1bcdf4ddcbc9bdcf4c6908bf5a3bb074d7af7e26b20910168e6a0f3862d72e90",
-    "cast_sha256": "72ba4f27e084c513fd017f8b57a812c6a4766bf85c17b98d14f0776023211f41"
+    "preview_sha256": "75fe3509c945d6fe3ef21aa463c27b356509cfc1e7863c29b6d9ea74cf473c35",
+    "cast_sha256": "98eca915ba6357fa89fa6ca76bd0ead85e4be14dba86bb34628575f5bfefcf5a"
   },
   {
     "scenario": "install",
     "variant": "new",
-    "commit": "20217373538e8a29b208f49b2f546b253d33deb8",
+    "commit": "253efd5e1fc32884dddae8b082e03bc48720b1c3",
     "returncode": 0,
     "rows": 12,
     "columns": 80,
     "preview": "install-new.gif",
-    "preview_sha256": "298a538fbdce95cac72f7af89d4a53653c2f1b64f05fc0625fe8d22e4d634a9e",
-    "cast_sha256": "7d0fd1fd27a5ba35659b1680e4b3295cb7a23ba77c3f4d8e170db005e7ce63ec"
+    "preview_sha256": "a3a36ff4b0326655894606bb4af9c3c56db7fdc7d158d24db1d76e97b0fb392c",
+    "cast_sha256": "5d97c34a30500ae624a90599ebb3f196dcae252029cb42563b9b044a84db3b8e"
   },
   {
     "scenario": "wheel",
@@ -73,19 +73,19 @@
     "rows": 16,
     "columns": 80,
     "preview": "wheel-old.gif",
-    "preview_sha256": "769fea24a0ec23e258a30d44cc4d3d3cd2a169bf4bf83b49baee01fb7b045042",
-    "cast_sha256": "521c69ed0b5f91a01d3b9a687939736e8c9b7c1ad95ae959fed5bf45b269d572"
+    "preview_sha256": "972d81adcf6527dfef36ade906b768bdcf8233b7bcb8040efae381cdf4fe24a0",
+    "cast_sha256": "23bb3d4a7f786491c0c8b82f0a4390b2c2c13f38c222e049f49c96e4671b5f40"
   },
   {
     "scenario": "wheel",
     "variant": "new",
-    "commit": "20217373538e8a29b208f49b2f546b253d33deb8",
+    "commit": "253efd5e1fc32884dddae8b082e03bc48720b1c3",
     "returncode": 0,
     "rows": 16,
     "columns": 80,
     "preview": "wheel-new.gif",
-    "preview_sha256": "5a4289b889c8e2a88d5854c56a5b622922b2b78492f566b8078a1d0dbb3c6b1c",
-    "cast_sha256": "c991cd6c5b52f19bd539604849553959bf0db1f977f87f952d6d44e3ffe4c918"
+    "preview_sha256": "d8eb45f252cba95f533a1fa02673d34ac91db4bc5b2bc1428f488eb3beedfe0b",
+    "cast_sha256": "a3a6f4290e5ffa55a722609b9479a38f4f72aae34f7086b041b080a0be3a0bd9"
   },
   {
     "scenario": "build",
@@ -95,19 +95,19 @@
     "rows": 24,
     "columns": 80,
     "preview": "build-old.gif",
-    "preview_sha256": "437ca84be5656997642408b861ca3a1b725d6e8ce37f65b04ab7294bb566ed61",
-    "cast_sha256": "d974a8d00fd4ed40c0f34442bae8a8fd9d013a662bbe2b0f0ed4145a1a2074af"
+    "preview_sha256": "7fb82eb8b1273f3c30c0bd1406fd4afb775d0b4abfc5fc92269cb985f6c1ab8a",
+    "cast_sha256": "e01b795fc5f7be4c5a0714e4fb29ca0307ac47d91ada17a110f7012418473ec9"
   },
   {
     "scenario": "build",
     "variant": "new",
-    "commit": "20217373538e8a29b208f49b2f546b253d33deb8",
+    "commit": "253efd5e1fc32884dddae8b082e03bc48720b1c3",
     "returncode": 0,
     "rows": 24,
     "columns": 80,
     "preview": "build-new.gif",
-    "preview_sha256": "b29dd9eee51de5252d56e4786b4ba462d0cb7ec96fa1f0a20c526d7d3a506ee0",
-    "cast_sha256": "a280c7f0d873cfb752e5ddd635a5aa609f2fb72d01d7b8c512d708ad7661cf53"
+    "preview_sha256": "e96d4b16394d9026c1ae716168eed7f2ebdf4037d0f572f4ea3828a0ecf08e45",
+    "cast_sha256": "dc7a12416752b5ab1e54cdbc4e469d84992572e323730e9289a307a80d39479f"
   },
   {
     "scenario": "help",
@@ -118,18 +118,18 @@
     "columns": 80,
     "preview": "help-old.png",
     "preview_sha256": "c65006c002c3b30ec13b28676231937f25ab09cbf605d3ac128fbcff0960ed00",
-    "cast_sha256": "3b08d62b462df6c836ab4e32efb118a0fb2820e1e2b7897f89b5d9dcba425e34"
+    "cast_sha256": "f045712f368f65abb857eb7a665428b80f745191e202459665295341a5a1f9b9"
   },
   {
     "scenario": "help",
     "variant": "new",
-    "commit": "20217373538e8a29b208f49b2f546b253d33deb8",
+    "commit": "253efd5e1fc32884dddae8b082e03bc48720b1c3",
     "returncode": 0,
     "rows": 42,
     "columns": 80,
     "preview": "help-new.png",
     "preview_sha256": "c65006c002c3b30ec13b28676231937f25ab09cbf605d3ac128fbcff0960ed00",
-    "cast_sha256": "8a39d9f5ba45f1b02a53cc810d1fb0b12860fd5e7ea013aed0471332b57153bc"
+    "cast_sha256": "296cfacdc8b1d1df60d198c26dc4e8f9b260db95d41db22afdd37918f8175fec"
   },
   {
     "scenario": "json",
@@ -139,19 +139,19 @@
     "rows": 42,
     "columns": 80,
     "preview": "json-old.png",
-    "preview_sha256": "3fa9dfeaa5d5c2565bffa2c30b531caaa8ce4ace6b136a5dd6c28d6449cfbcdf",
-    "cast_sha256": "b91a7ab522a10a6635cf23870a82e692c23abc346ae67720899d099396c4e90e"
+    "preview_sha256": "eff5dc07bdad0916c334af971c9cb6e8cffd448a0345025c611ab05e0748cbc5",
+    "cast_sha256": "e0ff140103c1bbecd82cea908226166940c501ca3644d330e514feddc5a2c8d1"
   },
   {
     "scenario": "json",
     "variant": "new",
-    "commit": "20217373538e8a29b208f49b2f546b253d33deb8",
+    "commit": "253efd5e1fc32884dddae8b082e03bc48720b1c3",
     "returncode": 0,
     "rows": 42,
     "columns": 80,
     "preview": "json-new.png",
-    "preview_sha256": "3fa9dfeaa5d5c2565bffa2c30b531caaa8ce4ace6b136a5dd6c28d6449cfbcdf",
-    "cast_sha256": "1c3f03fc827d2ea805a52ae1d6684ef3d067d194f07d75aef7d821ae43eaaa85"
+    "preview_sha256": "eff5dc07bdad0916c334af971c9cb6e8cffd448a0345025c611ab05e0748cbc5",
+    "cast_sha256": "5f9001ea6fe6b7562e1bd529d2b8e85ef38e1a3ac2aa9500b2aa8e54259834d3"
   },
   {
     "scenario": "diagnostic",
@@ -161,18 +161,18 @@
     "rows": 16,
     "columns": 80,
     "preview": "diagnostic-old.png",
-    "preview_sha256": "e2e46d8a27abec3bd2dac3a6bbcccae5e19056ad655bf8c8fa95604d02b8199a",
-    "cast_sha256": "f44e0327904aaa2dba84cd98fba68df27e705205fafb9f5ebe741bf941267725"
+    "preview_sha256": "ccb40464ae2543edaca67f01c8cf53c46e01f7ae68272b6e316b1d32417667bf",
+    "cast_sha256": "b9a85116cd8a0d8c08bc265564e96fecb010c326becc3c47f8325ac63a762942"
   },
   {
     "scenario": "diagnostic",
     "variant": "new",
-    "commit": "20217373538e8a29b208f49b2f546b253d33deb8",
+    "commit": "253efd5e1fc32884dddae8b082e03bc48720b1c3",
     "returncode": 1,
     "rows": 16,
     "columns": 80,
     "preview": "diagnostic-new.png",
-    "preview_sha256": "47bd8cde375d16b5f87f8a4279c010aaa07ca46b21d706427b4374be14242048",
-    "cast_sha256": "9ac19d27a9b0fa6a91aad8ea7c6ccdb29e419a4348f13d0fc2b437e2548f3987"
+    "preview_sha256": "4c55fb9581551dc04e8fb5a8397bb9aa1db65e4c041b0f04f36469c213626292",
+    "cast_sha256": "c7e70000fac88cffc82d3ddbf42f7f1d82c53954fbbd1bb428478bf317c30d90"
   }
 ]
