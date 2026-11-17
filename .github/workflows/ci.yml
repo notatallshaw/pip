@@ -118,8 +118,8 @@ jobs:
       - run: git diff --exit-code
 
   tests:
-    name: tests / ${{ matrix.python.version || matrix.python }} / ${{ matrix.os }} / ${{ matrix.group }}
-    runs-on: ${{ matrix.os }}
+    name: tests / ${{ matrix.python.version || matrix.python }} / ${{ matrix.platform.os }} / ${{ matrix.platform.group }}
+    runs-on: ${{ matrix.platform.os }}
 
     needs: [determine-changes]
     if: >-
@@ -129,60 +129,41 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        platform:
+          - &linux {os: ubuntu-latest, group: 1, groups: 1}
+          - &macos-1 {os: macos-latest, group: 1, groups: 2}
+          - &macos-2 {os: macos-latest, group: 2, groups: 2}
+          - {os: windows-latest, group: 1, groups: 3, dist: worksteal}
+          - {os: windows-latest, group: 2, groups: 3, dist: worksteal}
+          - {os: windows-latest, group: 3, groups: 3, dist: worksteal}
         python:
           - "3.10"
-          - "3.11"
-          - "3.12"
-          - "3.13"
           - "3.14"
           - "3.15"
           - "3.14t"
-        group: [1, 2, 3]
-        exclude:
-          - os: ubuntu-latest
-            group: 2
-          - os: ubuntu-latest
-            group: 3
-          - os: macos-latest
-            group: 3
-          # Windows tests are slow, so omit intermediate Python versions.
-          - os: windows-latest
-            python: "3.11"
-          - os: windows-latest
-            python: "3.12"
-          - os: windows-latest
-            python: "3.13"
         include:
-          - os: ubuntu-latest
-            groups: 1
-          - os: macos-latest
-            groups: 2
-          - os: windows-latest
-            groups: 3
-            dist: worksteal
+          # Intermediate Python versions run only on Linux and macOS.
+          - {platform: *linux, python: "3.11"}
+          - {platform: *linux, python: "3.12"}
+          - {platform: *linux, python: "3.13"}
+          - {platform: *macos-1, python: "3.11"}
+          - {platform: *macos-1, python: "3.12"}
+          - {platform: *macos-1, python: "3.13"}
+          - {platform: *macos-2, python: "3.11"}
+          - {platform: *macos-2, python: "3.12"}
+          - {platform: *macos-2, python: "3.13"}
           # Oldest patches catch backport regressions. Use their Ubuntu 24.04 builds.
           # See: https://raw.githubusercontent.com/actions/python-versions/main/versions-manifest.json
-          - os: ubuntu-24.04
+          - platform: &linux-oldest {os: ubuntu-24.04, group: 1, groups: 1}
             python: { key: "3.10", version: "3.10.4" }
-            group: 1
-            groups: 1
-          - os: ubuntu-24.04
+          - platform: *linux-oldest
             python: { key: "3.11", version: "3.11.0" }
-            group: 1
-            groups: 1
-          - os: ubuntu-24.04
+          - platform: *linux-oldest
             python: { key: "3.12", version: "3.12.0" }
-            group: 1
-            groups: 1
-          - os: ubuntu-24.04
+          - platform: *linux-oldest
             python: { key: "3.13", version: "3.13.0" }
-            group: 1
-            groups: 1
-          - os: ubuntu-24.04
+          - platform: *linux-oldest
             python: { key: "3.14", version: "3.14.0" }
-            group: 1
-            groups: 1
 
     steps:
       # The D: drive is faster than the system C: drive.
@@ -252,14 +233,14 @@ jobs:
           tests/functional
           --verbose --numprocesses auto --showlocals
           --durations=15
-      - name: Run tests (shard ${{ matrix.group }} of ${{ matrix.groups }})
+      - name: Run tests (shard ${{ matrix.platform.group }} of ${{ matrix.platform.groups }})
         if: runner.os != 'Linux'
         run: >-
           python -m nox -s test-${{ matrix.python.key || matrix.python }} --
           tests/unit tests/functional
-          --num-test-groups ${{ matrix.groups }} --test-group ${{ matrix.group }}
+          --num-test-groups ${{ matrix.platform.groups }} --test-group ${{ matrix.platform.group }}
           --verbose --numprocesses auto --showlocals --durations=15
-          --dist ${{ matrix.dist || 'load' }}
+          --dist ${{ matrix.platform.dist || 'load' }}
 
   tests-zipapp:
     name: tests / zipapp
