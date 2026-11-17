@@ -1,19 +1,14 @@
 from io import StringIO
 
-from pip._vendor.rich.console import Console, RenderableType
+from pip._internal.cli.terminal import Renderable, Terminal
 
 
 def render_to_text(
-    renderable: RenderableType,
+    renderable: str | Renderable,
     *,
     color: bool = False,
 ) -> str:
     with StringIO() as stream:
-        console = Console(
-            force_terminal=False,
-            file=stream,
-            color_system="truecolor" if color else None,
-            soft_wrap=True,
-        )
+        console = Terminal(file=stream, color=color)
         console.print(renderable)
         return stream.getvalue()

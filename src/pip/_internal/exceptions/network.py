@@ -4,9 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Literal
 
-from pip._vendor.rich.markup import escape
-from pip._vendor.rich.text import Text
-
+from pip._internal.cli.terminal import Text, escape
 from pip._internal.exceptions._base import DiagnosticPipError, PipError
 
 if TYPE_CHECKING:
@@ -185,7 +183,7 @@ class IncompleteDownloadError(DiagnosticPipError):
 
         super().__init__(
             message=message,
-            context=f"URL: {download.link.redacted_url}",
+            context=Text(f"URL: {download.link.redacted_url}"),
             hint_stmt=hint,
             note_stmt="This is an issue with network connectivity, not pip.",
         )

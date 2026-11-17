@@ -2,6 +2,8 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 _BROKEN_STDOUT_RETURN_CODE = 120
 
 
@@ -29,12 +31,13 @@ def setup_broken_stdout_test(
     return stderr, returncode
 
 
-def test_broken_stdout_pipe(deprecated_python: bool) -> None:
+@pytest.mark.parametrize("command", ["list", "inspect"])
+def test_broken_stdout_pipe(deprecated_python: bool, command: str) -> None:
     """
     Test a broken pipe to stdout.
     """
     stderr, returncode = setup_broken_stdout_test(
-        ["pip", "list"],
+        ["pip", command],
         deprecated_python=deprecated_python,
     )
 

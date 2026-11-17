@@ -1,14 +1,14 @@
 import functools
+import re
 from unittest.mock import Mock
 
 import pytest
 
-from pip._vendor.rich.text import Text
-
+from pip._internal.cli import terminal as cli_terminal
 from pip._internal.cli.status_codes import ERROR, SUCCESS
+from pip._internal.cli.terminal import Terminal
 from pip._internal.commands import commands_dict, create_command
 from pip._internal.exceptions import CommandError
-from pip._internal.utils import logging as pip_logging
 
 from tests.lib import InMemoryPip, PipTestEnvironment
 
@@ -133,28 +133,22 @@ def test_help_command_colors(
     monkeypatch.delenv("PIP_NO_COLOR", raising=False)
     monkeypatch.delenv("FORCE_COLOR", raising=False)
 
-    PipConsole = pip_logging.PipConsole
-
-    TestConsole = functools.partial(
-        PipConsole, force_terminal=True, color_system="standard", width=80
+    monkeypatch.setattr(
+        cli_terminal, "Terminal", functools.partial(Terminal, color=True)
     )
-    monkeypatch.setattr(pip_logging, "PipConsole", TestConsole)
 
     if envvar:
         monkeypatch.setenv(envvar, "1")
 
     res = in_memory_pip.pip("help")
-    text = Text.from_ansi(res.stdout)
-
-    bold_spans = [s for s in text.spans if getattr(s.style, "bold", None)]
-    bold_text = [text.plain[s.start : s.end] for s in bold_spans]
-
-    assert bold_text == ["Usage:", "Commands:", "General Options:"]
-
-    for span in bold_spans:
-        style = span.style
-        assert not isinstance(style, str)
-        if envvar:
-            assert style.color is None
-        else:
-            assert style.color is not None
+    headings = re.findall(r"\x1b\[([0-9;]+)m([^\x1b]+)\x1b\[0m", res.stdout)
+    bold_headings = [
+        (style, text) for style, text in headings if "1" in style.split(";")
+    ]
+    assert [text for _, text in bold_headings] == [
+        "Usage:",
+        "Commands:",
+        "General Options:",
+    ]
+    for style, _ in bold_headings:
+        assert ("34" in style.split(";")) is (not envvar)

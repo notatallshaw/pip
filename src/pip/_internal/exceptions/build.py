@@ -8,9 +8,7 @@ import traceback
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
-from pip._vendor.rich.markup import escape
-from pip._vendor.rich.text import Text
-
+from pip._internal.cli.terminal import Text, escape
 from pip._internal.exceptions._base import (
     DiagnosticPipError,
     InstallationError,
@@ -163,7 +161,7 @@ class BackendUnavailableError(InstallationSubprocessError):
         DiagnosticPipError.__init__(
             self,
             message=f"Cannot import build backend {escape(backend_name)!r}.",
-            context=backend_error,
+            context=Text(backend_error),
             hint_stmt=None,
             note_stmt="This is likely not a problem with pip.",
         )

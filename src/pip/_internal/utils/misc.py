@@ -270,8 +270,9 @@ def ask(message: str, options: Iterable[str]) -> str:
         response = response.strip().lower()
         if response not in options:
             print(
-                "Your response ({!r}) was not one of the expected responses: "
-                "{}".format(response, ", ".join(options))
+                "Your response ({!r}) was not one of the expected responses: {}".format(
+                    response, ", ".join(options)
+                )
             )
         else:
             return response
@@ -733,7 +734,7 @@ class ConfiguredBuildBackendHookCaller(BuildBackendHookCaller):
             backend_name=self.build_backend,
             backend_error=backend_error,
         )
-        logger.error("%s", exception, extra={"rich": True})
+        logger.error("%s", exception, extra={"diagnostic": True})
         raise exception from error
 
     @_build_backend_hook
