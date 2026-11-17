@@ -1,0 +1,142 @@
+[
+  {
+    "scenario": "help",
+    "variant": "old",
+    "commit": "4b71f36fb4dfbc87ce65ac4710eeccf81d379f55",
+    "returncode": 0,
+    "rows": 42,
+    "columns": 80,
+    "gif": "help-old.gif",
+    "gif_sha256": "425d515a61466b983c0d3ca6f0cad89d74b56a71f523e6c488e0fdc1fb3d8577"
+  },
+  {
+    "scenario": "help",
+    "variant": "new",
+    "commit": "4f8ca35586ed5db9d36851fca4caa0629a1ecea0",
+    "returncode": 0,
+    "rows": 42,
+    "columns": 80,
+    "gif": "help-new.gif",
+    "gif_sha256": "e93c333b3b2ba1c7c7f6467380a1cc2213c01387e9ff7a39387ab686523710a3"
+  },
+  {
+    "scenario": "diagnostic",
+    "variant": "old",
+    "commit": "4b71f36fb4dfbc87ce65ac4710eeccf81d379f55",
+    "returncode": 1,
+    "rows": 16,
+    "columns": 80,
+    "gif": "diagnostic-old.gif",
+    "gif_sha256": "76b140b391c1c6ccd71eb8b9fe1da05a295b8588d15175b7f8596dc324dc29aa"
+  },
+  {
+    "scenario": "diagnostic",
+    "variant": "new",
+    "commit": "4f8ca35586ed5db9d36851fca4caa0629a1ecea0",
+    "returncode": 1,
+    "rows": 16,
+    "columns": 80,
+    "gif": "diagnostic-new.gif",
+    "gif_sha256": "56cca0823f55709a2951f1445950e3c3fd4196688cceeb0f958344cdc4b2f012"
+  },
+  {
+    "scenario": "json",
+    "variant": "old",
+    "commit": "4b71f36fb4dfbc87ce65ac4710eeccf81d379f55",
+    "returncode": 0,
+    "rows": 42,
+    "columns": 80,
+    "gif": "json-old.gif",
+    "gif_sha256": "b019f1ca4d6d6a7bc3651d802e5fab4c693dab6e41a5c1c251e6732354f72f03"
+  },
+  {
+    "scenario": "json",
+    "variant": "new",
+    "commit": "4f8ca35586ed5db9d36851fca4caa0629a1ecea0",
+    "returncode": 0,
+    "rows": 42,
+    "columns": 80,
+    "gif": "json-new.gif",
+    "gif_sha256": "3644f876c0e65dfe22ff7491a32fe53f7b4d17cf6b6699b564d714b93c94f02a"
+  },
+  {
+    "scenario": "download",
+    "variant": "old",
+    "commit": "4b71f36fb4dfbc87ce65ac4710eeccf81d379f55",
+    "returncode": 0,
+    "rows": 8,
+    "columns": 80,
+    "gif": "download-old.gif",
+    "gif_sha256": "0896054d778fc59b77cdc66aae633ed6ebedab251f99ff5ec4a51b858dc23436"
+  },
+  {
+    "scenario": "download",
+    "variant": "new",
+    "commit": "4f8ca35586ed5db9d36851fca4caa0629a1ecea0",
+    "returncode": 0,
+    "rows": 8,
+    "columns": 80,
+    "gif": "download-new.gif",
+    "gif_sha256": "754b63aa3803fca24f7f18f8b13dc565462bfa7078af2c32f6bd503ee767e721"
+  },
+  {
+    "scenario": "streamed",
+    "variant": "old",
+    "commit": "4b71f36fb4dfbc87ce65ac4710eeccf81d379f55",
+    "returncode": 0,
+    "rows": 8,
+    "columns": 80,
+    "gif": "streamed-old.gif",
+    "gif_sha256": "bc63ca3992e621f98881cd54b5c13a47532e1b6979650cad82ac97729670e0db"
+  },
+  {
+    "scenario": "streamed",
+    "variant": "new",
+    "commit": "4f8ca35586ed5db9d36851fca4caa0629a1ecea0",
+    "returncode": 0,
+    "rows": 8,
+    "columns": 80,
+    "gif": "streamed-new.gif",
+    "gif_sha256": "a48ec989b46696360df829194e579a198c5149f728c47b31382234490ddf3444"
+  },
+  {
+    "scenario": "install",
+    "variant": "old",
+    "commit": "4b71f36fb4dfbc87ce65ac4710eeccf81d379f55",
+    "returncode": 0,
+    "rows": 12,
+    "columns": 80,
+    "gif": "install-old.gif",
+    "gif_sha256": "e7a34b6da58280118aa88b944701e8572d7386374cb96600315aa9fa555d4962"
+  },
+  {
+    "scenario": "install",
+    "variant": "new",
+    "commit": "4f8ca35586ed5db9d36851fca4caa0629a1ecea0",
+    "returncode": 0,
+    "rows": 12,
+    "columns": 80,
+    "gif": "install-new.gif",
+    "gif_sha256": "36cacc00a45dcf02d727bdf00fddf4f5ba288b9c1d9d1902076712c66b5a7725"
+  },
+  {
+    "scenario": "build",
+    "variant": "old",
+    "commit": "4b71f36fb4dfbc87ce65ac4710eeccf81d379f55",
+    "returncode": 0,
+    "rows": 24,
+    "columns": 80,
+    "gif": "build-old.gif",
+    "gif_sha256": "e356a2ce9798867f4fe0bc0503d9f8b518233b28d9427b34304fee9c6b008c80"
+  },
+  {
+    "scenario": "build",
+    "variant": "new",
+    "commit": "4f8ca35586ed5db9d36851fca4caa0629a1ecea0",
+    "returncode": 0,
+    "rows": 24,
+    "columns": 80,
+    "gif": "build-new.gif",
+    "gif_sha256": "0166f5dcc46e3cb22b18413bdc918dcb0c5e4dc5d4c7854779ccd46c80f1931b"
+  }
+]

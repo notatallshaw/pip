@@ -1,0 +1,11 @@
+{"version": 2, "width": 80, "height": 12, "title": "install", "env": {"TERM": "xterm-256color", "SHELL": "/bin/sh"}}
+[0.179731, "o", "Processing /home/damian/opensource/remote/projects/resolver/work/scratch/owned-runs/pip-pr118-output-yf3nu_ip/commands/inputs/example_alpha-1.0-py3-none-any.whl\r\n"]
+[0.187204, "o", "Processing /home/damian/opensource/remote/projects/resolver/work/scratch/owned-runs/pip-pr118-output-yf3nu_ip/commands/inputs/example_beta-1.0-py3-none-any.whl\r\n"]
+[0.191675, "o", "Processing /home/damian/opensource/remote/projects/resolver/work/scratch/owned-runs/pip-pr118-output-yf3nu_ip/commands/inputs/example_gamma-1.0-py3-none-any.whl\r\n"]
+[0.195899, "o", "Processing /home/damian/opensource/remote/projects/resolver/work/scratch/owned-runs/pip-pr118-output-yf3nu_ip/commands/inputs/example_delta-1.0-py3-none-any.whl\r\n"]
+[0.242807, "o", "Installing collected packages: example-gamma, example-delta, example-beta, example-alpha\r\n\u001b[?25l"]
+[0.242907, "o", "\r   \u001b[38;2;58;58;58m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\u001b[0m \u001b[32m0/4\u001b[0m [example-gamma]"]
+[0.567089, "o", "\r   \u001b[38;2;249;38;114m━━━━━━━━━━━━━━━━━━━━\u001b[0m\u001b[38;2;58;58;58m╺\u001b[0m\u001b[38;2;58;58;58m━━━━━━━━━━━━━━━━━━━\u001b[0m \u001b[32m2/4\u001b[0m [example-beta]\u001b[K"]
+[0.737499, "o", "\r   \u001b[38;2;249;38;114m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\u001b[0m\u001b[38;2;58;58;58m╺\u001b[0m\u001b[38;2;58;58;58m━━━━━━━━━\u001b[0m \u001b[32m3/4\u001b[0m [example-alpha]\u001b[K"]
+[0.910119, "o", "\r\u001b[K\u001b[?25h"]
+[0.91083, "o", "Successfully installed example-alpha-1.0 example-beta-1.0 example-delta-1.0 example-gamma-1.0\r\n"]
