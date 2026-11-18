@@ -1,0 +1,295 @@
+"""Supply pip's native prepared candidates and requirements to nab."""
+
+from __future__ import annotations
+
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+from dataclasses import dataclass
+from typing import Any, cast
+
+from pip._vendor.nab_resolver.candidate_provider import (
+    CandidateRequirement,
+    PreparedCandidate,
+)
+from pip._vendor.nab_resolver.types import RangeProtocol
+
+from pip._internal.models.link import Link, links_equivalent
+from pip._internal.resolution.nab.base import Candidate, Requirement
+from pip._internal.resolution.nab.candidates import ExtrasCandidate
+from pip._internal.resolution.nab.factory import (
+    CollectedRootRequirements,
+    Factory,
+)
+from pip._internal.resolution.nab.provider import PipProvider
+from pip._internal.resolution.nab.ranges import CandidateKey, CandidateRange
+
+
+@dataclass(frozen=True)
+class Request:
+    """Retain the native requirement and the candidate that requested it."""
+
+    requirement: Requirement
+    parent: Candidate | None
+
+    def __str__(self) -> str:
+        return str(self.requirement)
+
+
+@dataclass(frozen=True)
+class SelfRefinement:
+    """Identify a candidate selected through an installed self requirement."""
+
+    candidate: Candidate
+
+
+@dataclass(slots=True)
+class _NativeDependencies:
+    """Keep a candidate alive while caching its declarations by object identity."""
+
+    candidate: Candidate
+    requirements: tuple[Requirement, ...]
+
+
+def native_candidate(prepared: PreparedCandidate[CandidateKey]) -> Candidate:
+    """Return the candidate whose distribution will be installed."""
+    origin = prepared.origin
+    return (
+        origin.candidate
+        if isinstance(origin, SelfRefinement)
+        else cast(Candidate, origin)
+    )
+
+
+class _NativeRequirements(Mapping[str, tuple[Requirement, ...]]):
+    """Translate only the declaration groups a native candidate query reads."""
+
+    def __init__(
+        self,
+        requirements: Mapping[str, Sequence[CandidateRequirement[str, CandidateKey]]],
+    ) -> None:
+        self._requirements = requirements
+        self._native: dict[str, tuple[Requirement, ...]] = {}
+
+    def __getitem__(self, package: str) -> tuple[Requirement, ...]:
+        if package not in self._native:
+            self._native[package] = tuple(
+                cast(Request, cause.origin).requirement
+                for cause in self._requirements[package]
+            )
+        return self._native[package]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._requirements)
+
+    def __len__(self) -> int:
+        return len(self._requirements)
+
+    def __contains__(self, package: object) -> bool:
+        return package in self._requirements
+
+
+class NativeHost:
+    """Adapt native source identities and metadata obligations to nab queries."""
+
+    def __init__(self, factory: Factory, provider: PipProvider) -> None:
+        self.factory = factory
+        self.provider = provider
+        self.sources: list[tuple[Link, bool, bool]] = []
+        self._source_ids: dict[tuple[Link, bool, bool], str] = {}
+        self._dependencies: dict[int, _NativeDependencies] = {}
+        self.refinements: dict[tuple[str, CandidateKey], SelfRefinement] = {}
+
+    def availability_generation(self) -> int:
+        """Advance when source registration can change a deferred candidate query."""
+        return len(self.sources) + len(self.refinements)
+
+    def _source(self, candidate: Candidate) -> str:
+        """Identify a prepared candidate by source mode and installation provenance."""
+        if isinstance(candidate, ExtrasCandidate):
+            return self._source(candidate.base)
+        link = candidate.source_link
+        if link is None:
+            return (
+                "installed" if candidate.is_installed else "internal:" + candidate.name
+            )
+        requirement = candidate.get_install_requirement()
+        assert requirement is not None
+        return self._link_source(
+            link, candidate.is_editable, direct=requirement.is_direct
+        )
+
+    def _link_source(self, link: Link, editable: bool, *, direct: bool) -> str:
+        """Identify equivalent links with the same source mode and provenance."""
+        key = (link, editable, direct)
+        if (source := self._source_ids.get(key)) is not None:
+            return source
+
+        for number, (known, was_editable, was_direct) in enumerate(self.sources):
+            if (was_editable, was_direct) == (editable, direct) and links_equivalent(
+                known, link
+            ):
+                source = f"link:{number}"
+                break
+        else:
+            source = f"link:{len(self.sources)}"
+            self.sources.append((link, editable, direct))
+
+        self._source_ids[key] = source
+        return source
+
+    def bind(
+        self,
+        requirement: Requirement,
+        parent: Candidate | None = None,
+    ) -> CandidateRequirement[str, CandidateKey]:
+        """Attach native provenance to a version and source restriction."""
+        candidate, ireq = requirement.get_candidate_lookup()
+        if candidate is not None:
+            constraint = CandidateRange.singleton(
+                CandidateKey(candidate.version, self._source(candidate))
+            )
+            if parent is not None:
+                parent_base = (
+                    parent.base if isinstance(parent, ExtrasCandidate) else parent
+                )
+                if candidate == parent_base:
+                    # An equivalent self URL can use its parent's preparation identity.
+                    constraint |= CandidateRange.singleton(
+                        CandidateKey(candidate.version, self._source(parent_base))
+                    )
+            if candidate.source_link is not None:
+                # Installed self requirements can select the replacement identity.
+                constraint |= CandidateRange.singleton(self._refinement_key(candidate))
+        elif ireq is not None:
+            constraint = CandidateRange(ireq.specifier.to_range())
+        else:
+            constraint = CandidateRange.empty()
+
+        return CandidateRequirement(
+            requirement.name, constraint, Request(requirement, parent)
+        )
+
+    def constraints(
+        self, collected: CollectedRootRequirements
+    ) -> dict[str, CandidateRange]:
+        """Apply user constraints to base packages and their requested extras."""
+        result = {}
+        for package, constraint in collected.constraints.items():
+            bounds = CandidateRange(constraint.specifier.to_range())
+            for link in constraint.links:
+                ordinary = CandidateRange.for_source(
+                    self._link_source(link, False, direct=True)
+                )
+                editable = CandidateRange.for_source(
+                    self._link_source(link, True, direct=True)
+                )
+                bounds &= ordinary | editable
+            result[package] = bounds
+
+        for requirement in collected.requirements:
+            if requirement.project_name in result:
+                result[requirement.name] = result[requirement.project_name]
+        return result
+
+    def iter_candidates(
+        self,
+        package: str,
+        allowed: RangeProtocol[CandidateKey],
+        requirements: Mapping[str, Sequence[CandidateRequirement[str, CandidateKey]]],
+    ) -> Iterable[PreparedCandidate[CandidateKey]]:
+        """Filter native candidate order by the solver's active source ranges."""
+        native = _NativeRequirements(requirements)
+        if package not in native:
+            return
+
+        for candidate in self.provider.find_matches(package, native):
+            for prepared in self._prepared_candidates(candidate, native):
+                if prepared.key in allowed:
+                    yield prepared
+
+    def get_dependencies(
+        self, candidate: PreparedCandidate[CandidateKey]
+    ) -> Iterable[CandidateRequirement[str, CandidateKey]]:
+        """Yield dependencies of the selected distribution."""
+        native = native_candidate(candidate)
+        for requirement in self.dependencies_for(native):
+            yield self.bind(requirement, native)
+
+    def _refinement_key(self, candidate: Candidate) -> CandidateKey:
+        """Identify a replacement selected through an installed self requirement."""
+        return CandidateKey(candidate.version, "refinement:" + self._source(candidate))
+
+    def dependencies_for(self, candidate: Candidate) -> tuple[Requirement, ...]:
+        """Cache native dependencies up to an intrinsically empty intersection."""
+        cached = self._dependencies.get(id(candidate))
+        if cached is None:
+            pending = []
+            constraints: dict[str, CandidateRange] = {}
+            for requirement in self.provider.get_dependencies(candidate):
+                pending.append(requirement)
+                cause = self.bind(requirement, candidate)
+                constraint = (
+                    constraints.get(cause.package, CandidateRange.full())
+                    & cause.constraint
+                )
+                constraints[cause.package] = constraint
+                if constraint.is_empty:
+                    break
+
+            cached = _NativeDependencies(candidate, tuple(pending))
+            self._dependencies[id(candidate)] = cached
+        return cached.requirements
+
+    def _prepared_candidates(
+        self, candidate: Candidate, requirements: Mapping[str, Sequence[Requirement]]
+    ) -> Iterable[PreparedCandidate[CandidateKey]]:
+        """Prepare an installed self-replacement as a distinct decision."""
+        if not candidate.is_installed:
+            yield PreparedCandidate(
+                CandidateKey(candidate.version, self._source(candidate)), candidate
+            )
+            return
+
+        dependencies = self.dependencies_for(candidate)
+        self_requirements = tuple(
+            requirement
+            for requirement in dependencies
+            if requirement.name == candidate.name
+        )
+        if all(
+            requirement.is_satisfied_by(candidate) for requirement in self_requirements
+        ):
+            yield PreparedCandidate(
+                CandidateKey(candidate.version, self._source(candidate)), candidate
+            )
+            return
+
+        prospective = dict(requirements)
+        prospective[candidate.name] = (
+            *requirements[candidate.name],
+            *self_requirements,
+        )
+        # Both the current query and the installed self requirement must admit it.
+        for replacement in self.provider.find_matches(candidate.name, prospective):
+            if not all(
+                requirement.is_satisfied_by(replacement)
+                for requirement in self_requirements
+            ):
+                continue
+
+            key = self._refinement_key(replacement)
+            origin = self.refinements.setdefault(
+                (candidate.name, key),
+                SelfRefinement(replacement),
+            )
+            yield PreparedCandidate(key, origin)
+
+    def priority(
+        self,
+        package: str,
+        requirements: Sequence[CandidateRequirement[str, CandidateKey]],
+    ) -> Any:
+        """Rank a package using its active native requirements."""
+        return self.provider.get_preference(
+            package,
+            (cast(Request, cause.origin).requirement for cause in requirements),
+        )

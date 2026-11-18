@@ -1,15 +1,20 @@
+"""Read, validate, and select from pylock files.
+
+The public data model classes are frozen, keyword-only dataclasses whose
+attributes correspond to fields in the pylock file specification.
+"""
+
 from __future__ import annotations
 
 import dataclasses
 import logging
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import (
     TYPE_CHECKING,
     Any,
-    Callable,
     Protocol,
     TypeVar,
     cast,
@@ -26,6 +31,7 @@ from .specifiers import SpecifierSet
 from .tags import create_compatible_tags_selector, sys_tags
 from .utils import (
     NormalizedName,
+    canonicalize_name,
     is_normalized_name,
     parse_sdist_filename,
     parse_wheel_filename,
@@ -78,7 +84,7 @@ _PYLOCK_FILE_NAME_RE = re.compile(r"^pylock\.([^.]+)\.toml$")
 
 def is_valid_pylock_path(path: Path) -> bool:
     """Check if the given path is a valid pylock file path."""
-    return path.name == "pylock.toml" or bool(_PYLOCK_FILE_NAME_RE.match(path.name))
+    return path.name == "pylock.toml" or bool(_PYLOCK_FILE_NAME_RE.fullmatch(path.name))
 
 
 def _toml_key(key: str) -> str:
@@ -252,12 +258,7 @@ def _path_name(path: str | None) -> str | None:
         return None
     # If the path is relative it MAY use POSIX-style path separators explicitly
     # for portability
-    if "/" in path:
-        return path.rsplit("/", 1)[-1]
-    elif "\\" in path:
-        return path.rsplit("\\", 1)[-1]
-    else:
-        return path
+    return path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
 
 
 def _url_name(url: str | None) -> str | None:
@@ -322,32 +323,16 @@ class PylockSelectError(Exception):
     """
 
 
-@dataclass(frozen=True, init=False)
+@dataclass(frozen=True, kw_only=True, slots=True)
 class PackageVcs:
+    """A package installed from a version control system."""
+
     type: str
     url: str | None = None
     path: str | None = None
     requested_revision: str | None = None
-    commit_id: str  # type: ignore[misc]
+    commit_id: str
     subdirectory: str | None = None
-
-    def __init__(
-        self,
-        *,
-        type: str,
-        url: str | None = None,
-        path: str | None = None,
-        requested_revision: str | None = None,
-        commit_id: str,
-        subdirectory: str | None = None,
-    ) -> None:
-        # In Python 3.10+ make dataclass kw_only=True and remove __init__
-        object.__setattr__(self, "type", type)
-        object.__setattr__(self, "url", url)
-        object.__setattr__(self, "path", path)
-        object.__setattr__(self, "requested_revision", requested_revision)
-        object.__setattr__(self, "commit_id", commit_id)
-        object.__setattr__(self, "subdirectory", subdirectory)
 
     @classmethod
     def _from_dict(cls, d: Mapping[str, Any]) -> Self:
@@ -363,23 +348,13 @@ class PackageVcs:
         return package_vcs
 
 
-@dataclass(frozen=True, init=False)
+@dataclass(frozen=True, kw_only=True, slots=True)
 class PackageDirectory:
+    """A package installed from a local directory."""
+
     path: str
     editable: bool | None = None
     subdirectory: str | None = None
-
-    def __init__(
-        self,
-        *,
-        path: str,
-        editable: bool | None = None,
-        subdirectory: str | None = None,
-    ) -> None:
-        # In Python 3.10+ make dataclass kw_only=True and remove __init__
-        object.__setattr__(self, "path", path)
-        object.__setattr__(self, "editable", editable)
-        object.__setattr__(self, "subdirectory", subdirectory)
 
     @classmethod
     def _from_dict(cls, d: Mapping[str, Any]) -> Self:
@@ -390,32 +365,16 @@ class PackageDirectory:
         )
 
 
-@dataclass(frozen=True, init=False)
+@dataclass(frozen=True, kw_only=True, slots=True)
 class PackageArchive:
+    """A package installed from an archive."""
+
     url: str | None = None
     path: str | None = None
     size: int | None = None
     upload_time: datetime | None = None
-    hashes: Mapping[str, str]  # type: ignore[misc]
+    hashes: Mapping[str, str]
     subdirectory: str | None = None
-
-    def __init__(
-        self,
-        *,
-        url: str | None = None,
-        path: str | None = None,
-        size: int | None = None,
-        upload_time: datetime | None = None,
-        hashes: Mapping[str, str],
-        subdirectory: str | None = None,
-    ) -> None:
-        # In Python 3.10+ make dataclass kw_only=True and remove __init__
-        object.__setattr__(self, "url", url)
-        object.__setattr__(self, "path", path)
-        object.__setattr__(self, "size", size)
-        object.__setattr__(self, "upload_time", upload_time)
-        object.__setattr__(self, "hashes", hashes)
-        object.__setattr__(self, "subdirectory", subdirectory)
 
     @classmethod
     def _from_dict(cls, d: Mapping[str, Any]) -> Self:
@@ -431,32 +390,16 @@ class PackageArchive:
         return package_archive
 
 
-@dataclass(frozen=True, init=False)
+@dataclass(frozen=True, kw_only=True, slots=True)
 class PackageSdist:
+    """A source distribution for a package."""
+
     name: str | None = None
     upload_time: datetime | None = None
     url: str | None = None
     path: str | None = None
     size: int | None = None
-    hashes: Mapping[str, str]  # type: ignore[misc]
-
-    def __init__(
-        self,
-        *,
-        name: str | None = None,
-        upload_time: datetime | None = None,
-        url: str | None = None,
-        path: str | None = None,
-        size: int | None = None,
-        hashes: Mapping[str, str],
-    ) -> None:
-        # In Python 3.10+ make dataclass kw_only=True and remove __init__
-        object.__setattr__(self, "name", name)
-        object.__setattr__(self, "upload_time", upload_time)
-        object.__setattr__(self, "url", url)
-        object.__setattr__(self, "path", path)
-        object.__setattr__(self, "size", size)
-        object.__setattr__(self, "hashes", hashes)
+    hashes: Mapping[str, str]
 
     @classmethod
     def _from_dict(cls, d: Mapping[str, Any]) -> Self:
@@ -483,32 +426,16 @@ class PackageSdist:
         return filename
 
 
-@dataclass(frozen=True, init=False)
+@dataclass(frozen=True, kw_only=True, slots=True)
 class PackageWheel:
+    """A wheel distribution for a package."""
+
     name: str | None = None
     upload_time: datetime | None = None
     url: str | None = None
     path: str | None = None
     size: int | None = None
-    hashes: Mapping[str, str]  # type: ignore[misc]
-
-    def __init__(
-        self,
-        *,
-        name: str | None = None,
-        upload_time: datetime | None = None,
-        url: str | None = None,
-        path: str | None = None,
-        size: int | None = None,
-        hashes: Mapping[str, str],
-    ) -> None:
-        # In Python 3.10+ make dataclass kw_only=True and remove __init__
-        object.__setattr__(self, "name", name)
-        object.__setattr__(self, "upload_time", upload_time)
-        object.__setattr__(self, "url", url)
-        object.__setattr__(self, "path", path)
-        object.__setattr__(self, "size", size)
-        object.__setattr__(self, "hashes", hashes)
+    hashes: Mapping[str, str]
 
     @classmethod
     def _from_dict(cls, d: Mapping[str, Any]) -> Self:
@@ -532,8 +459,14 @@ class PackageWheel:
         return filename
 
 
-@dataclass(frozen=True, init=False)
+@dataclass(frozen=True, kw_only=True, slots=True)
 class Package:
+    """A package entry in a pylock file.
+
+    A package has either distribution files or one direct source (VCS,
+    directory, or archive).
+    """
+
     name: NormalizedName
     version: Version | None = None
     marker: Marker | None = None
@@ -547,38 +480,6 @@ class Package:
     wheels: Sequence[PackageWheel] | None = None
     attestation_identities: Sequence[Mapping[str, Any]] | None = None
     tool: Mapping[str, Any] | None = None
-
-    def __init__(
-        self,
-        *,
-        name: NormalizedName,
-        version: Version | None = None,
-        marker: Marker | None = None,
-        requires_python: SpecifierSet | None = None,
-        dependencies: Sequence[Mapping[str, Any]] | None = None,
-        vcs: PackageVcs | None = None,
-        directory: PackageDirectory | None = None,
-        archive: PackageArchive | None = None,
-        index: str | None = None,
-        sdist: PackageSdist | None = None,
-        wheels: Sequence[PackageWheel] | None = None,
-        attestation_identities: Sequence[Mapping[str, Any]] | None = None,
-        tool: Mapping[str, Any] | None = None,
-    ) -> None:
-        # In Python 3.10+ make dataclass kw_only=True and remove __init__
-        object.__setattr__(self, "name", name)
-        object.__setattr__(self, "version", version)
-        object.__setattr__(self, "marker", marker)
-        object.__setattr__(self, "requires_python", requires_python)
-        object.__setattr__(self, "dependencies", dependencies)
-        object.__setattr__(self, "vcs", vcs)
-        object.__setattr__(self, "directory", directory)
-        object.__setattr__(self, "archive", archive)
-        object.__setattr__(self, "index", index)
-        object.__setattr__(self, "sdist", sdist)
-        object.__setattr__(self, "wheels", wheels)
-        object.__setattr__(self, "attestation_identities", attestation_identities)
-        object.__setattr__(self, "tool", tool)
 
     @classmethod
     def _from_dict(cls, d: Mapping[str, Any]) -> Self:
@@ -666,9 +567,9 @@ class Package:
         return not (self.sdist or self.wheels)
 
 
-@dataclass(frozen=True, init=False)
+@dataclass(frozen=True, kw_only=True, slots=True)
 class Pylock:
-    """A class representing a pylock file."""
+    """Represent a validated pylock file."""
 
     lock_version: Version
     environments: Sequence[Marker] | None = None
@@ -676,33 +577,9 @@ class Pylock:
     extras: Sequence[NormalizedName] | None = None
     dependency_groups: Sequence[str] | None = None
     default_groups: Sequence[str] | None = None
-    created_by: str  # type: ignore[misc]
-    packages: Sequence[Package]  # type: ignore[misc]
+    created_by: str
+    packages: Sequence[Package]
     tool: Mapping[str, Any] | None = None
-
-    def __init__(
-        self,
-        *,
-        lock_version: Version,
-        environments: Sequence[Marker] | None = None,
-        requires_python: SpecifierSet | None = None,
-        extras: Sequence[NormalizedName] | None = None,
-        dependency_groups: Sequence[str] | None = None,
-        default_groups: Sequence[str] | None = None,
-        created_by: str,
-        packages: Sequence[Package],
-        tool: Mapping[str, Any] | None = None,
-    ) -> None:
-        # In Python 3.10+ make dataclass kw_only=True and remove __init__
-        object.__setattr__(self, "lock_version", lock_version)
-        object.__setattr__(self, "environments", environments)
-        object.__setattr__(self, "requires_python", requires_python)
-        object.__setattr__(self, "extras", extras)
-        object.__setattr__(self, "dependency_groups", dependency_groups)
-        object.__setattr__(self, "default_groups", default_groups)
-        object.__setattr__(self, "created_by", created_by)
-        object.__setattr__(self, "packages", packages)
-        object.__setattr__(self, "tool", tool)
 
     @classmethod
     def _from_dict(cls, d: Mapping[str, Any]) -> Self:
@@ -788,7 +665,35 @@ class Pylock:
 
         .. versionchanged:: 26.3
             Added the *prefer_sdist_predicate* parameter.
+
+        .. versionchanged:: 26.4
+            Raise :class:`PylockSelectError` if passed extras or dependency groups
+            that are not declared in the corresponding pylock fields.
         """
+        canonical_extras = {canonicalize_name(extra) for extra in extras or ()}
+        unknown_extras = canonical_extras - set(self.extras or ())
+        if unknown_extras:
+            raise PylockSelectError(
+                f"Undeclared extras: {', '.join(sorted(unknown_extras))}"
+            )
+
+        canonical_dependency_groups = {
+            canonicalize_name(dependency_group)
+            for dependency_group in dependency_groups or ()
+        }
+        unknown_dependency_groups = canonical_dependency_groups - {
+            canonicalize_name(dependency_group)
+            for dependency_group in [
+                *(self.dependency_groups or ()),
+                *(self.default_groups or ()),
+            ]
+        }
+        if unknown_dependency_groups:
+            raise PylockSelectError(
+                f"Undeclared dependency groups: "
+                f"{', '.join(sorted(unknown_dependency_groups))}"
+            )
+
         compatible_tags_selector = create_compatible_tags_selector(
             tags if tags is not None else sys_tags()
         )
@@ -803,11 +708,11 @@ class Pylock:
             "dict[str, str | frozenset[str]]",
             dict(
                 environment or {},  # Marker.evaluate will fill-up
-                extras=frozenset(extras or []),
+                extras=frozenset(canonical_extras),
                 dependency_groups=frozenset(
                     (self.default_groups or [])
                     if dependency_groups is None  # to allow selecting no group
-                    else dependency_groups
+                    else canonical_dependency_groups
                 ),
             ),
         )
@@ -836,7 +741,7 @@ class Pylock:
         # #. If :ref:`pylock-environments` is specified, check that at least one of the
         #    environment marker expressions is satisfied; an error MUST be raised if no
         #    expression is satisfied.
-        if self.environments:
+        if self.environments is not None:
             for env_marker in self.environments:
                 if env_marker.evaluate(
                     cast("dict[str, str]", environment or {}), context="requirement"
