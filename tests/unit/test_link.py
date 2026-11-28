@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import os
 import posixpath
+import urllib.parse
+import urllib.request
+from pathlib import Path
 
 import pytest
 
@@ -16,6 +19,109 @@ from pip._internal.utils.hashes import Hashes
 
 
 class TestLink:
+    @pytest.mark.parametrize(
+        "path, expected",
+        [
+            (
+                "packages/._~-Az09/demo-1.0-py3-none-any.whl",
+                "packages/._~-Az09/demo-1.0-py3-none-any.whl",
+            ),
+            ("packages/a%7eb.whl", "packages/a~b.whl"),
+            ("packages/a+b.whl", "packages/a%2Bb.whl"),
+            ("packages/a b.whl", "packages/a%20b.whl"),
+            ("packages/a%2fb.whl", "packages/a%2Fb.whl"),
+            ("packages/é.whl", "packages/%C3%A9.whl"),
+            ("packages/a@rev.whl", "packages/a@rev.whl"),
+            ("packages/a%zz.whl", "packages/a%25zz.whl"),
+        ],
+    )
+    def test_json_link_normalizes_artifact_path(self, path: str, expected: str) -> None:
+        root = "https://example.com/"
+        link = Link.from_json({"url": root + path}, root + "simple/demo/")
+        assert link is not None
+        assert link.url == root + expected
+
+    def test_json_link_skips_quoting_unchanged_remote_path(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[str] = []
+        original = urllib.parse.quote
+
+        def quote(
+            value: str,
+            safe: str = "/",
+            encoding: str | None = None,
+            errors: str | None = None,
+        ) -> str:
+            calls.append(value)
+            return original(value, safe, encoding, errors)
+
+        monkeypatch.setattr(urllib.parse, "quote", quote)
+        url = "https://example.com/packages/demo-1.0-py3-none-any.whl"
+        link = Link.from_json({"url": url}, "https://example.com/simple/demo/")
+
+        assert link is not None
+        assert link.url == url
+        assert calls == []
+
+    def test_json_file_link_uses_platform_path_normalization(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        url = (tmp_path / "demo-1.0-py3-none-any.whl").as_uri()
+        calls: list[str] = []
+        original = urllib.request.pathname2url
+
+        def pathname2url(path: str) -> str:
+            calls.append(path)
+            return original(path)
+
+        monkeypatch.setattr(urllib.request, "pathname2url", pathname2url)
+        link = Link.from_json({"url": url}, "https://example.com/simple/demo/")
+
+        assert link is not None
+        assert link.url == url
+        assert len(calls) == 1
+
+    @pytest.mark.parametrize(
+        "url, expected",
+        [
+            ("https://example.com/demo.whl?#", "https://example.com/demo.whl"),
+            ("HTTPS://example.com/demo.whl", "https://example.com/demo.whl"),
+            ("https://example.com", "https://example.com"),
+            ("https://[::1]/demo.whl", "https://[::1]/demo.whl"),
+            ("custom://example.com/demo.whl", "custom://example.com/demo.whl"),
+        ],
+    )
+    def test_json_link_keeps_url_parser_normalization(
+        self, url: str, expected: str
+    ) -> None:
+        link = Link.from_json({"url": url}, "https://example.com/simple/demo/")
+
+        assert link is not None
+        assert link.url == expected
+
+    def test_json_link_reuses_unchanged_parsed_url(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        url = "https://example.com/packages/demo-1.0-py3-none-any.whl"
+        parsed = urllib.parse.urlsplit(url)
+        calls: list[dict[str, str]] = []
+        original = parsed._replace
+
+        def replace(
+            result: urllib.parse.SplitResult, **fields: str
+        ) -> urllib.parse.SplitResult:
+            calls.append(fields)
+            assert result == parsed
+            return original(**fields)
+
+        monkeypatch.setattr(urllib.parse.SplitResult, "_replace", replace)
+        link = Link.from_json({"url": url}, "https://example.com/simple/demo/")
+
+        assert link is not None
+        assert link.url == url
+        assert calls == []
+
     @pytest.mark.parametrize(
         "url, expected",
         [

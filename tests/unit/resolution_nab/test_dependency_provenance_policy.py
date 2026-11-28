@@ -23,8 +23,8 @@ from pip._internal.req.constructors import (
     install_req_from_req_string,
 )
 from pip._internal.req.req_install import InstallRequirement
-from pip._internal.resolution.resolvelib.candidates import LinkCandidate
-from pip._internal.resolution.resolvelib.factory import Factory
+from pip._internal.resolution.nab.candidates import LinkCandidate
+from pip._internal.resolution.nab.factory import Factory
 
 from tests.lib.wheel import make_wheel
 
@@ -193,6 +193,7 @@ def test_cached_candidate_keeps_source_separate_from_fetch_link(
     assert requirement.link is not None
     assert requirement.link.is_file
     assert requirement.source_link == source
+    assert candidate.source_link == source
 
 
 def test_requirement_source_cannot_be_replaced() -> None:

@@ -401,6 +401,7 @@ def install_req_from_line(
     hash_options: dict[str, list[str]] | None = None,
     constraint: bool = False,
     line_source: str | None = None,
+    source_link: Link | None = None,
     user_supplied: bool = False,
     config_settings: dict[str, str | list[str]] | None = None,
 ) -> InstallRequirement:
@@ -409,6 +410,7 @@ def install_req_from_line(
 
     :param line_source: An optional string describing where the line is from,
         for logging purposes in case of an error.
+    :param source_link: The selected source before cached-wheel substitution.
     """
     parts = parse_req_from_line(name, line_source)
 
@@ -416,6 +418,7 @@ def install_req_from_line(
         parts.requirement,
         comes_from,
         link=parts.link,
+        source_link=source_link,
         markers=parts.markers,
         isolated=isolated,
         hash_options=hash_options,

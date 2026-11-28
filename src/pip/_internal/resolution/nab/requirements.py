@@ -216,10 +216,18 @@ class RequiresPythonRequirement(Requirement):
 class UnsatisfiableRequirement(Requirement):
     """A requirement that cannot be satisfied."""
 
-    def __init__(self, name: NormalizedName) -> None:
+    def __init__(
+        self,
+        name: NormalizedName,
+        *,
+        source_requirement: InstallRequirement | None = None,
+    ) -> None:
         self._name = name
+        self.source_requirement = source_requirement
 
     def __str__(self) -> str:
+        if self.source_requirement is not None:
+            return str(self.source_requirement.req)
         return f"{self._name} (unavailable)"
 
     def __repr__(self) -> str:
@@ -228,10 +236,11 @@ class UnsatisfiableRequirement(Requirement):
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, UnsatisfiableRequirement):
             return NotImplemented
-        return self._name == other._name
+
+        return self._name == other._name and str(self) == str(other)
 
     def __hash__(self) -> int:
-        return hash(self._name)
+        return hash((self._name, str(self)))
 
     @property
     def project_name(self) -> NormalizedName:
