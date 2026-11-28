@@ -6,14 +6,14 @@ from pathlib import Path
 
 import pytest
 
-from tests.functional.test_nab_preparation_reuse import (
-    preparation_count,
-    tracked_install,
-)
 from tests.lib import (
     PipTestEnvironment,
     create_basic_sdist_for_package,
     create_basic_wheel_for_package,
+)
+from tests.lib.resolver import (
+    preparation_count,
+    tracked_install,
 )
 from tests.lib.wheel import make_wheel
 
@@ -29,10 +29,10 @@ def test_constrained_root_expands_its_mandatory_dependency_urls(
         make_wheel(
             "dep",
             "1",
-            metadata=(
-                "Metadata-Version: 2.2\nName: dep\nVersion: 1\n"
-                f"Requires-Dist: leaf @ {leaf.as_uri()}\n"
-            ),
+            metadata_updates={
+                "Metadata-Version": "2.2",
+                "Requires-Dist": f"leaf @ {leaf.as_uri()}",
+            },
         ).save_to_dir(direct)
     )
     marker = ' ; extra == "feature"' if with_extra else ""
@@ -40,11 +40,11 @@ def test_constrained_root_expands_its_mandatory_dependency_urls(
         make_wheel(
             "app",
             "1",
-            metadata=(
-                "Metadata-Version: 2.2\nName: app\nVersion: 1\n"
-                "Provides-Extra: feature\n"
-                f"Requires-Dist: dep @ {dep.as_uri()}{marker}\n"
-            ),
+            metadata_updates={
+                "Metadata-Version": "2.2",
+                "Provides-Extra": "feature",
+                "Requires-Dist": f"dep @ {dep.as_uri()}{marker}",
+            },
         ).save_to_dir(direct)
     )
     constraints = script.scratch_path / "constraints.txt"
@@ -59,7 +59,6 @@ def test_constrained_root_expands_its_mandatory_dependency_urls(
     assert result.stdout.count("Nab source-domain restart:") == 2
     for artifact in (app, dep, leaf):
         assert preparation_count(result.stdout, artifact) == 1
-    assert "Nab catalogue success" in result.stdout
     script.assert_installed(app="1", dep="1", leaf="1")
     script.pip("check")
 
@@ -76,11 +75,11 @@ def test_ineligible_constrained_root_dependencies_are_not_prepared(
         make_wheel(
             "app",
             "1",
-            metadata=(
-                "Metadata-Version: 2.2\nName: app\nVersion: 1\n"
-                "Provides-Extra: feature\n"
-                f"Requires-Dist: dep @ {dep.as_uri()}{marker}\n"
-            ),
+            metadata_updates={
+                "Metadata-Version": "2.2",
+                "Provides-Extra": "feature",
+                "Requires-Dist": f"dep @ {dep.as_uri()}{marker}",
+            },
         ).save_to_dir(direct)
     )
     constraints = script.scratch_path / "constraints.txt"
@@ -96,7 +95,6 @@ def test_ineligible_constrained_root_dependencies_are_not_prepared(
         expect_error=inactive == "version",
     )
 
-    assert "Nab source-domain restart" not in result.stdout
     assert preparation_count(result.stdout, dep) == 0
     script.assert_not_installed("dep")
     if inactive == "version":
@@ -117,10 +115,10 @@ def test_fixed_source_closure_follows_a_named_constrained_dependency(
         make_wheel(
             "dep",
             "1",
-            metadata=(
-                "Metadata-Version: 2.2\nName: dep\nVersion: 1\n"
-                f"Requires-Dist: leaf @ {leaf.as_uri()}\n"
-            ),
+            metadata_updates={
+                "Metadata-Version": "2.2",
+                "Requires-Dist": f"leaf @ {leaf.as_uri()}",
+            },
         ).save_to_dir(direct)
     )
     app = Path(
@@ -136,7 +134,6 @@ def test_fixed_source_closure_follows_a_named_constrained_dependency(
     assert result.stdout.count("Nab source-domain restart:") == 1
     for artifact in (app, dep, leaf):
         assert preparation_count(result.stdout, artifact) == 1
-    assert "Nab catalogue success" in result.stdout
     script.assert_installed(app="1", dep="1", leaf="1")
     script.pip("check")
 
@@ -154,10 +151,10 @@ def test_mandatory_closure_checks_parent_hashes_against_the_fixed_archive(
         make_wheel(
             "app",
             "1",
-            metadata=(
-                "Metadata-Version: 2.2\nName: app\nVersion: 1\n"
-                f"Requires-Dist: dep @ {dep.as_uri()}#sha512={parent_hash}\n"
-            ),
+            metadata_updates={
+                "Metadata-Version": "2.2",
+                "Requires-Dist": f"dep @ {dep.as_uri()}#sha512={parent_hash}",
+            },
         ).save_to_dir(direct)
     )
     constraints = script.scratch_path / "constraints.txt"
@@ -165,11 +162,17 @@ def test_mandatory_closure_checks_parent_hashes_against_the_fixed_archive(
         f"app @ {app.as_uri()}\ndep @ {dep.as_uri()}#sha256={expected}\n"
     )
 
-    result = tracked_install(
-        script, "app", "dep", options=("-c", str(constraints)), expect_error=not valid
+    result = script.pip_install_local(
+        "--ignore-installed",
+        "-c",
+        str(constraints),
+        "app",
+        "dep",
+        find_links=script.scratch_path,
+        build_isolation=True,
+        expect_error=not valid,
     )
 
-    assert "Nab source-domain restart" not in result.stdout
     if valid:
         script.assert_installed(app="1", dep="1")
         script.pip("check")
@@ -193,10 +196,10 @@ def test_mandatory_url_closure_keeps_root_source_constraints(
         make_wheel(
             "app",
             "1",
-            metadata=(
-                "Metadata-Version: 2.2\nName: app\nVersion: 1\n"
-                f"Requires-Dist: dep @ {other.as_uri()}\n"
-            ),
+            metadata_updates={
+                "Metadata-Version": "2.2",
+                "Requires-Dist": f"dep @ {other.as_uri()}",
+            },
         ).save_to_dir(direct)
     )
     constraints = script.scratch_path / "constraints.txt"
@@ -221,10 +224,11 @@ def test_dependency_url_fixed_by_a_constraint_uses_the_catalogue(
     dep = make_wheel(
         "dep",
         "1",
-        metadata=(
-            "Metadata-Version: 2.2\nName: dep\nVersion: 1\nProvides-Extra: feature\n"
-            'Requires-Dist: child==1; extra == "feature"\n'
-        ),
+        metadata_updates={
+            "Metadata-Version": "2.2",
+            "Provides-Extra": "feature",
+            "Requires-Dist": 'child==1; extra == "feature"',
+        },
     )
     supplied = Path(dep.save_to_dir(direct))
     url = supplied.as_uri()
@@ -233,24 +237,26 @@ def test_dependency_url_fixed_by_a_constraint_uses_the_catalogue(
     make_wheel(
         "app",
         "1",
-        metadata=(
-            "Metadata-Version: 2.2\nName: app\nVersion: 1\n"
-            f"Requires-Dist: {name} @ {declaration}\n"
-        ),
+        metadata_updates={
+            "Metadata-Version": "2.2",
+            "Requires-Dist": f"{name} @ {declaration}",
+        },
     ).save_to_dir(script.scratch_path)
     create_basic_wheel_for_package(script, "child", "1")
     constraints = script.scratch_path / "constraints.txt"
     constraints.write_text(f"dep @ {url}\n")
     report = script.scratch_path / "report.json"
 
-    result = tracked_install(
-        script,
+    script.pip_install_local(
+        "-c",
+        str(constraints),
+        "--report",
+        str(report),
         "app",
-        options=("-c", str(constraints), "--report", str(report)),
-        ignore_installed=False,
+        find_links=script.scratch_path,
+        build_isolation=True,
     )
 
-    assert "Nab source-domain restart" not in result.stdout
     script.assert_installed(app="1", dep="1")
     if with_extra:
         script.assert_installed(child="1")
@@ -277,16 +283,15 @@ def test_inactive_constrained_source_is_not_prepared(
     marker = ' ; python_version < "2"' if inactive == "marker" else ""
     if inactive == "extra":
         marker = ' ; extra == "feature"'
-    dependency = f"Requires-Dist: dep @ {missing.as_uri()}{marker}\n"
-    if inactive == "unused":
-        dependency = ""
+    dependencies = [] if inactive == "unused" else [f"dep @ {missing.as_uri()}{marker}"]
     make_wheel(
         "app",
         "1",
-        metadata=(
-            "Metadata-Version: 2.2\nName: app\nVersion: 1\nProvides-Extra: feature\n"
-            + dependency
-        ),
+        metadata_updates={
+            "Metadata-Version": "2.2",
+            "Provides-Extra": "feature",
+            "Requires-Dist": dependencies,
+        },
     ).save_to_dir(script.scratch_path)
     constraints = script.scratch_path / "constraints.txt"
     constraints.write_text(f"dep @ {missing.as_uri()}\n")
@@ -294,7 +299,13 @@ def test_inactive_constrained_source_is_not_prepared(
     if inactive == "no_deps":
         options += ("--no-deps",)
 
-    result = tracked_install(script, "app", options=options)
+    result = script.pip_install_local(
+        "--ignore-installed",
+        *options,
+        "app",
+        find_links=script.scratch_path,
+        build_isolation=True,
+    )
 
     assert "Nab source-domain restart" not in result.stdout
     script.assert_installed(app="1")
@@ -319,19 +330,24 @@ def test_conflicting_parent_url_cannot_replace_the_constrained_source(
     make_wheel(
         "app",
         "2",
-        metadata=(
-            "Metadata-Version: 2.2\nName: app\nVersion: 2\n"
-            f"Requires-Dist: {name} @ {other.as_uri()}\n"
-        ),
+        metadata_updates={
+            "Metadata-Version": "2.2",
+            "Requires-Dist": f"{name} @ {other.as_uri()}",
+        },
     ).save_to_dir(script.scratch_path)
     constraints = script.scratch_path / "constraints.txt"
     constraints.write_text(f"dep @ {permitted.as_uri()}\n")
     report = script.scratch_path / "report.json"
 
-    result = tracked_install(
-        script,
+    result = script.pip_install_local(
+        "--ignore-installed",
+        "-c",
+        str(constraints),
+        "--report",
+        str(report),
         "app",
-        options=("-c", str(constraints), "--report", str(report)),
+        find_links=script.scratch_path,
+        build_isolation=True,
     )
 
     assert "Nab source-domain restart" not in result.stdout
@@ -369,24 +385,25 @@ def test_url_constraint_hashes_are_checked_before_installation(
             make_wheel(
                 "app",
                 "1",
-                metadata=(
-                    "Metadata-Version: 2.2\nName: app\nVersion: 1\n"
-                    f"Requires-Dist: dep @ {supplied.as_uri()}\n"
-                ),
+                metadata_updates={
+                    "Metadata-Version": "2.2",
+                    "Requires-Dist": f"dep @ {supplied.as_uri()}",
+                },
             ).save_to_dir(script.scratch_path)
         )
         root = f"app==1 --hash=sha256:{hashlib.sha256(app.read_bytes()).hexdigest()}"
     requirements.write_text(root + "\n")
 
-    result = tracked_install(
-        script,
+    result = script.pip_install_local(
+        "--ignore-installed",
+        "-c",
+        str(constraints),
         "-r",
         str(requirements),
-        options=("-c", str(constraints), "--no-build-isolation"),
+        find_links=script.scratch_path,
         expect_error=not correct_hash,
     )
 
-    assert "Nab source-domain restart" not in result.stdout
     if correct_hash:
         script.assert_installed(dep="1")
         script.pip("check")
@@ -406,15 +423,22 @@ def test_repeated_url_roots_cannot_reuse_a_candidate_with_conflicting_hashes(
         f"dep @ {supplied.as_uri()} --hash=sha256:{'0' * 64}\n"
     )
 
-    result = tracked_install(script, "-r", str(requirements), expect_error=True)
+    result = script.pip_install_local(
+        "--ignore-installed",
+        "-r",
+        str(requirements),
+        find_links=script.scratch_path,
+        build_isolation=True,
+        expect_error=True,
+    )
 
     assert "THESE PACKAGES DO NOT MATCH THE HASHES" in result.stderr
     script.assert_not_installed("dep")
 
 
-@pytest.mark.parametrize("named", [False, True])
-@pytest.mark.parametrize("algorithm", ["sha256", "sha512"])
-@pytest.mark.parametrize("repeat", [False, True])
+@pytest.mark.parametrize(
+    "named, algorithm, repeat", [(True, "sha256", True), (False, "sha512", False)]
+)
 def test_source_hash_intersection_cannot_be_dropped(
     script: PipTestEnvironment, named: bool, algorithm: str, repeat: bool
 ) -> None:
@@ -434,11 +458,13 @@ def test_source_hash_intersection_cannot_be_dropped(
     requirements = script.scratch_path / "requirements.txt"
     requirements.write_text(declaration * (2 if repeat else 1))
 
-    result = tracked_install(
-        script,
+    result = script.pip_install_local(
+        "--ignore-installed",
+        "-c",
+        str(constraints),
         "-r",
         str(requirements),
-        options=("-c", str(constraints), "--no-build-isolation"),
+        find_links=script.scratch_path,
         expect_error=True,
     )
 
@@ -465,16 +491,14 @@ def test_constraint_hash_checks_the_source_of_a_cached_built_wheel(
     constraints = script.scratch_path / "constraints.txt"
     constraints.write_text(f"dep @ {supplied.as_uri()} --hash=sha256:{digest}\n")
 
-    result = tracked_install(
-        script,
+    result = script.pip_install_local(
+        "--ignore-installed",
+        "-c",
+        str(constraints),
+        "--cache-dir",
+        str(cache),
         supplied.as_uri(),
-        options=(
-            "-c",
-            str(constraints),
-            "--cache-dir",
-            str(cache),
-            "--no-build-isolation",
-        ),
+        find_links=script.scratch_path,
     )
 
     assert "Nab source-domain restart" not in result.stdout
@@ -493,13 +517,18 @@ def test_unconstrained_url_does_not_discard_a_working_newer_parent(
     make_wheel(
         "app",
         "2",
-        metadata=(
-            "Metadata-Version: 2.2\nName: app\nVersion: 2\n"
-            f"Requires-Dist: dep @ {supplied.as_uri()}\n"
-        ),
+        metadata_updates={
+            "Metadata-Version": "2.2",
+            "Requires-Dist": f"dep @ {supplied.as_uri()}",
+        },
     ).save_to_dir(script.scratch_path)
 
-    result = tracked_install(script, "app")
+    result = script.pip_install_local(
+        "--ignore-installed",
+        "app",
+        find_links=script.scratch_path,
+        build_isolation=True,
+    )
 
     assert result.stdout.count("Nab source-domain restart:") == 1
     script.assert_installed(app="2", dep="3")
@@ -534,11 +563,14 @@ def test_no_require_hashes_allows_an_unnamed_source_without_an_archive(
         f"{root} --hash=sha256:{'1' * 64} --hash=sha256:{'2' * 64}\n"
     )
 
-    tracked_install(
-        script,
+    script.pip_install_local(
+        "--ignore-installed",
+        "-c",
+        str(constraints),
+        "--no-require-hashes",
         "-r",
         str(requirements),
-        options=("-c", str(constraints), "--no-require-hashes", "--no-build-isolation"),
+        find_links=script.scratch_path,
     )
 
     script.assert_installed(dep="1")

@@ -18,13 +18,9 @@ def test_late_source_retry_preserves_satisfied_installed_dependencies(
     make_wheel(
         name="app",
         version="1.0",
-        metadata=(
-            "Metadata-Version: 2.1\nName: app\nVersion: 1.0\n"
-            f"Requires-Dist: dep @ {direct.as_uri()}\n"
-            "Requires-Dist: leaf>=1\n"
-        ),
+        metadata_updates={"Requires-Dist": [f"dep @ {direct.as_uri()}", "leaf>=1"]},
     ).save_to(script.scratch_path / "app-1.0-py2.py3-none-any.whl")
 
-    script.pip("install", "--no-index", "--find-links", script.scratch_path, "app")
+    script.pip_install_local("app", find_links=script.scratch_path)
 
     script.assert_installed(app="1.0", dep="3.0", leaf="1.0")

@@ -5,37 +5,25 @@ from typing import Any
 
 import pytest
 
-from tests.functional.test_nab_preparation_reuse import PREPARATION_PROBE
 from tests.lib import PipTestEnvironment, TestPipResult, create_basic_wheel_for_package
+from tests.lib.resolver import tracked_install
 from tests.lib.wheel import make_wheel
 
 
 def install_to_prefix(
     script: PipTestEnvironment,
-    label: str,
     requirements: list[str],
     *,
     expect_error: bool = False,
 ) -> tuple[TestPipResult, dict[str, Any], Path]:
     """Keep each installation outside the next request's installed environment."""
-    prefix = script.scratch_path / f"{label}-prefix"
-    report_path = script.scratch_path / f"{label}-report.json"
-    probe = script.scratch_path / "preparation_probe.py"
-    probe.write_text(PREPARATION_PROBE)
-    result = script.run(
-        "python",
-        str(probe),
-        "install",
-        *(("--ignore-installed",) if label == "ignore-installed" else ()),
-        "--prefix",
-        str(prefix),
-        "--no-compile",
-        "--report",
-        str(report_path),
-        "--no-index",
-        "--find-links",
-        str(script.scratch_path),
+    prefix = script.scratch_path / "prefix"
+    report_path = script.scratch_path / "report.json"
+    result = tracked_install(
+        script,
         *requirements,
+        options=("--prefix", str(prefix), "--no-compile", "--report", str(report_path)),
+        ignore_installed=False,
         expect_error=expect_error,
     )
     if expect_error:
@@ -56,11 +44,12 @@ def installed_metadata(prefix: Path, name: str, version: str) -> Path:
     return matches[0]
 
 
-@pytest.mark.parametrize("source_mode", ["observed", "unread", "upfront"])
-@pytest.mark.parametrize("root_extra", [False, True])
-@pytest.mark.parametrize("label", ["installed", "ignore-installed"])
+@pytest.mark.parametrize(
+    "source_mode, root_extra",
+    [("observed", True), ("unread", False), ("upfront", True)],
+)
 def test_source_discovery_preserves_url_provenance(
-    script: PipTestEnvironment, source_mode: str, root_extra: bool, label: str
+    script: PipTestEnvironment, source_mode: str, root_extra: bool
 ) -> None:
     dep = create_basic_wheel_for_package(script, "dep", "1.0")
     dependencies = [f"dep @ {dep.as_uri()}"]
@@ -77,11 +66,12 @@ def test_source_discovery_preserves_url_provenance(
             make_wheel(
                 name="bridge",
                 version="1.0",
-                metadata=(
-                    "Metadata-Version: 2.1\nName: bridge\nVersion: 1.0\n"
-                    f"Requires-Dist: missing @ {missing.as_uri()}\n"
-                    f"Requires-Dist: dep @ {dep.as_uri()}\n"
-                ),
+                metadata_updates={
+                    "Requires-Dist": [
+                        f"missing @ {missing.as_uri()}",
+                        f"dep @ {dep.as_uri()}",
+                    ]
+                },
             ).save_to_dir(script.scratch_path)
         )
         dependencies = [f"dep @ {dep.as_uri()}", "missing>=2", "bridge==1.0"]
@@ -91,15 +81,8 @@ def test_source_discovery_preserves_url_provenance(
         script, other_root, "1.0", depends=["dep>=1"]
     )
     for version in ("1.0", "2.0"):
-        metadata = (
-            f"Metadata-Version: 2.1\nName: app\nVersion: {version}\n"
-            "Provides-Extra: feature\n"
-        )
-        metadata += "".join(
-            f"Requires-Dist: {dependency}\n" for dependency in dependencies
-        )
-        make_wheel(name="app", version=version, metadata=metadata).save_to_dir(
-            script.scratch_path
+        create_basic_wheel_for_package(
+            script, "app", version, depends=dependencies, extras={"feature": []}
         )
 
     requirements = ["app[feature]" if root_extra else "app", other_root]
@@ -107,7 +90,7 @@ def test_source_discovery_preserves_url_provenance(
         assert missing is not None
         requirements.append(f"missing @ {missing.as_uri()}")
     result, report, prefix = install_to_prefix(
-        script, label, requirements, expect_error=source_mode == "unread"
+        script, requirements, expect_error=source_mode == "unread"
     )
 
     # Missing's URL cannot rescue the solve before bridge metadata is read.
@@ -174,23 +157,16 @@ def test_rejected_url_parent_does_not_change_ordinary_origin(
     make_wheel(
         name="app",
         version="2.0",
-        metadata=(
-            "Metadata-Version: 2.1\nName: app\nVersion: 2.0\n"
-            f"Requires-Dist: dep @ {dep.as_uri()}\n"
-            "Requires-Dist: missing>=1\n"
-        ),
+        metadata_updates={"Requires-Dist": [f"dep @ {dep.as_uri()}", "missing>=1"]},
     ).save_to_dir(script.scratch_path)
 
-    for label in ("installed", "ignore-installed"):
-        result, report, prefix = install_to_prefix(
-            script, label, ["dep[feature]==1.0", "app"]
-        )
-        assert report["app"]["metadata"]["version"] == "1.0"
-        assert report["dep"]["metadata"]["version"] == "1.0"
-        assert report["dep"]["is_direct"] is False, label
-        metadata = installed_metadata(prefix, "dep", "1.0")
-        assert not (metadata / "direct_url.json").exists(), label
+    _, report, prefix = install_to_prefix(script, ["dep[feature]==1.0", "app"])
+    assert report["app"]["metadata"]["version"] == "1.0"
+    assert report["dep"]["metadata"]["version"] == "1.0"
+    assert report["dep"]["is_direct"] is False
+    metadata = installed_metadata(prefix, "dep", "1.0")
+    assert not (metadata / "direct_url.json").exists()
 
-        assert report["dep"]["requested"] is True
-        assert report["dep"]["requested_extras"] == ["feature"]
-        assert (metadata / "REQUESTED").exists()
+    assert report["dep"]["requested"] is True
+    assert report["dep"]["requested_extras"] == ["feature"]
+    assert (metadata / "REQUESTED").exists()

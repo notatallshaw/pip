@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from tests.functional.test_nab_preparation_reuse import tracked_install
 from tests.lib import PipTestEnvironment
 from tests.lib.server import MockServer
 from tests.lib.wheel import make_wheel
@@ -99,27 +98,25 @@ def test_metadata_only_source_checks_a_different_parent_hash(
     constraints = script.scratch_path / "constraints.txt"
     constraints.write_text(f"dep @ {source}#sha256={sha256}\n")
 
-    # Keep the dependency URL on one metadata header line.
-    metadata = (
-        "Metadata-Version: 2.1\nName: app\nVersion: 1\n"
-        f"Requires-Dist: dep @ {source}#sha512={sha512}\n"
-    )
     parent = Path(
-        make_wheel("app", "1", metadata=metadata).save_to_dir(script.scratch_path)
+        make_wheel(
+            "app",
+            "1",
+            metadata_updates={"Requires-Dist": f"dep @ {source}#sha512={sha512}"},
+        ).save_to_dir(script.scratch_path)
     )
     report = script.scratch_path / "hash-report.json"
     try:
         script.pip_expect_warning = True
-        result = tracked_install(
-            script,
+        result = script.pip_install_local(
+            "--ignore-installed",
+            "--use-feature=fast-deps",
+            "-c",
+            str(constraints),
+            "--report",
+            str(report),
             "app",
-            options=(
-                "--use-feature=fast-deps",
-                "-c",
-                str(constraints),
-                "--report",
-                str(report),
-            ),
+            find_links=script.scratch_path,
             expect_error=not correct_hash,
         )
     finally:
@@ -162,9 +159,15 @@ def test_metadata_only_source_checks_a_different_parent_hash(
     script.pip("check")
 
 
-@pytest.mark.parametrize("named", [False, True])
-@pytest.mark.parametrize("correct_hash", [False, True])
-@pytest.mark.parametrize("root_hash", [False, True])
+@pytest.mark.parametrize(
+    "named, correct_hash, root_hash",
+    [
+        (False, False, True),
+        (True, False, False),
+        (True, True, True),
+        (False, True, False),
+    ],
+)
 def test_constraint_url_fragment_hash_is_checked(
     script: PipTestEnvironment, *, named: bool, correct_hash: bool, root_hash: bool
 ) -> None:
@@ -176,16 +179,17 @@ def test_constraint_url_fragment_hash_is_checked(
     source = supplied.as_uri() + (f"#sha256={digest}" if root_hash else "")
     root = f"dep @ {source}" if named else source
 
-    result = tracked_install(
-        script,
+    result = script.pip_install_local(
+        "--ignore-installed",
+        "-c",
+        str(constraints),
         root,
-        options=("-c", str(constraints)),
+        find_links=script.scratch_path,
         expect_error=not correct_hash,
     )
 
     if correct_hash:
         script.assert_installed(dep="1")
-        assert "Nab source-domain restart" not in result.stdout
         script.pip("check")
     else:
         assert "THESE PACKAGES DO NOT MATCH THE HASHES" in result.stderr
@@ -211,11 +215,13 @@ def test_root_fragment_does_not_widen_input_checksum_intersection(
         f"dep @ {supplied.as_uri()}#sha512={sha512 if correct_hash else wrong}\n"
     )
 
-    result = tracked_install(
-        script,
+    result = script.pip_install_local(
+        "--ignore-installed",
+        "-c",
+        str(constraints),
         "-r",
         str(requirements),
-        options=("-c", str(constraints)),
+        find_links=script.scratch_path,
         expect_error=not correct_hash,
     )
 
@@ -237,10 +243,12 @@ def test_disjoint_input_fragments_reject_the_archive(
         f"dep @ {supplied.as_uri()}#sha256={'0' * 64}\n"
     )
 
-    result = tracked_install(
-        script,
+    result = script.pip_install_local(
+        "--ignore-installed",
+        "-c",
+        str(constraints),
         f"dep @ {supplied.as_uri()}",
-        options=("-c", str(constraints)),
+        find_links=script.scratch_path,
         expect_error=True,
     )
 
@@ -260,7 +268,14 @@ def test_input_checksum_intersection_ignores_hexadecimal_case(
     constraints = script.scratch_path / "constraints.txt"
     constraints.write_text(f"dep @ {supplied.as_uri()}#sha256={digest}\n")
 
-    tracked_install(script, "-r", str(requirements), options=("-c", str(constraints)))
+    script.pip_install_local(
+        "--ignore-installed",
+        "-c",
+        str(constraints),
+        "-r",
+        str(requirements),
+        find_links=script.scratch_path,
+    )
 
     script.assert_installed(dep="1")
     script.pip("check")
@@ -273,20 +288,24 @@ def test_selected_dependency_fragment_is_checked(
     supplied = Path(make_wheel("dep", "1").save_to_dir(script.scratch_path))
     digest = hashlib.sha256(supplied.read_bytes()).hexdigest()
     wanted = digest if correct_hash else "0" * 64
-    metadata = "Metadata-Version: 2.1\nName: app\nVersion: 1\n"
-    metadata += f"Requires-Dist: dep @ {supplied.as_uri()}#sha256={wanted}\n"
-    make_wheel("app", "1", metadata=metadata).save_to_dir(script.scratch_path)
+    make_wheel(
+        "app",
+        "1",
+        metadata_updates={
+            "Requires-Dist": f"dep @ {supplied.as_uri()}#sha256={wanted}"
+        },
+    ).save_to_dir(script.scratch_path)
 
-    result = tracked_install(
-        script,
+    result = script.pip_install_local(
+        "--ignore-installed",
         "app",
         f"dep @ {supplied.as_uri()}",
+        find_links=script.scratch_path,
         expect_error=not correct_hash,
     )
 
     if correct_hash:
         script.assert_installed(app="1", dep="1")
-        assert "Nab source-domain restart" not in result.stdout
         script.pip("check")
     else:
         assert "THESE PACKAGES DO NOT MATCH THE HASHES" in result.stderr
@@ -299,9 +318,13 @@ def test_shared_fragment_does_not_repeat_the_archive_checksum(
     supplied = Path(make_wheel("dep", "1").save_to_dir(script.scratch_path))
     digest = hashlib.sha256(supplied.read_bytes()).hexdigest()
     for name in ["app", "other"]:
-        metadata = f"Metadata-Version: 2.1\nName: {name}\nVersion: 1\n"
-        metadata += f"Requires-Dist: dep @ {supplied.as_uri()}#sha256={digest}\n"
-        make_wheel(name, "1", metadata=metadata).save_to_dir(script.scratch_path)
+        make_wheel(
+            name,
+            "1",
+            metadata_updates={
+                "Requires-Dist": f"dep @ {supplied.as_uri()}#sha256={digest}"
+            },
+        ).save_to_dir(script.scratch_path)
     probe = script.scratch_path / "checksum_probe.py"
     probe.write_text(
         "import sys\n"

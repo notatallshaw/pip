@@ -7,11 +7,11 @@ from tests.lib.wheel import make_wheel
 
 
 def _self_wheel(path: Path, version: str, dependencies: list[str]) -> None:
-    """Write self-reference metadata without folding its long file URI."""
+    """Write a wheel at the path named by its own dependency."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    metadata = f"Metadata-Version: 2.1\nName: selfpkg\nVersion: {version}\n"
-    metadata += "".join(f"Requires-Dist: {dependency}\n" for dependency in dependencies)
-    make_wheel(name="selfpkg", version=version, metadata=metadata).save_to(path)
+    make_wheel(
+        "selfpkg", version, metadata_updates={"Requires-Dist": dependencies}
+    ).save_to(path)
 
 
 def test_named_install_of_distribution_requiring_its_own_url(
@@ -36,7 +36,7 @@ def test_self_url_replacement_keeps_its_own_metadata(
     _self_wheel(target, version, [*([requirement] if keep_self else []), "child==1"])
     create_basic_wheel_for_package(script, "child", "1")
     script.pip("install", "--no-index", "--no-deps", initial)
-    script.pip("install", "--no-index", "--find-links", script.scratch_path, "selfpkg")
+    script.pip_install_local("selfpkg", find_links=script.scratch_path)
     script.assert_installed(selfpkg=version, child="1")
 
 
@@ -52,13 +52,7 @@ def test_missing_removed_dependency_does_not_block_self_url_replacement(
     script.pip("install", "--no-index", "--no-deps", initial)
     if fallback:
         create_basic_wheel_for_package(script, "selfpkg", "3")
-    script.pip(
-        "install",
-        "--no-index",
-        "--find-links",
-        script.scratch_path,
-        "selfpkg",
-    )
+    script.pip_install_local("selfpkg", find_links=script.scratch_path)
     script.assert_installed(selfpkg="2")
     script.assert_not_installed("missing")
     script.pip("check")
@@ -77,13 +71,8 @@ def test_required_replacement_dependency_still_rejects_the_source(
     if fallback:
         create_basic_wheel_for_package(script, "selfpkg", "3")
 
-    script.pip(
-        "install",
-        "--no-index",
-        "--find-links",
-        script.scratch_path,
-        "selfpkg",
-        expect_error=not fallback,
+    script.pip_install_local(
+        "selfpkg", find_links=script.scratch_path, expect_error=not fallback
     )
 
     script.assert_installed(selfpkg="3" if fallback else "1")
@@ -109,7 +98,7 @@ def test_impossible_installed_dependencies_do_not_prepare_a_later_url(
     _self_wheel(target, "2", [requirement])
     create_basic_wheel_for_package(script, "selfpkg", "3")
     script.pip("install", "--no-index", "--no-deps", initial)
-    script.pip("install", "--no-index", "--find-links", script.scratch_path, "selfpkg")
+    script.pip_install_local("selfpkg", find_links=script.scratch_path)
     script.assert_installed(selfpkg="2")
     script.assert_not_installed("olddep", "missing")
     script.pip("check")
@@ -128,13 +117,7 @@ def test_removed_dependencies_do_not_constrain_self_url_replacement(
         script, "olddep", "1", depends=["missing==1"] if broken else []
     )
     script.pip("install", "--no-index", "--no-deps", initial)
-    script.pip(
-        "install",
-        "--no-index",
-        "--find-links",
-        script.scratch_path,
-        "selfpkg",
-    )
+    script.pip_install_local("selfpkg", find_links=script.scratch_path)
     script.assert_installed(selfpkg="2")
     script.assert_not_installed("olddep", "missing")
     script.pip("check")
@@ -152,22 +135,10 @@ def test_later_roots_use_self_replacement_metadata(
     create_basic_wheel_for_package(script, "olddep", "1")
     create_basic_wheel_for_package(script, "olddep", "2")
     for version, dependencies in [("2", ["olddep>=2"]), ("1", [])]:
-        metadata = f"Metadata-Version: 2.1\nName: other\nVersion: {version}\n"
-        metadata += "".join(
-            f"Requires-Dist: {dependency}\n"
-            for dependency in [*dependencies, *([requirement] if same_url else [])]
-        )
-        make_wheel(name="other", version=version, metadata=metadata).save_to(
-            script.scratch_path / f"other-{version}-py3-none-any.whl"
-        )
+        if same_url:
+            dependencies.append(requirement)
+        create_basic_wheel_for_package(script, "other", version, depends=dependencies)
     script.pip("install", "--no-index", "--no-deps", initial)
-    script.pip(
-        "install",
-        "--no-index",
-        "--find-links",
-        script.scratch_path,
-        "selfpkg",
-        "other",
-    )
+    script.pip_install_local("selfpkg", "other", find_links=script.scratch_path)
     script.assert_installed(selfpkg="2", other="2", olddep="2")
     script.pip("check")

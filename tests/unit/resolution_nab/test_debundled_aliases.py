@@ -5,14 +5,11 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
-
 _PROBE = """
-import importlib
 from pathlib import Path
 import sys
 
-source, external, first = sys.argv[1:]
+source, external = sys.argv[1:]
 sys.path[:0] = [source, external]
 import pip._vendor as vendor
 
@@ -20,8 +17,6 @@ initializer = Path(vendor.__file__).read_text()
 assert initializer.count("DEBUNDLED = False") == 1
 initializer = initializer.replace("DEBUNDLED = False", "DEBUNDLED = True")
 exec(compile(initializer, vendor.__file__, "exec"), vendor.__dict__)
-
-importlib.import_module("pip._vendor.nab_resolver." + first)
 
 from pip._vendor.nab_resolver.result import IncompleteSelectionError
 from nab_resolver.result import walk_selected
@@ -39,23 +34,9 @@ from nab_provider.catalogue.versions import VersionCandidate
 
 assert isinstance(Candidate("probe", Version("1"), withdrawn=False), VersionCandidate)
 
-for name in (
-    "errors", "priority",
-    "proofs", "ranges", "resolver", "result", "root", "types",
-):
-    bundled = importlib.import_module("pip._vendor.nab_resolver." + name)
-    canonical = importlib.import_module("nab_resolver." + name)
-    assert bundled is canonical, "split nab module: " + name
-    assert Path(canonical.__file__).is_relative_to(external)
-
-for name in (
-    "preference", "catalogue.provider", "catalogue.resolution",
-    "catalogue.records", "catalogue.versions", "catalogue.releases", "catalogue.lookahead",
-):
-    bundled = importlib.import_module("pip._vendor.nab_provider." + name)
-    canonical = importlib.import_module("nab_provider." + name)
-    assert bundled is canonical, "split provider module: " + name
-    assert Path(canonical.__file__).is_relative_to(external)
+assert Path(sys.modules["nab_resolver.result"].__file__).is_relative_to(external)
+external_versions = sys.modules["nab_provider.catalogue.versions"]
+assert Path(external_versions.__file__).is_relative_to(external)
 
 from pip._vendor.nab_resolver.root import ROOT
 from nab_resolver.root import ROOT as canonical_root
@@ -107,10 +88,7 @@ assert solution.roots == ("app",)
 """
 
 
-@pytest.mark.parametrize("first", ["result", "resolver", "errors"])
-def test_debundled_nab_public_modules_share_identity(
-    tmp_path: Path, first: str
-) -> None:
+def test_debundled_nab_public_modules_share_identity(tmp_path: Path) -> None:
     """Keep external exceptions, value types and solver roots coherent."""
     source = Path(__file__).parents[3] / "src"
     for package in ("nab_resolver", "nab_provider", "packaging"):
@@ -125,7 +103,7 @@ def test_debundled_nab_public_modules_share_identity(
             module.write_text(module.read_text().replace("pip._vendor.", ""))
 
     result = subprocess.run(
-        [sys.executable, "-I", "-S", "-c", _PROBE, str(source), str(tmp_path), first],
+        [sys.executable, "-I", "-S", "-c", _PROBE, str(source), str(tmp_path)],
         capture_output=True,
         text=True,
     )

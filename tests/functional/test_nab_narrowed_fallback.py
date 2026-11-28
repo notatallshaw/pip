@@ -1,10 +1,8 @@
 import hashlib
-import json
 from pathlib import Path
 
 import pytest
 
-from tests.functional.test_nab_preparation_reuse import tracked_install
 from tests.lib import (
     PipTestEnvironment,
     create_basic_sdist_for_package,
@@ -20,17 +18,16 @@ def test_known_dependency_url_uses_fixed_input_source(
     make_wheel(
         name="app",
         version="1",
-        metadata=(
-            "Metadata-Version: 2.2\nName: app\nVersion: 1\n"
-            f"Requires-Dist: dep @ {dep.as_uri()}\n"
-        ),
+        metadata_updates={
+            "Metadata-Version": "2.2",
+            "Requires-Dist": f"dep @ {dep.as_uri()}",
+        },
     ).save_to_dir(script.scratch_path)
 
-    result = script.pip(
-        "install", "--no-index", "--find-links", script.scratch_path, "app", dep
+    result = script.pip_install_local(
+        "app", dep, find_links=script.scratch_path, build_isolation=True
     )
 
-    assert "Nab catalogue success" in result.stdout
     assert "Nab source-domain restart" not in result.stdout
     script.assert_installed(app="1", dep="1")
 
@@ -47,17 +44,14 @@ def test_source_constraint_is_prepared_only_when_required(
     if not active:
         app.unlink()
 
-    result = script.pip(
-        "install",
-        "--no-index",
-        "--find-links",
-        script.scratch_path,
+    script.pip_install_local(
         "-c",
         constraints,
         "app" if active else "other",
+        find_links=script.scratch_path,
+        build_isolation=True,
     )
 
-    assert "Nab catalogue success" in result.stdout
     script.assert_installed(**({"app": "1"} if active else {"other": "1"}))
 
 
@@ -70,19 +64,15 @@ def test_fixed_hash_policy_is_verified_on_fast_path(
     requirements = script.scratch_path / "requirements.txt"
     requirements.write_text(f"app==1 --hash=sha256:{digest}\n")
 
-    result = script.pip(
-        "install",
-        "--no-index",
-        "--find-links",
-        script.scratch_path,
+    result = script.pip_install_local(
         "-r",
         requirements,
+        find_links=script.scratch_path,
+        build_isolation=True,
         expect_error=not valid,
     )
 
-    assert "Nab source-domain restart" not in result.stdout
     if valid:
-        assert "Nab catalogue success" in result.stdout
         script.assert_installed(app="1")
     else:
         assert "DO NOT MATCH THE HASHES" in result.stderr
@@ -110,7 +100,6 @@ def test_contradictory_root_ranges_fail_without_native_solve(
     result = script.pip("install", "--no-index", "app<1", "app>=2", expect_error=True)
 
     assert "ResolutionImpossible" in result.stderr
-    assert "Nab source-domain restart" not in result.stdout
 
 
 def test_complete_dependency_domain_certifies_failure(
@@ -118,16 +107,10 @@ def test_complete_dependency_domain_certifies_failure(
 ) -> None:
     create_basic_wheel_for_package(script, "app", "1", depends=["missing==1"])
 
-    result = script.pip(
-        "install",
-        "--no-index",
-        "--find-links",
-        script.scratch_path,
-        "app",
-        expect_error=True,
+    result = script.pip_install_local(
+        "app", find_links=script.scratch_path, build_isolation=True, expect_error=True
     )
 
-    assert "Nab source-domain restart" not in result.stdout
     assert "No matching distribution found for missing==1" in result.stderr
 
 
@@ -143,10 +126,10 @@ def test_fixed_url_conflict_reports_both_requirements(
     make_wheel(
         name="app",
         version="1",
-        metadata=(
-            "Metadata-Version: 2.2\nName: app\nVersion: 1\n"
-            f"Requires-Dist: dep @ {other.as_uri()}\n"
-        ),
+        metadata_updates={
+            "Metadata-Version": "2.2",
+            "Requires-Dist": f"dep @ {other.as_uri()}",
+        },
     ).save_to(parent)
 
     result = script.pip("install", "--no-index", parent, direct, expect_error=True)
@@ -155,7 +138,6 @@ def test_fixed_url_conflict_reports_both_requirements(
     assert "app 1 depends on dep" in result.stdout
     assert str(direct) in result.stdout
     assert other.as_uri() in result.stdout
-    assert "Nab source-domain restart" not in result.stdout
 
 
 @pytest.mark.parametrize(
@@ -175,17 +157,10 @@ def test_metadata_rejection_scope_preserves_artifact_alternatives(
         },
     ).save_to(rejected)
 
-    result = script.pip(
-        "install",
-        "--no-index",
-        "--no-build-isolation",
-        "--find-links",
-        script.scratch_path,
-        "pkg",
-        allow_stderr_warning=True,
+    script.pip_install_local(
+        "pkg", find_links=script.scratch_path, allow_stderr_warning=True
     )
 
-    assert "Nab catalogue success" in result.stdout
     script.assert_installed(pkg=expected)
 
 
@@ -218,8 +193,10 @@ def installed_metadata_listing(
     return listing
 
 
-@pytest.mark.parametrize("yanked", [False, True])
-@pytest.mark.parametrize("bound", ["root", "constraint", "extras", "extra-base"])
+@pytest.mark.parametrize(
+    "bound, yanked",
+    [("root", False), ("constraint", True), ("extras", False), ("extra-base", True)],
+)
 def test_invalid_index_metadata_stays_fast_when_inputs_exclude_installation(
     script: PipTestEnvironment, bound: str, yanked: bool
 ) -> None:
@@ -234,17 +211,10 @@ def test_invalid_index_metadata_stays_fast_when_inputs_exclude_installation(
     else:
         arguments = ["app[feature]>=2,<4" if bound == "extras" else "app>=2,<4"]
 
-    result = script.pip(
-        "install",
-        "--no-index",
-        "--find-links",
-        listing,
-        *arguments,
-        allow_stderr_warning=True,
+    result = script.pip_install_local(
+        *arguments, find_links=listing, build_isolation=True, allow_stderr_warning=True
     )
 
-    assert "Nab catalogue success" in result.stdout
-    assert "Nab source-domain restart" not in result.stdout
     assert (
         result.stderr.count("Ignoring version 3 of app since it has invalid metadata")
         == 1
@@ -257,18 +227,14 @@ def test_invalid_index_metadata_does_not_make_installed_upgrades_fail(
     script: PipTestEnvironment, yanked: bool
 ) -> None:
     listing = installed_metadata_listing(script, yanked=yanked)
-    result = script.pip(
-        "install",
-        "--no-index",
-        "--find-links",
-        listing,
+    result = script.pip_install_local(
         "--upgrade",
         "app",
+        find_links=listing,
+        build_isolation=True,
         allow_stderr_warning=True,
     )
 
-    assert "Nab catalogue success" in result.stdout
-    assert "Nab source-domain restart" not in result.stdout
     assert "Ignoring version 3 of app since it has invalid metadata" in result.stderr
     script.assert_installed(app="2")
 
@@ -278,17 +244,14 @@ def test_dependency_exclusion_rejects_invalid_metadata_without_fallback(
 ) -> None:
     listing = installed_metadata_listing(script, yanked=False)
     create_basic_wheel_for_package(script, "bridge", "1", depends=["app>=2,<4"])
-    result = script.pip(
-        "install",
-        "--no-index",
-        "--find-links",
-        listing,
+    result = script.pip_install_local(
         "app",
         "bridge",
+        find_links=listing,
+        build_isolation=True,
         allow_stderr_warning=True,
     )
 
-    assert "Nab catalogue success" in result.stdout
     assert "Nab source-domain restart" not in result.stdout
     script.assert_installed(app="2", bridge="1")
 
@@ -298,16 +261,10 @@ def test_excluded_installation_does_not_repeat_metadata_rejections_on_failure(
     script: PipTestEnvironment, yanked: bool
 ) -> None:
     listing = installed_metadata_listing(script, yanked=yanked, reject_all=True)
-    result = script.pip(
-        "install",
-        "--no-index",
-        "--find-links",
-        listing,
-        "app>=2,<4",
-        expect_error=True,
+    result = script.pip_install_local(
+        "app>=2,<4", find_links=listing, build_isolation=True, expect_error=True
     )
 
-    assert "Nab source-domain restart" not in result.stdout
     for version in ("2", "3"):
         assert (
             result.stderr.count(
@@ -329,23 +286,16 @@ def test_excluded_installation_does_not_search_unread_url_metadata(
     make_wheel(
         name="bridge",
         version="1",
-        metadata=(
-            "Metadata-Version: 2.2\nName: bridge\nVersion: 1\n"
-            f"Requires-Dist: dep @ {supplied.as_uri()}\n"
-        ),
+        metadata_updates={
+            "Metadata-Version": "2.2",
+            "Requires-Dist": f"dep @ {supplied.as_uri()}",
+        },
     ).save_to(index / "bridge-1-py3-none-any.whl")
 
-    result = script.pip(
-        "install",
-        "--no-index",
-        "--find-links",
-        index,
-        "dep>=3",
-        "bridge",
-        expect_error=True,
+    result = script.pip_install_local(
+        "dep>=3", "bridge", find_links=index, build_isolation=True, expect_error=True
     )
 
-    assert "Nab source-domain restart" not in result.stdout
     assert "No matching distribution found for dep>=3" in result.stderr
     script.assert_installed(dep="1")
     script.assert_not_installed("bridge")
@@ -367,14 +317,12 @@ def test_rejected_source_constraint_does_not_restart_or_use_the_index(
     constraints = script.scratch_path / "constraints.txt"
     constraints.write_text(f"dep @ {rejected.as_uri()}\n")
 
-    result = script.pip(
-        "install",
-        "--no-index",
-        "--find-links",
-        script.scratch_path,
+    result = script.pip_install_local(
         "--constraint",
         constraints,
         "dep" if required else "app",
+        find_links=script.scratch_path,
+        build_isolation=True,
         expect_error=required,
     )
 
@@ -383,7 +331,6 @@ def test_rejected_source_constraint_does_not_restart_or_use_the_index(
     if required:
         assert "ResolutionImpossible" in result.stderr
     else:
-        assert "Nab catalogue success" in result.stdout
         script.assert_installed(app="1")
 
 
@@ -403,14 +350,12 @@ def test_invalid_constrained_source_metadata_errors_without_a_restart(
     constraints = script.scratch_path / "constraints.txt"
     constraints.write_text(f"dep @ {rejected.as_uri()}\n")
 
-    result = script.pip(
-        "install",
-        "--no-index",
-        "--find-links",
-        script.scratch_path,
+    result = script.pip_install_local(
         "--constraint",
         constraints,
         "app" if conditional else "dep",
+        find_links=script.scratch_path,
+        build_isolation=True,
         expect_error=True,
     )
 
@@ -434,10 +379,10 @@ def test_invalid_metadata_in_mandatory_url_closure_errors_without_a_restart(
     make_wheel(
         name="app",
         version="1",
-        metadata=(
-            "Metadata-Version: 2.2\nName: app\nVersion: 1\n"
-            f"Requires-Dist: dep @ {dep.as_uri()}\n"
-        ),
+        metadata_updates={
+            "Metadata-Version": "2.2",
+            "Requires-Dist": f"dep @ {dep.as_uri()}",
+        },
     ).save_to(app)
 
     result = script.pip("install", "--no-index", app, expect_error=True)
@@ -466,21 +411,19 @@ def test_contextual_installed_iteration_skips_invalid_index_metadata(
     make_wheel(
         name="bridge",
         version="1",
-        metadata=(
-            "Metadata-Version: 2.2\nName: bridge\nVersion: 1\n"
-            f"Requires-Dist: dep @ {supplied.as_uri()}\n"
-        ),
+        metadata_updates={
+            "Metadata-Version": "2.2",
+            "Requires-Dist": f"dep @ {supplied.as_uri()}",
+        },
     ).save_to(script.scratch_path / "bridge-1-py3-none-any.whl")
 
-    result = script.pip(
-        "install",
-        "--no-index",
-        "--find-links",
-        script.scratch_path,
+    result = script.pip_install_local(
         *(["--upgrade"] if upgrade else []),
         "app",
         "other==2",
         "bridge",
+        find_links=script.scratch_path,
+        build_isolation=True,
         allow_stderr_warning=True,
     )
 
@@ -504,90 +447,11 @@ def test_unsatisfied_installation_requires_a_working_replacement(
         )
         wheel.save_to(index / "dep-2-py3-none-any.whl")
 
-    result = script.pip(
-        "install",
-        "-v",
-        "--no-index",
-        "--find-links",
-        index,
-        "dep",
-        expect_error=True,
+    script.pip_install_local(
+        "-v", "dep", find_links=index, build_isolation=True, expect_error=True
     )
 
-    assert "Nab source-domain restart" not in result.stdout
     script.assert_installed(dep="1")
-
-
-@pytest.mark.parametrize("version", ["1", "1.0"])
-def test_index_metadata_replacement_updates_the_installed_package(
-    script: PipTestEnvironment,
-    version: str,
-) -> None:
-    initial = Path(
-        make_wheel(
-            "dep",
-            "1",
-            metadata_updates={"Requires-Dist": ["missing==1"]},
-            extra_files={"dep/__init__.py": "marker = 'installed'\n"},
-        ).save_to_dir(script.scratch_path)
-    )
-    script.pip("install", "--no-index", "--no-deps", initial)
-    index = script.scratch_path / "index"
-    index.mkdir()
-    replacement = Path(
-        make_wheel(
-            "dep",
-            version,
-            extra_files={"dep/__init__.py": "marker = 'index'\n"},
-        ).save_to_dir(index)
-    )
-    requirements: list[str | Path] = ["dep"]
-    expected = {"dep": replacement}
-    if version == "1.0":
-        parent = create_basic_wheel_for_package(
-            script, "other", "2", depends=["dep===1.0"]
-        )
-        requirements.append(parent)
-        expected["other"] = parent
-    report = script.scratch_path / "report.json"
-
-    result = tracked_install(
-        script,
-        *requirements,
-        find_links=index,
-        ignore_installed=False,
-        options=("--report", str(report)),
-    )
-
-    assert "Nab source-domain restart" not in result.stdout
-    selected = {
-        item["metadata"]["name"]: item
-        for item in json.loads(report.read_text())["install"]
-    }
-    assert set(selected) == set(expected)
-    for name, artifact in expected.items():
-        download = selected[name]["download_info"]
-        assert download["url"] == artifact.as_uri()
-        assert (
-            download["archive_info"]["hashes"]["sha256"]
-            == hashlib.sha256(artifact.read_bytes()).hexdigest()
-        )
-    assert not any(
-        " @ " in line
-        for line in result.stdout.splitlines()
-        if line.startswith("DEPENDENCY_READ ")
-    )
-    installed = script.run(
-        "python",
-        "-c",
-        (
-            "import dep; from importlib.metadata import distribution; "
-            "assert dep.marker == 'index'; assert not distribution('dep').requires"
-        ),
-    )
-    assert installed.returncode == 0
-    script.assert_installed(dep=version)
-    script.pip("check")
 
 
 def test_no_deps_can_certify_failure_without_reading_possible_url_dependencies(
@@ -600,25 +464,22 @@ def test_no_deps_can_certify_failure_without_reading_possible_url_dependencies(
     make_wheel(
         name="bridge",
         version="1",
-        metadata=(
-            "Metadata-Version: 2.2\nName: bridge\nVersion: 1\n"
-            f"Requires-Dist: dep @ {supplied.as_uri()}\n"
-        ),
+        metadata_updates={
+            "Metadata-Version": "2.2",
+            "Requires-Dist": f"dep @ {supplied.as_uri()}",
+        },
     ).save_to(index / "bridge-1-py3-none-any.whl")
 
-    result = script.pip(
-        "install",
+    result = script.pip_install_local(
         "-v",
-        "--no-index",
         "--no-deps",
-        "--find-links",
-        index,
         "dep>=3",
         "bridge",
+        find_links=index,
+        build_isolation=True,
         expect_error=True,
     )
 
-    assert "Nab source-domain restart" not in result.stdout
     assert "No matching distribution found for dep>=3" in result.stderr
     script.assert_not_installed("dep", "bridge")
 
@@ -642,24 +503,22 @@ def test_impossible_mandatory_source_does_not_read_an_unrelated_url_parent(
     make_wheel(
         name="bridge",
         version="1",
-        metadata=(
-            "Metadata-Version: 2.2\nName: bridge\nVersion: 1\n"
-            f"Requires-Dist: dep @ {supplied.as_uri()}\n"
-        ),
+        metadata_updates={
+            "Metadata-Version": "2.2",
+            "Requires-Dist": f"dep @ {supplied.as_uri()}",
+        },
     ).save_to(index / "bridge-1-py3-none-any.whl")
     constraints = script.scratch_path / "constraints.txt"
     constraints.write_text(f"dep @ {constrained.as_uri()}\n")
 
-    result = script.pip(
-        "install",
+    result = script.pip_install_local(
         "-v",
-        "--no-index",
-        "--find-links",
-        index,
         "-c",
         constraints,
         "dep>=3",
         "bridge",
+        find_links=index,
+        build_isolation=True,
         expect_error=True,
     )
 

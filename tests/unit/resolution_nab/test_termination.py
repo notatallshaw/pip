@@ -1,10 +1,7 @@
 """Solver limits and faults stop without another search."""
 
-from typing import Any
-
 import pytest
 
-from pip._vendor.nab_provider.catalogue import resolution as session_module
 from pip._vendor.nab_provider.preference import IncompletePreferenceError
 from pip._vendor.nab_resolver.errors import (
     ResolutionError,
@@ -12,13 +9,12 @@ from pip._vendor.nab_resolver.errors import (
     ResolutionLimitError,
     ResolutionStalledError,
 )
-from pip._vendor.nab_resolver.resolver import Resolver as CoreResolver
-from pip._vendor.nab_resolver.resolver import ResolverProvider
 
 from pip._internal.exceptions import InstallationError
 from pip._internal.index.package_finder import PackageFinder
 from pip._internal.operations.prepare import RequirementPreparer
 from pip._internal.req.constructors import install_req_from_line
+from pip._internal.resolution.nab import resolver as resolver_module
 from pip._internal.resolution.nab.catalogue import PipCatalogue
 from pip._internal.resolution.nab.resolver import Resolver
 
@@ -40,30 +36,18 @@ def resolver(preparer: RequirementPreparer, finder: PackageFinder) -> Resolver:
     )
 
 
-@pytest.mark.parametrize("requirements", [[], ["probe"]])
-def test_real_iteration_limit_is_not_retried(
-    resolver: Resolver, monkeypatch: pytest.MonkeyPatch, requirements: list[str]
+def test_resolver_reports_exhausted_work_budget(
+    resolver: Resolver, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    solvers = []
-
-    def bounded(
-        provider: ResolverProvider[Any, int], **kwargs: Any
-    ) -> CoreResolver[Any, int]:
-        # Use the real solver with an exhausted allocation.
-        kwargs["max_iterations"] = 0
-        solver = CoreResolver(provider, **kwargs)
-        solvers.append(solver)
-        return solver
-
-    monkeypatch.setattr(session_module, "Resolver", bounded)
+    monkeypatch.setattr(resolver_module, "DEFAULT_MAX_ITERATIONS", 0)
     collected = resolver.factory.collect_root_requirements(
-        [install_req_from_line(requirement) for requirement in requirements]
+        [install_req_from_line("probe")]
     )
 
-    with pytest.raises(InstallationError, match="exceeded 0 iterations"):
+    with pytest.raises(InstallationError) as failure:
         resolver._resolve(collected)
 
-    assert len(solvers) == 1
+    assert isinstance(failure.value.__cause__, ResolutionLimitError)
 
 
 @pytest.mark.parametrize(

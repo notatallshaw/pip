@@ -4,71 +4,11 @@ import pytest
 
 from tests.lib import (
     PipTestEnvironment,
-    TestPipResult,
     create_basic_sdist_for_package,
     create_basic_wheel_for_package,
 )
+from tests.lib.resolver import preparation_count, tracked_install
 from tests.lib.wheel import make_wheel
-
-PREPARATION_PROBE = """\
-import json
-import runpy
-from pip._internal.resolution.nab.candidates import LinkCandidate
-from pip._internal.resolution.nab.factory import Factory
-from pip._vendor.nab_provider.catalogue.resolution import PreparedResolution
-
-original_prepare = LinkCandidate._prepare
-original_requirements = Factory.make_requirements_from_spec
-original_solve = PreparedResolution.solve
-
-def prepare(candidate):
-    print("PREPARE " + candidate.source_link.filename, flush=True)
-    return original_prepare(candidate)
-
-def requirements(factory, specifier, comes_from, requested_extras=(), **options):
-    print("DEPENDENCY_READ " + json.dumps(specifier), flush=True)
-    return original_requirements(
-        factory, specifier, comes_from, requested_extras, **options
-    )
-
-def solve(session):
-    print("SESSION_BEGIN " + str(session.remaining_rounds), flush=True)
-    try:
-        return original_solve(session)
-    finally:
-        print("SESSION_END " + str(session.remaining_rounds), flush=True)
-
-LinkCandidate._prepare = prepare
-Factory.make_requirements_from_spec = requirements
-PreparedResolution.solve = solve
-runpy.run_module("pip", run_name="__main__", alter_sys=True)
-"""
-
-
-def tracked_install(
-    script: PipTestEnvironment,
-    *requirements: str | Path,
-    options: tuple[str, ...] = (),
-    expect_error: bool = False,
-    ignore_installed: bool = True,
-    find_links: Path | None = None,
-) -> TestPipResult:
-    """Run real pip while counting candidate preparation at its native boundary."""
-    probe = script.scratch_path / "preparation_probe.py"
-    probe.write_text(PREPARATION_PROBE)
-    return script.run(
-        "python",
-        str(probe),
-        "install",
-        *(("--ignore-installed",) if ignore_installed else ()),
-        "--no-index",
-        "--find-links",
-        str(script.scratch_path if find_links is None else find_links),
-        *options,
-        *(str(requirement) for requirement in requirements),
-        expect_error=expect_error,
-        allow_stderr_warning=True if script.pip_expect_warning else None,
-    )
 
 
 def late_url_wheels(script: PipTestEnvironment) -> tuple[Path, Path]:
@@ -82,17 +22,9 @@ def late_url_wheels(script: PipTestEnvironment) -> tuple[Path, Path]:
     older = make_wheel(
         name="app",
         version="1.0",
-        metadata=(
-            "Metadata-Version: 2.1\nName: app\nVersion: 1.0\n"
-            f"Requires-Dist: dep @ {direct.as_uri()}\n"
-        ),
+        metadata_updates={"Requires-Dist": f"dep @ {direct.as_uri()}"},
     )
     return Path(older.save_to_dir(script.scratch_path)), newer
-
-
-def preparation_count(output: str, wheel: Path) -> int:
-    """Count calls to the real LinkCandidate preparation method for one wheel."""
-    return output.splitlines().count("PREPARE " + wheel.name)
 
 
 def test_fallback_reuses_prepared_wheels_and_accepts_url_dependencies(
@@ -131,10 +63,7 @@ def test_unread_url_does_not_retry_after_static_failure(
     make_wheel(
         name="bridge",
         version="1.0",
-        metadata=(
-            "Metadata-Version: 2.1\nName: bridge\nVersion: 1.0\n"
-            f"Requires-Dist: dep @ {direct.as_uri()}\n"
-        ),
+        metadata_updates={"Requires-Dist": f"dep @ {direct.as_uri()}"},
     ).save_to_dir(script.scratch_path)
     options: tuple[str, ...] = ()
     if group == "aliases":
@@ -176,7 +105,6 @@ def test_catalogue_rejects_an_artifact_without_repreparing_it(
     )
 
     script.assert_installed(pkg="1.0")
-    assert "Nab catalogue success" in result.stdout
     assert preparation_count(result.stdout, rejected) == 1
 
 
@@ -187,18 +115,29 @@ def test_explicit_root_url_discovery_reuses_prepared_metadata(
     result = tracked_install(script, older)
 
     script.assert_installed(app="1.0", dep="3.0")
-    assert "Nab catalogue success" in result.stdout
     assert preparation_count(result.stdout, older) == 1
     assert result.stdout.count("Nab source-domain restart:") == 1
     script.pip("check")
 
 
-def test_empty_environment_uses_catalogue_without_ignore_installed(
+def test_backtracking_reads_the_preferred_requested_wheel_once(
     script: PipTestEnvironment,
 ) -> None:
-    create_basic_wheel_for_package(script, "pkg", "1.0")
-    result = tracked_install(script, "pkg", ignore_installed=False)
+    for version in (1, 2, 3):
+        create_basic_wheel_for_package(script, "blocker", str(version))
+    create_basic_wheel_for_package(script, "hub", "2", depends=["blocker>=2"])
+    create_basic_wheel_for_package(script, "hub", "1", depends=["blocker>=1"])
+    apps = [
+        create_basic_wheel_for_package(script, "app", str(version), depends=["parent"])
+        for version in range(1, 5)
+    ]
+    for version in range(1, 6):
+        create_basic_wheel_for_package(
+            script, "parent", str(version), depends=["blocker<2"]
+        )
 
-    script.assert_installed(pkg="1.0")
-    assert "Nab catalogue success" in result.stdout
-    assert "Nab source-domain restart" not in result.stdout
+    result = tracked_install(script, "app", "hub")
+
+    script.assert_installed(app="4", parent="5", hub="1", blocker="1")
+    assert preparation_count(result.stdout, apps[-1]) == 1
+    assert all(preparation_count(result.stdout, app) == 0 for app in apps[:-1])

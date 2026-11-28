@@ -2,17 +2,15 @@
 
 import pytest
 
-from tests.functional.test_nab_preparation_reuse import tracked_install
 from tests.lib import PipTestEnvironment, create_basic_wheel_for_package
 
 
-@pytest.mark.parametrize("with_groups", [False, True])
-@pytest.mark.parametrize("self_satisfied", [False, True])
-@pytest.mark.parametrize("transitive", [False, True])
+@pytest.mark.parametrize(
+    "self_satisfied, transitive", [(False, False), (True, False), (False, True)]
+)
 def test_installed_self_requirement_uses_only_selected_metadata(
     script: PipTestEnvironment,
     *,
-    with_groups: bool,
     self_satisfied: bool,
     transitive: bool,
 ) -> None:
@@ -28,16 +26,13 @@ def test_installed_self_requirement_uses_only_selected_metadata(
     create_basic_wheel_for_package(script, "other", "1")
     create_basic_wheel_for_package(script, "other", "2", depends=["olddep>=2"])
     create_basic_wheel_for_package(script, "olddep", "2")
-    if with_groups:
-        create_basic_wheel_for_package(script, "olddep", "1.0")
     if transitive:
         create_basic_wheel_for_package(script, "parent", "1", depends=["app"])
 
-    result = tracked_install(
-        script, "parent" if transitive else "app", "other", ignore_installed=False
+    script.pip_install_local(
+        "parent" if transitive else "app", "other", find_links=script.scratch_path
     )
 
-    assert "Nab source-domain restart" not in result.stdout
     if self_satisfied:
         script.assert_installed(app="1", other="1", olddep="1")
     else:

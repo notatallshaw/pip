@@ -17,22 +17,19 @@ def test_index_self_url_keeps_source_mode_and_checks_hashes(
     wheel = make_wheel(
         name="pkg",
         version="2.0",
-        metadata=(
-            "Metadata-Version: 2.1\nName: pkg\nVersion: 2.0\nProvides-Extra: speed\n"
-            f"Requires-Dist: pkg @ {path.as_uri()}#{fragment}{marker}\n"
-        ),
+        metadata_updates={
+            "Provides-Extra": "speed",
+            "Requires-Dist": f"pkg @ {path.as_uri()}#{fragment}{marker}",
+        },
     )
     wheel.save_to(path)
     requirement = "pkg[speed]==2.0" if with_extra else "pkg==2.0"
     report = script.scratch_path / "report.json"
-    result = script.pip(
-        "install",
-        "--no-index",
-        "--find-links",
-        script.scratch_path,
+    result = script.pip_install_local(
         "--report",
         report,
         requirement,
+        find_links=script.scratch_path,
         expect_error=wrong_hash,
     )
     if wrong_hash:

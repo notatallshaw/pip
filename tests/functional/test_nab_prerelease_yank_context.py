@@ -1,7 +1,7 @@
 import pytest
 
-from tests.functional.test_nab_catalogue_yanked import yanked_listing
 from tests.lib import PipTestEnvironment
+from tests.lib.resolver import yanked_listing
 
 
 @pytest.mark.parametrize("unrelated", [False, True])
@@ -19,7 +19,5 @@ def test_unmatched_yank_cannot_admit_a_prerelease(
         roots = ["dep>=3"]
     listing = yanked_listing(script, packages, withdrawn=withdrawn)
 
-    script.pip(
-        "install", "--no-index", "--find-links", listing, *roots, expect_error=True
-    )
+    script.pip_install_local(*roots, find_links=listing, expect_error=True)
     script.assert_not_installed("dep")

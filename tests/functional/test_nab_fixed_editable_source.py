@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pytest
 
-from tests.functional.test_nab_preparation_reuse import tracked_install
 from tests.lib import PipTestEnvironment
 from tests.lib.wheel import make_wheel
 
@@ -64,12 +63,14 @@ def test_matching_dependency_url_uses_the_fixed_source_mode(
 ) -> None:
     source = script.scratch_path / "source"
     directory_source(source)
-    metadata = "Metadata-Version: 2.1\nName: app\nVersion: 1\n"
-    metadata += f"Requires-Dist: dep @ {source.as_uri()}\n"
-    make_wheel("app", "1", metadata=metadata).save_to_dir(script.scratch_path)
+    make_wheel(
+        "app", "1", metadata_updates={"Requires-Dist": f"dep @ {source.as_uri()}"}
+    ).save_to_dir(script.scratch_path)
     roots = ("-e", source.as_uri(), "app") if editable else (source.as_uri(), "app")
 
-    result = tracked_install(script, *roots, options=("--no-build-isolation",))
+    result = script.pip_install_local(
+        "--ignore-installed", *roots, find_links=script.scratch_path
+    )
 
     assert "Nab source-domain restart" not in result.stdout
     script.assert_installed(app="1", dep="1")
@@ -89,16 +90,16 @@ def test_fixed_editable_source_does_not_override_a_different_directory(
     other = script.scratch_path / "other"
     directory_source(source)
     directory_source(other)
-    metadata = "Metadata-Version: 2.1\nName: app\nVersion: 1\n"
-    metadata += f"Requires-Dist: dep @ {other.as_uri()}\n"
-    make_wheel("app", "1", metadata=metadata).save_to_dir(script.scratch_path)
+    make_wheel(
+        "app", "1", metadata_updates={"Requires-Dist": f"dep @ {other.as_uri()}"}
+    ).save_to_dir(script.scratch_path)
 
-    tracked_install(
-        script,
+    script.pip_install_local(
+        "--ignore-installed",
         "-e",
         source.as_uri(),
         "app",
-        options=("--no-build-isolation",),
+        find_links=script.scratch_path,
         expect_error=True,
     )
 

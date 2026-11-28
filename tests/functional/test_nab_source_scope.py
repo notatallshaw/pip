@@ -2,19 +2,18 @@ import hashlib
 import json
 from itertools import repeat
 from pathlib import Path
-from textwrap import dedent
 from typing import TYPE_CHECKING
 
 import pytest
 
 from pip._vendor.packaging.utils import canonicalize_name
 
-from tests.functional.test_nab_preparation_reuse import (
-    PREPARATION_PROBE,
+from tests.lib import PipTestEnvironment, create_basic_wheel_for_package
+from tests.lib.resolver import (
+    PREPARATION_RUNNER,
     preparation_count,
     tracked_install,
 )
-from tests.lib import PipTestEnvironment, create_basic_wheel_for_package
 from tests.lib.server import MockServer
 from tests.lib.wheel import make_wheel
 
@@ -37,17 +36,10 @@ def test_url_from_rejected_parent_does_not_replace_installed_candidate(
     make_wheel(
         name="app",
         version="2.0",
-        metadata=dedent(f"""\
-            Metadata-Version: 2.1
-            Name: app
-            Version: 2.0
-            Requires-Dist: dep @ {replacement.as_uri()}
-            """),
+        metadata_updates={"Requires-Dist": f"dep @ {replacement.as_uri()}"},
     ).save_to(script.scratch_path / "app-2.0-py2.py3-none-any.whl")
 
-    script.pip(
-        "install", "--no-index", "--find-links", script.scratch_path, "dep", "app"
-    )
+    script.pip_install_local("dep", "app", find_links=script.scratch_path)
 
     script.assert_installed(app="1.0", dep="1.0")
 
@@ -67,15 +59,10 @@ def test_urls_from_alternative_parent_versions_are_independent(
         make_wheel(
             name="app",
             version=version,
-            metadata=dedent(f"""\
-                Metadata-Version: 2.1
-                Name: app
-                Version: {version}
-                Requires-Dist: dep @ {wheel.as_uri()}
-                """),
+            metadata_updates={"Requires-Dist": f"dep @ {wheel.as_uri()}"},
         ).save_to(script.scratch_path / f"app-{version}-py2.py3-none-any.whl")
 
-    script.pip("install", "--no-index", "--find-links", script.scratch_path, "app")
+    script.pip_install_local("app", find_links=script.scratch_path)
 
     script.assert_installed(app="1.0", dep="1.0")
 
@@ -88,13 +75,15 @@ def source_wheel(
     *,
     feature: bool = False,
 ) -> Path:
-    # Raw headers keep long dependency URLs on one line.
-    metadata = f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n"
-    if feature:
-        metadata += "Provides-Extra: feature\n"
-    metadata += "".join(f"Requires-Dist: {dependency}\n" for dependency in dependencies)
     path = directory / f"{name}-{version}-py3-none-any.whl"
-    make_wheel(name, version, metadata=metadata).save_to(path)
+    make_wheel(
+        name,
+        version,
+        metadata_updates={
+            "Requires-Dist": list(dependencies),
+            "Provides-Extra": ["feature"] if feature else [],
+        },
+    ).save_to(path)
     return path
 
 
@@ -188,31 +177,23 @@ def test_named_parent_uses_exact_url_child_without_index_query(
     auxiliary = None
     if reconsider:
         auxiliary = create_basic_wheel_for_package(script, "uri-aux", "2")
-        metadata = (
-            "Metadata-Version: 2.1\nName: uri-child\nVersion: 1\n"
-            f"Requires-Dist: uri-aux @ {auxiliary.as_uri()}\n"
+        make_wheel(
+            "uri_child",
+            "1",
+            metadata_updates={"Requires-Dist": f"uri-aux @ {auxiliary.as_uri()}"},
+        ).save_to(child)
+        latest = create_basic_wheel_for_package(
+            script, "uri-parent", "2", depends=["uri-aux>=2", child_requirement]
         )
-        make_wheel("uri_child", "1", metadata=metadata).save_to(child)
-        metadata = (
-            "Metadata-Version: 2.1\nName: uri-parent\nVersion: 2\n"
-            "Requires-Dist: uri-aux>=2\n"
-            f"Requires-Dist: {child_requirement}\n"
-        )
-        latest = script.scratch_path / "uri_parent-2-py3-none-any.whl"
-        make_wheel("uri_parent", "2", metadata=metadata).save_to(latest)
         expected["uri-aux"] = ("2", auxiliary)
     else:
         latest = create_basic_wheel_for_package(
             script, "uri-parent", "2", depends=["absent-child==1"]
         )
 
-    # Raw headers keep the declared child URL intact.
-    metadata = (
-        "Metadata-Version: 2.1\nName: uri-parent\nVersion: 1\n"
-        f"Requires-Dist: {child_requirement}\n"
+    older = create_basic_wheel_for_package(
+        script, "uri-parent", "1", depends=[child_requirement]
     )
-    older = script.scratch_path / "uri_parent-1-py3-none-any.whl"
-    make_wheel("uri_parent", "1", metadata=metadata).save_to(older)
     expected["uri-parent"] = ("2", latest) if reconsider else ("1", older)
 
     def index(
@@ -229,13 +210,11 @@ def test_named_parent_uses_exact_url_child_without_index_query(
 
     mock_server.set_responses(repeat(index))
     mock_server.start()
-    probe = script.scratch_path / "preparation_probe.py"
-    probe.write_text(PREPARATION_PROBE)
     report = script.scratch_path / "exact-child-report.json"
     try:
         result = script.run(
             "python",
-            str(probe),
+            str(PREPARATION_RUNNER),
             "install",
             "--no-cache-dir",
             "--index-url",
