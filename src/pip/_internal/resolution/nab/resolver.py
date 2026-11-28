@@ -330,28 +330,16 @@ def get_topological_weights(
         cur_weights.append(len(path))
         weights[node] = cur_weights
 
-    while True:
-        leaves = set()
-        for key in graph:
-            if key is None:
-                continue
-
-            for _child in graph[key]:
-                break
-            else:
-                leaves.add(key)
-
-        if not leaves:
-            break
-
+    # Prune whole layers before walking the part of the graph that contains cycles.
+    while leaves := {
+        key for key, children in graph.items() if key is not None and not children
+    }:
         weight = len(graph) - 1
         for leaf in leaves:
-            if leaf not in requirement_keys:
-                continue
-            weights[leaf] = [weight]
-
-        for leaf in leaves:
+            if leaf in requirement_keys:
+                weights[leaf] = [weight]
             del graph[leaf]
+
         for children in graph.values():
             children.difference_update(leaves)
 
@@ -359,7 +347,7 @@ def get_topological_weights(
     visit(None)
 
     # Only installation keys may have weights.
-    difference = set(weights.keys()).difference(requirement_keys)
+    difference = weights.keys() - requirement_keys
     assert not difference, difference
 
     return {node: max(wgts) for (node, wgts) in weights.items()}
