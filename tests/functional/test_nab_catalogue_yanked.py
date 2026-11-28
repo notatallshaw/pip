@@ -25,6 +25,14 @@ def test_transitive_pin_keeps_the_parent_without_a_restart(
             ("app", "1.0", ["dep==1.0"]),
         ],
     )
+    # The first file at dep 2 cannot satisfy its own dependency.
+    live = listing.parent / "files" / "dep-2.0-1-py3-none-any.whl"
+    make_wheel("dep", "2.0", metadata_updates={"Requires-Dist": "missing"}).save_to(
+        live
+    )
+    with listing.open("a") as page:
+        page.write(f'\n<a href="{live.as_uri()}">{live.name}</a>')
+
     result = script.pip_install_local(
         "--ignore-installed", "app", find_links=listing, allow_stderr_warning=True
     )
