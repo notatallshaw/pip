@@ -101,6 +101,9 @@ Modifications
   ``pip._vendor``.
 * ``nab-resolver`` includes support for deferring candidate choices and
   reading the original dependency requests from a failed resolution.
+* ``nab-provider`` 0.0.31 carries a backport of the standalone ``nab-candidates``
+  package under ``nab_provider.catalogue``. pip supplies file order, metadata and
+  installation policy. Both nab patches apply to the published 0.0.31 wheels.
 * ``CacheControl`` has been modified to import its dependencies from
   ``pip._vendor``.
 * ``requests`` has been modified to import its other dependencies from

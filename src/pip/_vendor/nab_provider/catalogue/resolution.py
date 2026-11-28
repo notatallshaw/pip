@@ -1,0 +1,487 @@
+"""Resolve prepared catalogues and return their selected dependency graph."""
+
+from __future__ import annotations
+
+from collections.abc import Hashable, Mapping
+from itertools import islice
+from typing import TYPE_CHECKING, Generic, TypeVar
+
+from pip._vendor.nab_resolver.errors import (
+    ResolutionError,
+    ResolutionInvariantError,
+    ResolutionTerminatedError,
+)
+from pip._vendor.nab_resolver.ranges import Range
+from pip._vendor.nab_resolver.resolver import Resolver
+from pip._vendor.nab_resolver.result import IncompleteSelectionError, walk_selected
+
+from ._compat import override
+from .preference import dependency_names
+from .provider import MetadataProxy, Package, PreferenceProvider
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Collection, Iterable, Iterator, Sequence
+
+    from pip._vendor.nab_resolver.resolver import ResolverProvider, ResolverStats
+    from pip._vendor.nab_resolver.types import RangeProtocol
+
+    from .provider import CataloguePreference, PreparedCatalogue
+
+__all__ = ["PreparedResolution", "PreparedSolution"]
+
+CandidateType = TypeVar("CandidateType", bound=Hashable)
+RangeType = TypeVar("RangeType")
+PinnedRequirementType = TypeVar("PinnedRequirementType")
+
+
+class PreparedSolution(Generic[CandidateType]):
+    """Selected candidate identities, dependency edges and admission reasons."""
+
+    __slots__ = ("admission_sources", "candidates", "edges", "roots")
+
+    def __init__(
+        self,
+        candidates: dict[str, CandidateType],
+        edges: tuple[tuple[str, str], ...],
+        roots: tuple[str, ...],
+        admission_sources: dict[str, tuple[str, ...]],
+    ) -> None:
+        """Store the candidates, roots, dependency edges and reasons for yanks."""
+        self.candidates = candidates
+        self.edges = edges
+        self.roots = roots
+        self.admission_sources = admission_sources
+
+
+class PreparedResolution(Generic[CandidateType, RangeType, PinnedRequirementType]):
+    """Share cached metadata and a solver round limit across selection attempts."""
+
+    def __init__(
+        self,
+        provider: PreferenceProvider[CandidateType, RangeType, PinnedRequirementType],
+        *,
+        metadata_admission: Callable[[CandidateType, Mapping[str, CandidateType]], bool]
+        | None = None,
+        preferred_candidate: Callable[[str], CandidateType | None] | None = None,
+        try_live: bool = False,
+    ) -> None:
+        """Configure candidate selection using the provider's cached metadata."""
+        self.provider = provider
+        self.metadata_admission = metadata_admission
+        self.preferred_candidate = preferred_candidate
+        self.try_live = try_live
+        if preferred_candidate is not None:
+            provider.preferred_candidate = preferred_candidate
+
+    @classmethod
+    def from_catalogue(  # noqa: PLR0913 - preserve independent catalogue callbacks
+        cls,
+        catalogue: PreparedCatalogue[CandidateType, RangeType, PinnedRequirementType],
+        roots: Mapping[str, RangeType],
+        input_pins: Sequence[PinnedRequirementType],
+        constraints: Mapping[str, RangeType],
+        *,
+        refresh_incomplete: bool = False,
+        selection_policy: Callable[[Mapping[str, CandidateType]], bool] | None = None,
+        preferred_candidate: Callable[[str], CandidateType | None] | None = None,
+        on_candidate_considered: Callable[[CandidateType], None] | None = None,
+        exact_dependencies: Callable[[CandidateType], Sequence[CandidateType]]
+        | None = None,
+        max_rounds: int | None = None,
+        try_live: bool = False,
+    ) -> PreparedResolution[CandidateType, RangeType, PinnedRequirementType]:
+        """Resolve files using the supplied catalogue and selection rules.
+
+        ``try_live`` first excludes withdrawn choices, returning to admission
+        proofs when a matching exact pin could permit one.
+        """
+        admission = (
+            None
+            if selection_policy is None
+            else _SelectedAdmission(catalogue, roots, selection_policy)
+        )
+        provider = PreferenceProvider.from_catalogue(
+            catalogue,
+            roots,
+            input_pins,
+            constraints,
+            refresh_incomplete=refresh_incomplete,
+            metadata_is_admitted=admission,
+            on_candidate_considered=on_candidate_considered,
+            exact_dependencies=exact_dependencies,
+        )
+        if max_rounds is not None:
+            provider.preference.remaining = max_rounds
+        session = cls(
+            provider,
+            metadata_admission=admission,
+            preferred_candidate=preferred_candidate,
+            try_live=try_live,
+        )
+        if refresh_incomplete:
+            provider.resolver_factory = session._new_resolver
+        return session
+
+    @property
+    def stats(self) -> ResolverStats[Hashable]:
+        """Return cumulative work across preferred and ordinary queries."""
+        return self.provider.stats
+
+    @property
+    def remaining_rounds(self) -> int:
+        """Return the solver rounds remaining across this session's queries."""
+        return self.provider.preference.remaining
+
+    def _new_resolver(
+        self, provider: ResolverProvider[Package, int], limit: int
+    ) -> Resolver[Package, int]:
+        """Refresh deferred queries only when this snapshot gains a real fact."""
+        return Resolver(
+            provider,
+            max_iterations=limit,
+            availability_generation=lambda: len(self.provider.catalogue.facts),
+        )
+
+    def _try_preferred(self) -> dict[str, CandidateType] | None:
+        """Validate a disposable incumbent-only view without proving global absence."""
+        preferred = self.preferred_candidate
+        if preferred is None or not self.provider.roots:
+            return None
+
+        trial = _PreferredProvider(
+            self.provider.preference,
+            preferred,
+            metadata_is_admitted=self.metadata_admission,
+            on_candidate_considered=self.provider.on_candidate_considered,
+        )
+        if any(trial.preferred(package) is None for package in self.provider.roots):
+            return None
+
+        resolver = Resolver(trial, max_iterations=self.provider.preference.remaining)
+        roots: dict[Package, RangeProtocol[int]] = {
+            package: trial.encode_range(package, allowed)
+            for package, allowed in self.provider.roots.items()
+        }
+        try:
+            selected = resolver.try_resolve_preferred(roots, _PreferredTokens(trial))
+        except ResolutionTerminatedError:
+            raise
+        except ResolutionError:
+            return None
+        finally:
+            self.provider.preference.record_solver_stats(resolver.stats)
+            self.provider.preference.spend(resolver.stats.rounds)
+
+        if selected is None:
+            return None
+
+        return {
+            package: trial.items[token]
+            for package, token in selected.items()
+            if isinstance(package, str)
+        }
+
+    def try_live_candidates(self) -> dict[str, CandidateType] | None:
+        """Try live choices, yielding to admission proofs when an exact pin matters."""
+        self.provider.preference.require_remaining_rounds()
+        trial = _LiveProvider(
+            self.provider.preference,
+            preferred_candidate=self.preferred_candidate,
+            on_candidate_considered=self.provider.on_candidate_considered,
+        )
+        trial.items = self.provider.items
+        trial.identities = self.provider.identities
+        trial.package_tokens = self.provider.package_tokens
+        resolver = self._new_resolver(trial, self.remaining_rounds)
+        try:
+            roots: dict[Package, Range[int]] = {
+                name: trial.encode_range(name, allowed)
+                for name, allowed in trial.roots.items()
+            }
+            pins = resolver.resolve(roots)
+        except _WithdrawalProofRequiredError:
+            return None
+        except ResolutionTerminatedError:
+            raise
+        except ResolutionError:
+            return None
+        finally:
+            self.provider.preference.record_solver_stats(resolver.stats)
+            self.provider.preference.spend(resolver.stats.rounds)
+
+        selected = {
+            name: trial.items[token]
+            for name, token in pins.items()
+            if isinstance(name, str)
+        }
+        if trial.incomplete:
+            return None
+
+        return selected if self.admits_selection(selected) else None
+
+    def admits_selection(self, selected: Mapping[str, CandidateType]) -> bool:
+        """Apply the host's metadata policy to a complete model."""
+        admission = self.metadata_admission
+        if admission is None:
+            return True
+
+        subjects: Iterable[CandidateType] = selected.values()
+        if isinstance(admission, _SelectedAdmission):
+            # One requested root validates the whole reachable model.
+            subjects = (selected[name] for name in islice(self.provider.roots, 1))
+        return all(admission(candidate, selected) for candidate in subjects)
+
+    def select(self) -> dict[str, CandidateType]:
+        """Select exact candidates within the shared query budget."""
+        self.provider.preference.require_remaining_rounds()
+        try:
+            selected = self._try_preferred()
+            if selected is None and self.try_live:
+                selected = self.try_live_candidates()
+            if selected is None:
+                selected = self.provider.select()
+        except ResolutionTerminatedError:
+            raise
+        except Exception:
+            self.provider.preference.require_remaining_rounds()
+            raise
+        return selected
+
+    def solve(self) -> PreparedSolution[CandidateType]:
+        """Return the selected candidates and their prepared dependency graph."""
+        selected = self.select()
+        edges: list[tuple[str, str]] = []
+        for package, candidate in selected.items():
+            data = self.provider.catalogue.facts.get(candidate)
+            if data is None:
+                message = f"Selected candidate {candidate!r} has no prepared metadata"
+                raise ResolutionInvariantError(message)
+
+            base = self.provider.catalogue.candidate_base(candidate)
+            edges.extend(
+                (package, child)
+                for child in dependency_names(package, base, data.dependencies)
+            )
+
+        return PreparedSolution(
+            selected,
+            tuple(edges),
+            tuple(self.provider.roots),
+            self.provider.preference.explain(selected),
+        )
+
+
+class _WithdrawalProofRequiredError(Exception):
+    """An observed exact declaration can permit a withdrawn candidate."""
+
+
+class _LiveProvider(
+    PreferenceProvider[CandidateType, RangeType, PinnedRequirementType]
+):
+    """Keep metadata sequencing while trying live choices before admission proofs."""
+
+    def __init__(
+        self,
+        preference: CataloguePreference[
+            CandidateType, RangeType, PinnedRequirementType
+        ],
+        *,
+        preferred_candidate: Callable[[str], CandidateType | None] | None,
+        on_candidate_considered: Callable[[CandidateType], None] | None,
+    ) -> None:
+        super().__init__(
+            preference,
+            preferred_candidate=preferred_candidate,
+            on_candidate_considered=on_candidate_considered,
+        )
+        self.pins: Sequence[PinnedRequirementType] = self.input_pins
+
+    @override
+    def receive_decision_scan_hint(
+        self,
+        positive_ranges: Mapping[Package, RangeProtocol[int]],
+        decisions: Mapping[Package, int],
+    ) -> None:
+        self.positive = positive_ranges
+        self.decisions = decisions
+
+    @override
+    def is_ready(self, package: Package) -> bool:
+        """Live metadata needs no withdrawal-permission proof."""
+        del package
+        return True
+
+    @override
+    def eligible(self, candidate: CandidateType) -> bool:
+        if self.catalogue.candidate_withdrawn(candidate):
+            if any(self.catalogue.pin_allows(pin, candidate) for pin in self.pins):
+                raise _WithdrawalProofRequiredError
+            return False
+        return super().eligible(candidate)
+
+    @override
+    def get_dependencies(
+        self, package: Package, version: int
+    ) -> dict[Package, Range[int]]:
+        if not isinstance(package, MetadataProxy):
+            return super().get_dependencies(package, version)
+
+        data = self.prepared_data(package.candidate)
+        self.pins = (*self.input_pins, *data.pins)
+        try:
+            return super().get_dependencies(package, version)
+        finally:
+            self.pins = self.input_pins
+
+
+class _SelectedAdmission(Generic[CandidateType, RangeType, PinnedRequirementType]):
+    """Apply the selection policy once all reachable dependencies are known."""
+
+    def __init__(
+        self,
+        catalogue: PreparedCatalogue[CandidateType, RangeType, PinnedRequirementType],
+        roots: Mapping[str, RangeType],
+        selection_is_admitted: Callable[[Mapping[str, CandidateType]], bool],
+    ) -> None:
+        self.catalogue = catalogue
+        self.roots = roots
+        self.selection_is_admitted = selection_is_admitted
+
+    def _dependency_names(
+        self, package: str, candidate: CandidateType
+    ) -> Collection[str] | None:
+        data = self.catalogue.facts.get(candidate)
+        if data is None:
+            return None
+
+        base = self.catalogue.candidate_base(candidate)
+        return dependency_names(package, base, data.dependencies)
+
+    def __call__(
+        self, candidate: CandidateType, selected: Mapping[str, CandidateType]
+    ) -> bool:
+        try:
+            reachable = {
+                name: choice
+                for name, choice, _ in walk_selected(
+                    self.roots, selected, self._dependency_names, depth_first=True
+                )
+            }
+        except IncompleteSelectionError:
+            return True
+
+        return candidate not in reachable.values() or self.selection_is_admitted(
+            reachable
+        )
+
+
+class _PreferredProvider(
+    PreferenceProvider[CandidateType, RangeType, PinnedRequirementType]
+):
+    """Offer one eligible incumbent per package only for a disposable SAT trial."""
+
+    def __init__(
+        self,
+        preference: CataloguePreference[
+            CandidateType, RangeType, PinnedRequirementType
+        ],
+        preferred: Callable[[str], CandidateType | None],
+        *,
+        metadata_is_admitted: Callable[
+            [CandidateType, Mapping[str, CandidateType]], bool
+        ]
+        | None,
+        on_candidate_considered: Callable[[CandidateType], None] | None = None,
+    ) -> None:
+        super().__init__(
+            preference,
+            metadata_is_admitted=metadata_is_admitted,
+            on_candidate_considered=on_candidate_considered,
+        )
+        self.read_preferred = preferred
+        self.preferred_choices: dict[str, CandidateType | None] = {}
+
+    def preferred(self, package: str) -> CandidateType | None:
+        if package not in self.preferred_choices:
+            candidate = self.read_preferred(package)
+            if candidate is not None and self.catalogue.candidate_withdrawn(candidate):
+                candidate = None
+            self.preferred_choices[package] = candidate
+        return self.preferred_choices[package]
+
+    @override
+    def receive_partial_solution_hint(
+        self,
+        positive_ranges: Mapping[Package, RangeProtocol[int]],
+        decisions: Mapping[Package, int],
+    ) -> None:
+        """Preferred validation queries directly instead of running a package scan."""
+        self.receive_decision_scan_hint(positive_ranges, decisions)
+
+    @override
+    def encode_range(self, package: str, allowed: RangeType) -> Range[int]:
+        candidate = self.preferred(package)
+        allowed = self.catalogue.intersect_ranges(
+            allowed, self.constraints.get(package, self.catalogue.full_range())
+        )
+        if candidate is None or not self.catalogue.range_contains(candidate, allowed):
+            return Range[int].empty()
+        return Range[int].singleton(self.identify(candidate))
+
+    @override
+    def choose_version(
+        self, package: Package, version_range: RangeProtocol[int]
+    ) -> int | None:
+        if not isinstance(package, str):
+            return super().choose_version(package, version_range)
+
+        candidate = self.preferred(package)
+        if candidate is None:
+            return None
+        token = self.identify(candidate)
+        if token not in version_range:
+            return None
+
+        # A refused trial still considered its real candidate choices.
+        if self.on_candidate_considered is not None:
+            self.on_candidate_considered(candidate)
+        return token
+
+
+class _PreferredTokens(
+    Mapping[Package, int], Generic[CandidateType, RangeType, PinnedRequirementType]
+):
+    """Discover expected tokens lazily as the incumbent model grows."""
+
+    def __init__(
+        self,
+        provider: _PreferredProvider[CandidateType, RangeType, PinnedRequirementType],
+    ) -> None:
+        self.provider = provider
+
+    @override
+    def __getitem__(self, package: Package) -> int:
+        if (
+            isinstance(package, MetadataProxy)
+            and package.candidate in self.provider.items
+        ):
+            return 0
+        if isinstance(package, str):
+            candidate = self.provider.preferred(package)
+            if candidate is not None:
+                return self.provider.identify(candidate)
+        raise KeyError(package)
+
+    @override
+    def __iter__(self) -> Iterator[Package]:
+        for package, candidate in self.provider.preferred_choices.items():
+            if candidate is not None:
+                yield package
+                yield MetadataProxy(self.provider.identify(candidate))
+
+    @override
+    def __len__(self) -> int:
+        return 2 * sum(
+            candidate is not None
+            for candidate in self.provider.preferred_choices.values()
+        )
