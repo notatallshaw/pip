@@ -21,6 +21,7 @@ from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING, Final, NoReturn
 
+from pip._vendor.nab_provider.catalogue.preference import IncompletePreferenceError
 from pip._vendor.nab_provider.catalogue.releases import PreparedVersionResolution
 from pip._vendor.nab_provider.catalogue.versions import (
     PreparedVersionCatalogue,
@@ -28,7 +29,6 @@ from pip._vendor.nab_provider.catalogue.versions import (
     VersionCandidateData,
     is_pin,
 )
-from pip._vendor.nab_provider.catalogue.preference import IncompletePreferenceError
 from pip._vendor.nab_resolver.errors import ResolutionError, ResolutionTerminatedError
 from pip._vendor.packaging.ranges import VersionRange
 from pip._vendor.packaging.utils import canonicalize_name
@@ -71,10 +71,9 @@ from pip._internal.resolution.nab.requirements import (
 from pip._internal.utils.packaging import get_requirement
 
 if TYPE_CHECKING:
-    from pip._vendor.nab_provider.catalogue.resolution import PreparedSolution
-
     from typing_extensions import override
 
+    from pip._vendor.nab_provider.catalogue.resolution import PreparedSolution
     from pip._vendor.packaging.requirements import Requirement as PinDeclaration
 
 else:
@@ -729,6 +728,7 @@ class PipCatalogue(PreparedVersionCatalogue[Candidate, CandidateData]):
         """Authorize sources from rooted declarations or installed self-replacement."""
         if choice.source_key is None:
             return True
+
         constraint = self.collected.constraints.get(choice.base)
         if (
             constraint is not None
@@ -938,7 +938,7 @@ class PipCatalogue(PreparedVersionCatalogue[Candidate, CandidateData]):
         return result
 
     def iter_requirements(self, selected: Iterable[Candidate]) -> Iterator[Requirement]:
-        """Yield the original requirements, including each extra's binding to its base."""
+        """Yield original requirements, including each extra's base requirement."""
         yield from self.collected.requirements
         for choice in selected:
             yield from self.selected_data(choice).requirements
