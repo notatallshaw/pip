@@ -99,6 +99,8 @@ Modifications
   rather than ``appdirs``.
 * ``packaging`` has been modified to import its dependencies from
   ``pip._vendor``.
+* ``nab-resolver`` includes support for deferring candidate choices and
+  reading the original dependency requests from a failed resolution.
 * ``CacheControl`` has been modified to import its dependencies from
   ``pip._vendor``.
 * ``requests`` has been modified to import its other dependencies from
