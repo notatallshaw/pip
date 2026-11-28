@@ -8,6 +8,7 @@ from base64 import urlsafe_b64encode
 from collections import namedtuple
 from collections.abc import Iterable, Mapping, Sequence
 from copy import deepcopy
+from email import policy
 from email.message import Message
 from enum import Enum
 from functools import partial
@@ -100,7 +101,8 @@ def make_metadata_file(
     if body is not _default:
         message.set_payload(body)
 
-    return File(path, message.as_bytes())
+    # Folding a long Requires-Dist header can split a direct URL from its @.
+    return File(path, message.as_bytes(policy=policy.compat32.clone(max_line_length=0)))
 
 
 def make_wheel_metadata_file(

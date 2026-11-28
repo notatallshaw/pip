@@ -7,6 +7,9 @@ from functools import partial
 from pathlib import Path
 from zipfile import ZipFile
 
+from pip._vendor.packaging.metadata import Metadata
+from pip._vendor.packaging.requirements import Requirement
+
 from tests.lib.wheel import (
     File,
     _default,
@@ -54,6 +57,15 @@ def test_make_metadata_file_defaults() -> None:
     f = default_make_metadata()
     assert f is not None
     default_metadata_checks(f)
+
+
+def test_wheel_metadata_preserves_a_direct_requirement_url() -> None:
+    url = f"https://example.org/files/{'a' * 64}/renderer-1-py3-none-any.whl"
+    requirement = Requirement(f"renderer @ {url}")
+    metadata = default_make_metadata(updates={"Requires-Dist": str(requirement)})
+    assert metadata is not None
+
+    assert Metadata.from_email(metadata.contents).requires_dist == [requirement]
 
 
 def test_make_metadata_file_custom_value() -> None:

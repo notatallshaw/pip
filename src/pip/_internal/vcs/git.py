@@ -11,6 +11,7 @@ from typing import Any
 from pip._internal.exceptions import BadCommand, InstallationError
 from pip._internal.utils.misc import HiddenText, display_path, hide_url, strtobool
 from pip._internal.utils.subprocess import make_command
+from pip._internal.utils.temp_dir import TempDirectory, TempDirectoryKind
 from pip._internal.vcs.versioncontrol import (
     AuthInfo,
     RemoteNotFoundError,
@@ -73,6 +74,10 @@ class Git(VersionControl):
     # https://github.com/pypa/pip/issues/1130
     unset_environ = ("GIT_DIR", "GIT_WORK_TREE")
     default_arg_rev = "HEAD"
+
+    def __init__(self, *, reference: str | None = None) -> None:
+        """Borrow immutable objects from the command's reference repository."""
+        self._reference = reference
 
     @staticmethod
     def get_base_rev_args(rev: str) -> list[str]:
@@ -280,6 +285,15 @@ class Git(VersionControl):
             flags = ()
         else:
             flags = ("--verbose", "--progress")
+        if self._reference is not None:
+            flags += ("--reference-if-able", self._reference)
+
+        # A pinned revision may have a different tree from the default branch.
+        deferred_checkout = rev_options.rev is not None and looks_like_hash(
+            rev_options.rev
+        )
+        if deferred_checkout:
+            flags += ("--no-checkout",)
         if self.get_git_version() >= (2, 17) and not strtobool(
             os.environ.get("PIP_NO_PARTIAL_CLONE_FOR_BROKEN_GIT_SERVER", "no")
         ):
@@ -303,28 +317,21 @@ class Git(VersionControl):
             rev_options = self.resolve_revision(dest, url, rev_options)
             branch_name = getattr(rev_options, "branch_name", None)
             logger.debug("Rev options %s, branch_name %s", rev_options, branch_name)
-            if branch_name is None:
-                # Only do a checkout if the current commit id doesn't match
-                # the requested revision.
-                if not self.is_commit_id_equal(dest, rev_options.rev):
-                    cmd_args = make_command(
-                        "checkout",
-                        "-q",
-                        rev_options.to_args(),
-                    )
-                    self.run_command(cmd_args, cwd=dest)
-            elif self.get_current_branch(dest) != branch_name:
-                # Then a specific branch was requested, and that branch
-                # is not yet checked out.
+            if branch_name is not None and self.get_current_branch(dest) != branch_name:
                 track_branch = f"origin/{branch_name}"
-                cmd_args = [
-                    "checkout",
-                    "-b",
-                    branch_name,
-                    "--track",
-                    track_branch,
-                ]
-                self.run_command(cmd_args, cwd=dest)
+                self.run_command(
+                    ["checkout", "-b", branch_name, "--track", track_branch], cwd=dest
+                )
+            elif branch_name is None and not self.is_commit_id_equal(
+                dest, rev_options.rev
+            ):
+                self.run_command(
+                    make_command("checkout", "-q", rev_options.to_args()), cwd=dest
+                )
+            elif deferred_checkout:
+                # HEAD already names the requested commit or branch. A clone
+                # made with --no-checkout still needs its working tree.
+                self.run_command(["checkout", "-q", "--force"], cwd=dest)
         else:
             sha = self.get_revision(dest)
             rev_options = rev_options.make_new(sha)
@@ -569,6 +576,49 @@ class Git(VersionControl):
     def should_add_vcs_url_prefix(repo_url: str) -> bool:
         """In either https or ssh form, requirements must be prefixed with git+."""
         return True
+
+
+class GitObjectCache:
+    """Retain immutable objects for this command's independent source checkouts."""
+
+    def __init__(self) -> None:
+        self._sources: dict[str, str] = {}
+        self._pools: dict[str, str] = {}
+
+    def _reference_for(self, repository: str) -> str | None:
+        """Copy objects once when a repository is requested a second time."""
+        pool = self._pools.get(repository)
+        if pool is not None:
+            return pool
+
+        source = self._sources.get(repository)
+        if source is None or not pathlib.Path(source, ".git").is_dir():
+            return None
+
+        # Borrowers and their pool share the build directory cleanup policy.
+        directory = TempDirectory(
+            kind=TempDirectoryKind.REQ_BUILD, globally_managed=True
+        )
+        Git.run_command(
+            [
+                "clone",
+                "--bare",
+                "--local",
+                "--no-hardlinks",
+                "--quiet",
+                source,
+                directory.path,
+            ]
+        )
+        self._pools[repository] = directory.path
+        return directory.path
+
+    def unpack(self, location: str, url: HiddenText, verbosity: int) -> None:
+        """Keep the first successful checkout for later requests to this repository."""
+        repository, _, _ = Git.get_url_rev_and_auth(url.secret)
+        git = Git(reference=self._reference_for(repository))
+        git.unpack(location, url=url, verbosity=verbosity)
+        self._sources.setdefault(repository, location)
 
 
 vcs.register(Git)
