@@ -85,7 +85,7 @@ logger = logging.getLogger(__name__)
 class Candidate(VersionCandidate):
     """Keep concrete finder files distinct at the same version."""
 
-    __slots__ = ("artifact", "origin", "source_key", "_identity")
+    __slots__ = ("artifact", "origin", "source_key")
     __record_fields__ = (*VersionCandidate.__slots__, "artifact", "source_key")
     __record_init_fields__ = (
         "package",
@@ -114,23 +114,18 @@ class Candidate(VersionCandidate):
         self.artifact = artifact
         self.origin = origin
         self.source_key = source_key
-        self._identity = (
+
+    @override
+    def _comparison_values(self) -> tuple[object, ...]:
+        """Build the shared record's comparison tuple on demand."""
+        return (
             self.package,
             self.version,
             self.withdrawn,
             self.label,
-            artifact,
-            source_key,
+            self.artifact,
+            self.source_key,
         )
-
-    def __eq__(self, other: object) -> bool:
-        if not isinstance(other, Candidate) or type(other) is not type(self):
-            return NotImplemented
-
-        return self._identity == other._identity
-
-    def __hash__(self) -> int:
-        return hash(self._identity)
 
     @property
     @override
@@ -408,7 +403,10 @@ class PipCatalogue(PreparedVersionCatalogue[Candidate, CandidateData]):
             groups.setdefault(
                 (package, candidate.label, candidate.withdrawn), []
             ).append(candidate)
-        self.file_groups.update((key, tuple(values)) for key, values in groups.items())
+        # Only competing files need a remembered finder order.
+        self.file_groups.update(
+            (key, tuple(values)) for key, values in groups.items() if len(values) > 1
+        )
         installed = self.installed_version(package)
         if installed is not None:
             available.insert(0, Candidate(package, installed, withdrawn=False))
@@ -432,6 +430,7 @@ class PipCatalogue(PreparedVersionCatalogue[Candidate, CandidateData]):
             + [candidate for candidate in discovered if candidate not in refinements]
         )
 
+    @override
     def ordered(
         self,
         package: str,
